@@ -1,0 +1,111 @@
+# semimc default configuration (Section 3 of the brief).
+# Every value here is overridable with `--set key.path=value` on any CLI command.
+
+universe:
+  # Grouped for reporting; the flat list is the union of the groups.
+  groups:
+    compute_fabless: [NVDA, AMD, AVGO, QCOM, MRVL, ARM]
+    foundry_idm: [TSM, INTC]
+    memory: [MU]
+    equipment: [ASML, AMAT, LRCX, KLAC]
+    analog: [TXN, ADI]
+
+benchmarks:
+  market: SPY        # open question 1: SPY over QQQ (QQQ is ~half tech, so it would
+  sector: SOXX       # absorb the sector factor). SOXX over SMH (SMH is more top-heavy).
+
+horizons: [21, 63, 126, 252]
+
+simulation:
+  n_paths: 10000
+  seed: 42
+  chunk_size: 2000        # paths simulated per chunk; caps peak memory
+  dtype: float32          # float32 halves path memory; float64 also supported
+  trading_days_per_year: 252
+
+fit:
+  window_years: 5         # rolling fit window
+  min_observations: 750   # a ticker enters only once it has this much history
+  vol_estimator: realized # realized | ewma
+  vol_window_days: 252    # 1-year trailing realized volatility
+  ewma_lambda: 0.94       # RiskMetrics decay, used when vol_estimator = ewma
+
+drift:
+  policy: capm            # capm | risk_free | shrunk_historical | manual
+  equity_risk_premium: 0.05
+  risk_free_rate: 0.042   # used for live forecasts; backtests use the historical series
+  shrinkage_weight: 0.25  # weight on the historical mean under shrunk_historical
+  manual_annual_return: {}   # e.g. {NVDA: 0.12}; required under policy = manual
+  beta_benchmark: market  # betas for CAPM are measured against benchmarks.market
+
+risk:
+  var_levels: [0.95, 0.99]
+  loss_threshold: 0.20    # "probability of losing more than 20%"
+
+data:
+  provider: yfinance      # yfinance | csv
+  cache_dir: data_cache
+  csv_dir: data_csv       # used when provider = csv
+  start: 2000-01-01
+  max_staleness_days: 1   # refetch only when the cache is older than this
+  price_field: adj_close  # adjusted prices are mandatory (Phase 1 of the brief)
+  outlier_sigma: 8.0      # daily moves beyond this many robust sigmas are flagged
+  max_gap_days: 5         # calendar gaps longer than this are flagged
+  earnings_calendar: config/earnings_calendar.csv
+
+backtest:
+  origin_frequency: ME    # month-end forecast origins
+  n_paths: 2000           # fewer paths inside backtests, as the brief allows
+  start: 2012-01-01
+  models: [gbm, bootstrap, garch_t]
+  baseline: gbm
+  coverage_levels: [0.50, 0.90]
+  pit_bins: 10
+  cache_fits: true
+  risk_free_series: config/risk_free_3m.csv   # point-in-time 3-month T-bill
+
+models:
+  bootstrap:
+    block_length: auto    # auto = arch optimal_block_length on the training window
+  garch_t:
+    p: 1
+    o: 1                  # o = 1 gives the GJR asymmetry term
+    q: 1
+    rescale_factor: 100.0 # optimizer stability; converted back after simulation
+  earnings_jumps:
+    base_model: garch_t
+    min_earnings_observations: 8
+    strip_from_training: true
+  factor:
+    idio_model: garch_t
+  fhs:
+    block_length: 1       # 1 = i.i.d. by-date resampling of standardized residuals
+
+portfolio:
+  weights: {}             # empty = equal weight across the requested tickers
+  rebalance: none         # none | monthly | quarterly
+
+scenarios:
+  sector_shock_25:
+    kind: sector_shock
+    shock: -0.25          # instantaneous sector move, propagated through betas
+  vol_spike_2x_21d:
+    kind: vol_multiplier
+    multiplier: 2.0
+    days: 21
+  export_control_china:
+    kind: custom_shock
+    shocks: {NVDA: -0.15, AMD: -0.12, AMAT: -0.18, LRCX: -0.18, KLAC: -0.15, ASML: -0.10}
+  replay_covid_2020:
+    kind: historical_replay
+    start: 2020-02-19
+    end: 2020-03-23
+  replay_2022_derating:
+    kind: historical_replay
+    start: 2022-01-03
+    end: 2022-10-14
+
+reporting:
+  fan_percentiles: [5, 25, 50, 75, 95]
+  figure_dpi: 120
+  runs_dir: runs
