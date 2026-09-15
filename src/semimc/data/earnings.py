@@ -191,6 +191,18 @@ def fetch_calendar_from_provider(tickers: list[str]) -> pd.DataFrame:
     for ticker in tickers:
         try:
             dates = yf.Ticker(ticker).get_earnings_dates(limit=40)
+        except ImportError as exc:
+            # yfinance scrapes this endpoint with pandas.read_html, which needs lxml.
+            # lxml is not in the project's declared dependencies, so say what to do rather
+            # than letting a bare "Missing optional dependency" reach the user.
+            LOGGER.error(
+                "earnings dates need the optional 'lxml' package, which this project does "
+                "not depend on (%s). Either add it with `uv add lxml`, or fill in "
+                "config/earnings_calendar.csv by hand -- columns ticker,date,timing with "
+                "timing one of bmo/amc. No dates are invented.",
+                exc,
+            )
+            break
         except Exception as exc:  # noqa: BLE001 - reported, not raised
             LOGGER.warning("earnings fetch failed for %s: %s", ticker, exc)
             continue

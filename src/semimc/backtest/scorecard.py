@@ -456,7 +456,7 @@ def written_summary(
             verdict = "uniform" if (np.isfinite(p_value) and p_value > 0.05) else "NOT uniform"
             p_text = f"chi2 p = {p_value:.3f}" if np.isfinite(p_value) else "chi2 not computable"
             lines.append(
-                f"- **{model} at {horizon}d** — {verdict} ({p_text}, "
+                f"- **{model} at {horizon}d** -- {verdict} ({p_text}, "
                 f"n = {table.attrs.get('n', 0)}): {diagnose_pit(table)}."
             )
         lines.append("")
@@ -470,11 +470,12 @@ def written_summary(
         if biased:
             lines.append(
                 "Where the centre is biased, that is a verdict on the **drift policy**, "
-                f"not on the models: all of them are handed the same drift ({result.models} "
-                "differ only in distribution shape). A mean PIT above 0.5 across every "
-                "model means realized returns over this window simply exceeded what the "
-                "policy assumed — which is the expected cost of refusing to extrapolate "
-                "the historical mean, and is why the drift policy is configurable."
+                "not on the models: all of them are handed the same drift, and "
+                f"{', '.join(result.models)} differ only in distribution shape. A mean PIT "
+                "above 0.5 across every model means realized returns over this window "
+                "simply exceeded what the policy assumed, which is the expected cost of "
+                "refusing to extrapolate the historical mean and is why the drift policy "
+                "is configurable."
             )
             lines.append("")
 

@@ -84,3 +84,10 @@ or a produced artifact.
       alignment get a ~3-year window instead of 5. A warning names the binding ticker.
       Dropping ARM or allowing ragged panels per model would both be reasonable; neither
       is done without a decision from the owner.
+- [ ] **`earnings_jumps` is unverified on real data.** It is fully tested against fixtures
+      (jump timing, variance contribution, no drift leakage, training-data stripping), but
+      seeding a real calendar needs `lxml`, which yfinance uses to scrape earnings dates
+      and which is not in the brief's Section 4 dependency list. The command now fails with
+      an actionable message instead of a cryptic one. Two ways forward, both needing a
+      decision: add `lxml`, or hand-fill `config/earnings_calendar.csv`. No dates were
+      invented to work around this.
