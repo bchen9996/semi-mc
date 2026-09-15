@@ -81,6 +81,27 @@ Any config value can be overridden per command without editing the file:
 uv run semimc simulate --ticker NVDA -s drift.policy=risk_free -s simulation.n_paths=50000
 ```
 
+## What the backtest found
+
+The first full run — 177 monthly origins from 2012 to 2026, 14 tickers, 2,000 paths per
+origin — is worth stating up front, because it is not the result a demo would choose:
+
+- **No model beat the GBM baseline.** GARCH-t's CRPS skill was +0.3% to +0.5% at 21–126
+  days and never statistically distinguishable from the baseline. The block bootstrap was
+  *worse* at every horizon, consistent with its inability to generate a day worse than the
+  worst day it has seen.
+- **The widths were well calibrated at short horizons** (90% intervals covered 88–91% at
+  21 and 63 days) **and overconfident at a year** (50% intervals covered ~40%).
+- **The centre was biased low at every horizon.** Mean PIT rose from 0.56 at 21 days to
+  0.67 at 252; at one year the median realized return was +25% against a median forecast of
+  +1.8%. That is a verdict on the CAPM drift assumption, not on any model — all three share
+  the same drift, which is why all three show the same tilt. Semis simply beat
+  `rf + beta × 5%` over this period.
+
+The drift assumption dominated every other modelling choice. `MODEL_NOTES.md` §7 has the
+detail and the trade-off: raising the drift would fix the tilt and would also have
+projected absurd prices in 2021.
+
 ## Models
 
 | name | what it adds | see |

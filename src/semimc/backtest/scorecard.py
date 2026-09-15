@@ -131,16 +131,94 @@ def var_test_table(rows: pd.DataFrame, levels: list[float]) -> pd.DataFrame:
 def pit_tables(rows: pd.DataFrame, bins: int = 10) -> dict[str, pd.DataFrame]:
     """PIT histograms keyed by ``model|horizon``, pooled across tickers.
 
-    Pooling is deliberate: a single ticker at a 252-day horizon has too few observations
-    for a histogram to say anything, while the pooled version answers the question that
-    actually matters -- is this *model* calibrated at this horizon?
+    Pooling across tickers is deliberate: a single ticker at a 252-day horizon has too few
+    observations for a histogram to say anything, while the pooled version answers the
+    question that actually matters -- is this *model* calibrated at this horizon?
+
+    The histogram *shape* uses every origin, because shape is what the chart is for. The
+    chi-squared test is computed on **non-overlapping origins only**, since overlapping
+    windows would inflate the sample by an order of magnitude and reject uniformity for
+    essentially any model. Even so the test remains oversized, because pooled tickers move
+    together -- that residual dependence is disclosed in the written summary rather than
+    corrected here.
     """
     if rows.empty:
         return {}
     out: dict[str, pd.DataFrame] = {}
     for (model, horizon), group in rows.groupby(["model", "horizon"], sort=False):
-        out[f"{model}|{int(horizon)}"] = pit_histogram(group["pit"].to_numpy(), bins=bins)
+        table = pit_histogram(group["pit"].to_numpy(), bins=bins)
+        independent = group.loc[group["non_overlapping"], "pit"].to_numpy()
+        independent_table = pit_histogram(independent, bins=bins)
+
+        table.attrs["n_all"] = table.attrs.get("n", 0)
+        table.attrs["n"] = independent_table.attrs.get("n", 0)
+        table.attrs["chi2"] = independent_table.attrs.get("chi2", np.nan)
+        table.attrs["chi2_pvalue"] = independent_table.attrs.get("chi2_pvalue", np.nan)
+
+        # Shape statistics, so the summary can say *how* a forecast is miscalibrated
+        # rather than only that it is. Mean PIT away from 0.5 is a biased centre; tail
+        # mass away from 0.2 (two of ten bins) is a wrong width.
+        table.attrs["mean_pit"] = float(np.mean(independent)) if independent.size else np.nan
+        if independent.size:
+            edges = np.linspace(0.0, 1.0, bins + 1)
+            counts, _ = np.histogram(independent, bins=edges)
+            table.attrs["tail_mass"] = float((counts[0] + counts[-1]) / counts.sum())
+            table.attrs["uniform_tail_mass"] = 2.0 / bins
+        else:
+            table.attrs["tail_mass"] = np.nan
+            table.attrs["uniform_tail_mass"] = 2.0 / bins
+        out[f"{model}|{int(horizon)}"] = table
     return out
+
+
+def diagnose_pit(table: pd.DataFrame) -> str:
+    """Turn a PIT histogram into a sentence about *how* the forecast is miscalibrated.
+
+    Two independent failure modes, reported separately because their fixes differ:
+
+    * **centre** -- mean PIT above 0.5 means outcomes keep landing in the upper part of
+      the forecast, so the drift assumption was too low over this period (and vice versa).
+      This is a statement about the drift policy, not about the model's shape.
+    * **width** -- more mass in the outer bins than uniform means the distribution is too
+      narrow; less means too wide. This is what the model itself controls.
+    """
+    mean_pit = table.attrs.get("mean_pit", np.nan)
+    tail = table.attrs.get("tail_mass", np.nan)
+    uniform_tail = table.attrs.get("uniform_tail_mass", 0.2)
+    if not np.isfinite(mean_pit):
+        return "too few independent observations to diagnose"
+
+    parts: list[str] = []
+    if mean_pit > 0.54:
+        parts.append(
+            f"outcomes land high (mean PIT {mean_pit:.2f} vs 0.50), so the assumed drift "
+            "was too low over this period"
+        )
+    elif mean_pit < 0.46:
+        parts.append(
+            f"outcomes land low (mean PIT {mean_pit:.2f} vs 0.50), so the assumed drift "
+            "was too high over this period"
+        )
+    else:
+        parts.append(f"the centre is unbiased (mean PIT {mean_pit:.2f})")
+
+    if np.isfinite(tail):
+        if tail > uniform_tail * 1.25:
+            parts.append(
+                f"and the distribution is too narrow ({tail:.0%} of outcomes in the "
+                f"outer bins vs {uniform_tail:.0%} expected)"
+            )
+        elif tail < uniform_tail * 0.75:
+            parts.append(
+                f"and the distribution is too wide ({tail:.0%} in the outer bins vs "
+                f"{uniform_tail:.0%} expected)"
+            )
+        else:
+            parts.append(
+                f"and the width is about right ({tail:.0%} in the outer bins vs "
+                f"{uniform_tail:.0%} expected)"
+            )
+    return "; ".join(parts)
 
 
 def dm_table(rows: pd.DataFrame, baseline: str) -> pd.DataFrame:
@@ -305,6 +383,16 @@ def written_summary(
             "Diebold-Mariano on non-overlapping origins. A negative statistic favours the "
             "model; p < 0.05 means the difference is unlikely to be noise."
         )
+        lines.append("")
+        lines.append(
+            "**Read these p-values as optimistic.** Non-overlapping origins remove "
+            "dependence *through time*, but the test still pools tickers, and "
+            "semiconductor names move together -- their pairwise return correlations run "
+            "roughly 0.5 to 0.7. The effective number of independent observations is "
+            "therefore far closer to the origin count than to the ticker-origin count "
+            "printed below, so a borderline p-value near 0.05 should not be read as a "
+            "result."
+        )
         for _, row in dm.iterrows():
             if not np.isfinite(row.get("dm_statistic", np.nan)):
                 lines.append(
@@ -356,33 +444,50 @@ def written_summary(
         lines.append("")
         lines.append(
             "A calibrated forecast puts the outcome at a uniformly distributed percentile "
-            "of its own distribution. The chi-squared p-values below are optimistic "
-            "because overlapping windows make the observations dependent; read the shape, "
-            "not the p-value."
+            "of its own distribution. Histograms use every origin; the chi-squared test "
+            "below uses non-overlapping origins only. It is still oversized because "
+            "tickers are pooled and they co-move, so read the shape of the histogram "
+            "first and treat the p-value as a hint: a central hump means the forecast is "
+            "too wide, a U-shape means too narrow, a tilt means the drift is biased."
         )
         for key, table in sorted(pit.items()):
             p_value = table.attrs.get("chi2_pvalue", np.nan)
             model, horizon = key.split("|")
-            if np.isfinite(p_value):
-                shape = "uniform" if p_value > 0.05 else "NOT uniform"
-                lines.append(
-                    f"- {model} at {horizon}d: {shape} (chi2 p = {p_value:.3f}, "
-                    f"n = {table.attrs.get('n', 0)})."
-                )
-            else:
-                lines.append(
-                    f"- {model} at {horizon}d: too few observations "
-                    f"(n = {table.attrs.get('n', 0)}) to test uniformity."
-                )
+            verdict = "uniform" if (np.isfinite(p_value) and p_value > 0.05) else "NOT uniform"
+            p_text = f"chi2 p = {p_value:.3f}" if np.isfinite(p_value) else "chi2 not computable"
+            lines.append(
+                f"- **{model} at {horizon}d** — {verdict} ({p_text}, "
+                f"n = {table.attrs.get('n', 0)}): {diagnose_pit(table)}."
+            )
         lines.append("")
+
+        biased = [
+            key
+            for key, table in pit.items()
+            if np.isfinite(table.attrs.get("mean_pit", np.nan))
+            and abs(table.attrs["mean_pit"] - 0.5) > 0.04
+        ]
+        if biased:
+            lines.append(
+                "Where the centre is biased, that is a verdict on the **drift policy**, "
+                f"not on the models: all of them are handed the same drift ({result.models} "
+                "differ only in distribution shape). A mean PIT above 0.5 across every "
+                "model means realized returns over this window simply exceeded what the "
+                "policy assumed — which is the expected cost of refusing to extrapolate "
+                "the historical mean, and is why the drift policy is configurable."
+            )
+            lines.append("")
 
     lines.append("## Caveats")
     lines.append("")
     lines.extend(
         [
             "- Monthly origins with multi-month horizons overlap heavily. Coverage and PIT "
-            "use every origin (they are descriptive); every significance test uses the "
-            "non-overlapping subset only.",
+            "histograms use every origin (they are descriptive); every significance test "
+            "uses the non-overlapping subset only.",
+            "- Tickers are pooled and semiconductor names co-move, so even the "
+            "non-overlapping tests overstate their significance. No correction for "
+            "cross-sectional dependence is applied.",
             "- 126- and 252-day horizons have few independent observations by construction. "
             "Cells with fewer than "
             f"{LOW_POWER_THRESHOLD} are flagged `low_power` in the scorecard.",

@@ -170,7 +170,9 @@ def risk_table(
     if max_drawdown is not None and len(max_drawdown):
         drawdowns = np.asarray(max_drawdown, dtype=float)
         out["median_max_drawdown"] = float(np.median(drawdowns))
-        out["p95_max_drawdown"] = float(np.percentile(drawdowns, 5))  # the worst 5% of paths
+        # The 5th percentile of a (negative) drawdown distribution is its severe tail:
+        # only 5% of paths draw down more than this.
+        out["worst_5pct_max_drawdown"] = float(np.percentile(drawdowns, 5))
 
     return pd.Series(out, dtype=float)
 

@@ -243,10 +243,21 @@ def test_var_tests_use_only_non_overlapping_origins(backtest_result, config):
 
 
 def test_pit_tables_cover_every_model_and_horizon(backtest_result):
+    """Histogram counts come from every origin; the chi-squared test does not.
+
+    The shape is best estimated with all the data, but testing uniformity on overlapping
+    windows would inflate the sample and reject almost any model, so ``n`` (the tested
+    sample) must be the non-overlapping subset of ``n_all`` (the plotted sample).
+    """
     tables = pit_tables(backtest_result.rows, bins=10)
     assert set(tables) == {"gbm|21", "gbm|63", "bootstrap|21", "bootstrap|63"}
-    for table in tables.values():
-        assert table["count"].sum() == table.attrs["n"]
+    for key, table in tables.items():
+        assert table["count"].sum() == table.attrs["n_all"], key
+        assert table.attrs["n"] <= table.attrs["n_all"], key
+
+    # At 63 days with monthly origins, most windows overlap, so the tested sample must be
+    # strictly smaller than the plotted one.
+    assert tables["gbm|63"].attrs["n"] < tables["gbm|63"].attrs["n_all"]
 
 
 def test_written_summary_states_its_caveats(backtest_result, config):
@@ -298,3 +309,40 @@ def test_failed_cells_are_recorded_not_swallowed(market, config):
     assert len(result.rows) + len(result.failures) > 0
     if not result.failures.empty:
         assert {"origin", "ticker", "model", "stage", "error"}.issubset(result.failures.columns)
+
+
+def test_pit_diagnosis_separates_centre_from_width(backtest_result):
+    """The diagnosis must name *how* a forecast misses, not just that it does."""
+    from semimc.backtest.scorecard import diagnose_pit
+
+    tables = pit_tables(backtest_result.rows, bins=10)
+    for key, table in tables.items():
+        text = diagnose_pit(table)
+        assert ("centre" in text) or ("outcomes land" in text), key
+        assert ("width" in text) or ("too narrow" in text) or ("too wide" in text), key
+
+
+def test_pit_diagnosis_detects_a_biased_centre():
+    """A forecast whose outcomes always land high must be reported as drift, not width."""
+    from semimc.backtest.scorecard import diagnose_pit
+
+    high = pd.DataFrame({"count": [0] * 10})
+    high.attrs.update(
+        {"mean_pit": 0.70, "tail_mass": 0.20, "uniform_tail_mass": 0.20, "n": 200}
+    )
+    text = diagnose_pit(high)
+    assert "land high" in text and "drift was too low" in text
+    assert "width is about right" in text
+
+
+def test_pit_diagnosis_detects_an_overconfident_width():
+    """Excess mass in the outer bins must be reported as too narrow."""
+    from semimc.backtest.scorecard import diagnose_pit
+
+    narrow = pd.DataFrame({"count": [0] * 10})
+    narrow.attrs.update(
+        {"mean_pit": 0.50, "tail_mass": 0.35, "uniform_tail_mass": 0.20, "n": 200}
+    )
+    text = diagnose_pit(narrow)
+    assert "centre is unbiased" in text
+    assert "too narrow" in text

@@ -120,7 +120,25 @@ class MarketData:
             raise KeyError(f"no return data for {missing}")
 
         window = self.log_returns.loc[stamp - pd.Timedelta(days=days) : stamp, available]
+        available_rows = window.notna().sum()
         window = window.dropna(how="any" if require_complete else "all")
+
+        # Complete-case alignment is silent by default, and one short history can cost
+        # everyone years of data: ARM listed in September 2023, so asking for the whole
+        # universe collapses a five-year window to whatever ARM has. Say so.
+        if require_complete and len(available_rows) > 1 and len(window):
+            longest = int(available_rows.max())
+            if len(window) < 0.8 * longest:
+                limiting = available_rows.idxmin()
+                LOGGER.warning(
+                    "aligning %d tickers on common dates leaves %d rows, down from %d; "
+                    "%s has the shortest history (%d rows) and is the binding constraint",
+                    len(available_rows),
+                    len(window),
+                    longest,
+                    limiting,
+                    int(available_rows.min()),
+                )
 
         if len(window) < minimum:
             raise ValueError(

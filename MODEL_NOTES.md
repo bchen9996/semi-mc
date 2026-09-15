@@ -304,6 +304,43 @@ observations are flagged `low_power`. At a 252-day horizon over this history the
 around 15 per ticker, and 15 observations cannot distinguish 90% coverage from 75%
 coverage. Those rows are reported, not interpreted.
 
+### What the first real run actually found
+
+177 monthly origins, 2012-01 to 2026-09, 14 tickers (ARM lacks the history), 2,000 paths.
+
+**The widths are fine; the centre is not.** Realized coverage of the nominal 90% interval
+was 88–91% at 21 and 63 days for all three models, and PIT tail mass sat at 17–23% against
+the 20% a calibrated forecast implies. But the PIT is *tilted*, not U-shaped: mean PIT was
+0.56 at 21 days rising to 0.67 at 252 days, meaning outcomes kept landing in the upper part
+of the forecast. At a one-year horizon the median realized return was **+25%** against a
+median forecast of **+1.8%**.
+
+That is a verdict on the **drift policy**, not on any model — all three are handed the
+same drift and differ only in distribution shape, which is exactly why all three show the
+same tilt. Semiconductors over this window returned far more than `rf + beta * 5%`. It is
+the expected cost of refusing to extrapolate the historical mean (§0): the policy protects
+against projecting NVDA's 70%-a-year run-up forward, and pays for that protection with a
+centre that was too low in a period when the sector did extraordinarily well. Switching to
+`shrunk_historical` would raise the centre and lower the tilt; it would also have projected
+absurd prices in 2021. Neither choice is free, which is the honest finding.
+
+**No model beat the baseline.** GARCH-t's CRPS skill against GBM was +0.3% to +0.5% at 21
+to 126 days and slightly negative at 252 — never statistically distinguishable
+(Diebold-Mariano p = 0.13 to 0.77). The block bootstrap was *worse* at every horizon
+(−0.6% to −0.9%, DM p = 0.003 to 0.037), which is consistent with its bounded support: it
+cannot generate a day worse than the worst day in its window.
+
+**Everything is overconfident at one year.** 50% coverage fell to ~40% and PIT tail mass
+rose to 31–34% at the 252-day horizon for every model. Square-root-of-time scaling of daily
+volatility understates the variance of long-horizon returns, and no model here corrects
+for it. With only ~14 independent observations per ticker, this is flagged `low_power` —
+suggestive, not established.
+
+The practical reading: for this universe and period, the sophisticated models bought
+almost nothing over GBM on distributional accuracy, and the drift assumption dominated
+every other modelling choice. That is a more useful result than a scorecard showing the
+newest model winning.
+
 ---
 
 ## 8. Things that are wrong with all of this
