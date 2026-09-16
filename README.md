@@ -83,24 +83,41 @@ uv run semimc simulate --ticker NVDA -s drift.policy=risk_free -s simulation.n_p
 
 ## What the backtest found
 
-The first full run — 177 monthly origins from 2012 to 2026, 14 tickers, 2,000 paths per
-origin — is worth stating up front, because it is not the result a demo would choose:
+Stated up front, because these are not the results a demo would choose. All runs use
+monthly origins, 2,000 paths, and 14 tickers (ARM lacks the history).
 
-- **No model beat the GBM baseline.** GARCH-t's CRPS skill was +0.3% to +0.5% at 21–126
-  days and never statistically distinguishable from the baseline. The block bootstrap was
-  *worse* at every horizon, consistent with its inability to generate a day worse than the
-  worst day it has seen.
-- **The widths were well calibrated at short horizons** (90% intervals covered 88–91% at
-  21 and 63 days) **and overconfident at a year** (50% intervals covered ~40%).
-- **The centre was biased low at every horizon.** Mean PIT rose from 0.56 at 21 days to
-  0.67 at 252; at one year the median realized return was +25% against a median forecast of
-  +1.8%. That is a verdict on the CAPM drift assumption, not on any model — all three share
-  the same drift, which is why all three show the same tilt. Semis simply beat
-  `rf + beta × 5%` over this period.
+**Only one model beat the baseline.** Over 2012–2026, GARCH-t's CRPS skill against GBM was
++0.3% to +0.5% at 21–126 days and *never* statistically distinguishable. The block
+bootstrap was significantly **worse** at every horizon, consistent with its inability to
+generate a day worse than the worst day it has seen.
 
-The drift assumption dominated every other modelling choice. `MODEL_NOTES.md` §7 has the
-detail and the trade-off: raising the drift would fix the tilt and would also have
-projected absurd prices in 2021.
+The exception is the **earnings-jump overlay**, which over 2018–2026 beat GBM at 21 days
+(CRPS skill +0.9%, Diebold-Mariano −2.93, p = 0.003) and beat plain GARCH-t by more
+(DM −4.19, p < 0.0001). At 63 and 126 days it was indistinguishable. That pattern is what
+you would expect: a 21-day window contains exactly one report, so the jump is a large share
+of total variance; stretch the horizon and diffusion swamps it.
+
+**The widths were well calibrated at short horizons** (90% intervals covered 88–91% at 21
+and 63 days) **and overconfident at a year** (50% intervals covered ~40%).
+
+**The drift assumption dominated every modelling choice.** Under CAPM the PIT was tilted,
+not U-shaped: mean PIT rose from 0.56 at 21 days to 0.67 at 252, and at one year the median
+realized return was +25% against a +1.8% median forecast. Since every model is handed the
+same drift, all of them tilted identically — that is a verdict on the policy, not the
+models. Backtesting the three policies head to head:
+
+| policy | mean PIT (21d → 252d) | CRPS vs CAPM |
+|---|---|---|
+| `risk_free` | 0.572 → 0.715 | worse at every horizon (DM +9.2 to +12.3) |
+| `capm` | 0.556 → 0.668 | — |
+| `shrunk_historical` | 0.546 → 0.634 | better at every horizon (DM −4.5 to −7.3) |
+
+`shrunk_historical` won on mean PIT, on 50% and 90% coverage, on PIT tail mass and on CRPS
+at every horizon, and is now the default. **That choice was made on the same period the
+scorecard reports** — selection on the test set. Semis rose sharply over this window, so a
+policy leaning 25% on the realized mean was always going to look good; in a sector downturn
+it will look correspondingly bad. `capm` is one flag away and is the more conservative
+default. `MODEL_NOTES.md` §7 has the detail.
 
 ## Models
 

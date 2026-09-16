@@ -27,10 +27,14 @@ every model:
 
 | policy | annual arithmetic drift `mu_A` |
 |---|---|
-| `capm` (default) | `rf + beta * ERP` |
+| `capm` | `rf + beta * ERP` |
 | `risk_free` | `rf` |
-| `shrunk_historical` | `w * historical + (1 - w) * capm` |
+| `shrunk_historical` (default) | `w * historical + (1 - w) * capm`, `w = 0.25` |
 | `manual` | whatever you say |
+
+The default is `shrunk_historical` because it won the head-to-head backtest in §7 — with
+the large caveat, recorded there, that it was chosen on the same period the scorecard
+reports. `capm` is the conservative alternative.
 
 `mu_A` is the *arithmetic* expected growth rate, defined so that `E[S_T]/S_0 = exp(mu_A T)`.
 Simulators need the **log** drift, which is lower by the Ito correction:
@@ -53,8 +57,10 @@ gives a model a 96%-a-year training history and asserts the simulation does not 
 
 **What this means for the backtest.** Calibration tests are far more sensitive to the
 *width* of a distribution than to its centre, so a wrong drift is mostly invisible in
-coverage and CRPS at short horizons. Nothing in the scorecard validates the CAPM
-assumption. It is an assumption, stated, not a result.
+coverage and CRPS at short horizons — but not at long ones, where it dominates. §7 compares
+the three policies directly and finds the drift mattered more than the choice of model.
+That comparison ranks the policies *on one historical sample*; it does not establish that
+any of them is the right expected return. The drift remains an assumption, stated.
 
 ---
 
@@ -317,18 +323,63 @@ median forecast of **+1.8%**.
 
 That is a verdict on the **drift policy**, not on any model — all three are handed the
 same drift and differ only in distribution shape, which is exactly why all three show the
-same tilt. Semiconductors over this window returned far more than `rf + beta * 5%`. It is
-the expected cost of refusing to extrapolate the historical mean (§0): the policy protects
-against projecting NVDA's 70%-a-year run-up forward, and pays for that protection with a
-centre that was too low in a period when the sector did extraordinarily well. Switching to
-`shrunk_historical` would raise the centre and lower the tilt; it would also have projected
-absurd prices in 2021. Neither choice is free, which is the honest finding.
+same tilt. Semiconductors over this window returned far more than `rf + beta * 5%`.
 
-**No model beat the baseline.** GARCH-t's CRPS skill against GBM was +0.3% to +0.5% at 21
-to 126 days and slightly negative at 252 — never statistically distinguishable
-(Diebold-Mariano p = 0.13 to 0.77). The block bootstrap was *worse* at every horizon
-(−0.6% to −0.9%, DM p = 0.003 to 0.037), which is consistent with its bounded support: it
-cannot generate a day worse than the worst day in its window.
+### The drift policies, backtested head to head
+
+Run with GBM alone, since every model shares the drift and using one model isolates its
+effect. Same 177 origins, same tickers, same seed.
+
+| policy | mean PIT 21d | 63d | 126d | 252d | cov 90% (21d) | CRPS 252d | DM vs capm |
+|---|---|---|---|---|---|---|---|
+| `risk_free` | 0.572 | 0.636 | 0.666 | 0.715 | 0.906 | 0.3769 | +9.2 to +12.3 (worse) |
+| `capm` | 0.556 | 0.609 | 0.629 | 0.668 | 0.910 | 0.3475 | — |
+| `shrunk_historical` | 0.546 | 0.590 | 0.603 | 0.634 | 0.912 | 0.3333 | −4.5 to −7.3 (better) |
+
+The ordering is monotone and identical on every metric — mean PIT, 50% and 90% coverage,
+PIT tail mass and CRPS — at every horizon. `shrunk_historical` is now the default.
+
+**Three caveats, in order of importance.**
+
+1. **This is selection on the test set.** The policy was chosen by looking at the same
+   period the scorecard reports, which Section 8 of the brief explicitly says must be
+   flagged. Semiconductors rose sharply over 2012–2026, so a policy that leans 25% on the
+   realized mean was always going to win here. In a sector downturn it will lose by the
+   same mechanism, and `capm` is the more conservative default. The honest summary is that
+   the backtest cannot distinguish "better calibrated" from "better matched to a bull
+   market" on a single sample.
+2. **The tilt is reduced, not removed.** `shrunk_historical` still runs a mean PIT of 0.63
+   at a year. No available policy makes the centre unbiased.
+3. **The p-values are optimistic.** Diebold-Mariano pools 14 co-moving tickers, so the
+   effective sample is far smaller than `n` suggests.
+
+Under either policy the same structural point holds: this is the expected cost of refusing
+to extrapolate the historical mean (§0). The policy protects against projecting NVDA's
+70%-a-year run-up forward, and pays for it with a centre that was too low in a period when
+the sector did extraordinarily well. Neither choice is free.
+
+**Only the earnings overlay beat the baseline.** GARCH-t's CRPS skill against GBM was +0.3%
+to +0.5% at 21 to 126 days and slightly negative at 252 — never statistically
+distinguishable (Diebold-Mariano p = 0.13 to 0.77). The block bootstrap was *worse* at
+every horizon (−0.6% to −0.9%, DM p = 0.003 to 0.037), consistent with its bounded support:
+it cannot generate a day worse than the worst day in its window.
+
+The **earnings-jump overlay**, run separately over 2018–2026 (105 origins — the calendar
+only reaches back to 2014, and the model needs several years of reports before its first
+origin), is the one model that earns its place:
+
+| horizon | CRPS skill vs GBM | DM vs GBM | DM vs garch_t |
+|---|---|---|---|
+| 21d | +0.92% | −2.93 (p = 0.003) | −4.19 (p < 0.0001) |
+| 63d | +0.65% | −0.84 (p = 0.40) | −0.61 (p = 0.54) |
+| 126d | +0.73% | +1.05 (p = 0.30) | −0.73 (p = 0.46) |
+
+It beats both the baseline *and* the GARCH it wraps at 21 days, and is indistinguishable
+beyond that. The pattern is exactly what the mechanism predicts: a 21-day window contains
+precisely one scheduled report, so a 10–20% gap is a large share of total variance; stretch
+to 126 days and diffusion swamps it. It is also the one place where adding structure that
+matches a real feature of the asset — semis gap on earnings — paid off, as opposed to
+adding statistical sophistication in the abstract.
 
 **Everything is overconfident at one year.** 50% coverage fell to ~40% and PIT tail mass
 rose to 31–34% at the 252-day horizon for every model. Square-root-of-time scaling of daily
@@ -336,10 +387,12 @@ volatility understates the variance of long-horizon returns, and no model here c
 for it. With only ~14 independent observations per ticker, this is flagged `low_power` —
 suggestive, not established.
 
-The practical reading: for this universe and period, the sophisticated models bought
-almost nothing over GBM on distributional accuracy, and the drift assumption dominated
-every other modelling choice. That is a more useful result than a scorecard showing the
-newest model winning.
+The practical reading: for this universe and period, statistical sophistication alone
+(GARCH, bootstrapping) bought almost nothing over GBM on distributional accuracy. What did
+help was modelling a real, known feature of the asset — scheduled earnings gaps — and even
+that only at the horizon where it dominates the variance. The drift assumption mattered
+more than any of it. That is a more useful result than a scorecard showing the newest model
+winning.
 
 ---
 

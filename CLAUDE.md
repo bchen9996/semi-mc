@@ -57,6 +57,9 @@ Regenerate test fixtures with `uv run python tests/fixtures/make_fixtures.py`.
 - **`MarketData.training_window` and `MarketData.context` are the only places a fit window
   is cut.** That is what makes the point-in-time guarantee checkable in one place.
 - **Models never decide their own drift.** `BaseReturnModel` imposes the configured policy.
+  The default is `shrunk_historical`, chosen by backtest over 2012-2026 — which is
+  selection on the reporting period, and is flagged as such in MODEL_NOTES section 7.
+  `capm` is the conservative alternative and is one flag away.
   Subclasses implement `_fit_shape`, `_simulate_zero_mean`, and `annualized_variance`.
 - **The provider interface is the only route to price data.** Nothing imports yfinance
   outside `data/provider.py` (and the optional earnings/FRED helpers).

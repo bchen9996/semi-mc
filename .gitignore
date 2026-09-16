@@ -2,6 +2,8 @@
 runs/
 data_cache/
 data_csv/
+# The earnings calendar is user-edited input worth keeping in history; the risk-free
+# series is a reproducible download, so it is not.
 config/risk_free_3m.csv
 
 # Python

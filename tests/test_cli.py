@@ -135,10 +135,18 @@ def test_simulate_records_enough_to_reproduce(workspace):
     assert manifest["n_paths"] == 500
     assert manifest["horizon"] == 21
     assert manifest["training_range"]["first_date"] < manifest["training_range"]["last_date"]
-    assert manifest["model"]["drift_policy"] == "capm"
+
+    # The manifest must record the drift policy actually used, and it must agree with the
+    # snapshot beside it -- that pairing is what makes a run reproducible. Asserted against
+    # the configured default rather than a hard-coded name, so changing the default is a
+    # deliberate config edit rather than a test failure.
+    from semimc.config import load_config
+
+    expected_policy = load_config().drift.policy
+    assert manifest["model"]["drift_policy"] == expected_policy
 
     snapshot = json.loads((latest_run(workspace) / "config_snapshot.json").read_text())
-    assert snapshot["drift"]["policy"] == "capm"
+    assert snapshot["drift"]["policy"] == expected_policy
 
 
 def test_simulate_is_reproducible_from_the_seed(workspace):
