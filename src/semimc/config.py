@@ -230,6 +230,10 @@ class SignalsConfig(_Base):
     min_regression_observations: int = Field(60, gt=0)
     cv_n_folds: int = Field(5, ge=2)
     cv_gap_periods: int = Field(1, ge=1)
+    ridge_lasso_alphas: list[float] = Field(
+        default_factory=lambda: [0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0]
+    )
+    quantile_levels: list[float] = Field(default_factory=lambda: [0.05, 0.25, 0.5, 0.75, 0.95])
     # Resolved via Config.path(), same as every other config-relative path, so tests can
     # redirect it with an absolute -s override instead of writing into the real repo.
     research_log: str = "research_log.md"

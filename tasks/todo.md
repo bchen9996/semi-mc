@@ -100,18 +100,21 @@ or a produced artifact.
 - [x] Real evaluation run on the 14-ticker universe, pre-holdout only — see
       `research_log.md`. Every signal's OOS R² was negative at 21d and 63d; nothing
       cleared the addendum's own significance bar. `--tilt` stays off by default.
-- [ ] **Holdout not yet spent** against the real universe. `semimc signals --holdout` is
-      built and tested against fixtures; running it for real is a research decision, not a
-      build one, and is left to the project owner.
-- [ ] **Simple-average combination model**, which the addendum suggests trying before a
-      full multi-signal regression ("often more robust than one regression containing
-      every signal"). `semimc signals` currently reports only the Driscoll-Kraay combined
-      fit, which underperformed every single signal on the real data — exactly the
-      overfitting pattern the simple average is meant to avoid. Worth adding before
-      spending the holdout.
-- [ ] Ridge/lasso combination models (scikit-learn is a declared dependency; not wired up)
-- [ ] Quantile regression (`QuantReg`) at 5/25/50/75/95, scored by pinball loss against the
-      simulation's own quantiles
+- [x] **Simple-average combination model** (`forecasting/combine.py:fit_simple_average`),
+      ridge/lasso (`fit_ridge_or_lasso`, alpha chosen by pre-holdout CV), and quantile
+      regression (`fit_quantile_regressions`, `QuantReg` at 5/25/50/75/95, cross-validated
+      pinball loss). All four wired into `semimc signals` as `CandidateSpec`s scored
+      through one shared CV harness (`evaluate_candidate`). Built and evaluated pre-holdout
+      *before* the holdout was spent, per the addendum's own ordering — see
+      `research_log.md`'s 2026-09-16 entries. `simple_average` beat `combined` by a wide
+      margin pre-holdout at both horizons and was, briefly, the first candidate in this
+      project's search to clear every significance bar at once (63d, pre-holdout only).
+- [x] **Holdout spent** against the real universe, both cells, 2026-09-16. 21d (headline,
+      spec: `relative_strength`): OOS R² -0.0057, Clark-West t -0.69. 63d (low-power,
+      spec: `simple_average`): OOS R² -0.0058, Clark-West t -0.94. Both null; the
+      promising 63d pre-holdout `simple_average` result did not replicate. `--tilt` stays
+      off by default. **Do not re-run `--holdout` against this universe/window** — see
+      `research_log.md`.
 - [ ] Shared sector-level regime switching feeding the multi-asset/portfolio simulation
       (Phase 5 addition — regime switching itself is built per-ticker; making it shared
       across the sector factor for portfolio runs is not)

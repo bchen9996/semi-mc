@@ -898,16 +898,15 @@ def signals(
     """
     cfg = _setup(config, set_, verbose)
     from .data import load_market_data
-    from .forecasting import (
-        date_grouped_gapped_splits,
-        fit_driscoll_kraay,
-        training_rows,
+    from .forecasting import training_rows
+    from .forecasting.combine import (
+        cross_validated_pinball_losses,
+        select_alpha_by_cv,
+        shrinkage_spec,
+        simple_average_spec,
+        single_or_combined_spec,
     )
-    from .forecasting.evaluate import (
-        clark_west_statistic,
-        oos_r_squared,
-        rank_information_coefficient,
-    )
+    from .forecasting.evaluate import clark_west_statistic, oos_r_squared
     from .forecasting.pipeline import (
         RELATIVE_SIGNAL_COLUMNS,
         build_full_panel,
@@ -957,67 +956,89 @@ def signals(
         raise typer.Exit(code=1)
 
     maxlags = max(1, round(cfg.signals.driscoll_kraay_lag_per_horizon * h / 21))
-    candidates: dict[str, list[str]] = {c: [c] for c in available_columns}
-    if len(available_columns) > 1:
-        candidates["combined"] = available_columns
 
-    def _cv_evaluate(columns: list[str]) -> dict | None:
-        usable = pre_holdout.dropna(subset=[*columns, "target"])
-        if len(usable) < cfg.signals.min_regression_observations:
-            return None
-        splits = date_grouped_gapped_splits(
-            usable["date"], n_folds=cfg.signals.cv_n_folds, gap_periods=cfg.signals.cv_gap_periods
-        )
-        actual_folds, pred_folds, date_folds = [], [], []
-        for train_dates, test_dates in splits:
-            train_fold = usable[usable["date"].isin(train_dates)]
-            test_fold = usable[usable["date"].isin(test_dates)]
-            if len(train_fold) < 15 or test_fold.empty:
-                continue
-            try:
-                result = fit_driscoll_kraay(train_fold, columns, maxlags=maxlags)
-            except ValueError:
-                continue
-            actual_folds.append(test_fold["target"].to_numpy())
-            pred_folds.append(result.predict(test_fold[columns]).to_numpy())
-            date_folds.append(test_fold["date"])
-        if not actual_folds:
-            return None
-        actual = np.concatenate(actual_folds)
-        predicted = np.concatenate(pred_folds)
-        dates = pd.concat(date_folds, ignore_index=True)
-        r2 = oos_r_squared(actual, predicted)
-        cw_t, cw_p = clark_west_statistic(actual, np.zeros_like(actual), predicted)
-        ic = rank_information_coefficient(pd.Series(predicted), pd.Series(actual), dates)
-        full_fit = fit_driscoll_kraay(usable, columns, maxlags=maxlags)
-        effect = full_fit.annualized_effect_size(cfg.simulation.trading_days_per_year, h)
-        return {
-            "n_obs": len(usable),
-            "n_cv_test_obs": len(actual),
-            "cv_oos_r2": r2,
-            "clark_west_t": cw_t,
-            "clark_west_p": cw_p,
-            "rank_ic_mean": ic["mean_ic"],
-            "rank_ic_t": ic["t_stat"],
-            "rank_ic_n_dates": ic["n_dates"],
-            "coefficients": full_fit.coefficients.to_dict(),
-            "t_stats": full_fit.t_stats.to_dict(),
-            "annualized_effect": {c: float(effect.get(c, float("nan"))) for c in columns},
-        }
+    def _usable(columns: list[str]) -> pd.DataFrame:
+        return pre_holdout.dropna(subset=[*columns, "target"])
+
+    # The addendum's own ladder, simple to complex: one regression per signal, then the
+    # kitchen-sink regression, the simple average of the single-signal forecasts (which the
+    # addendum says to try *before* the kitchen sink -- "often more robust"), then ridge and
+    # lasso. Every candidate is reduced to a CandidateSpec so cross-validation and the
+    # eventual one-time holdout fit share exactly the same fit/predict calls.
+    candidate_data: dict[str, pd.DataFrame] = {}
+    fitted_specs: dict[str, object] = {}
+    for column in available_columns:
+        spec = single_or_combined_spec(column, [column], maxlags)
+        fitted_specs[spec.label] = spec
+        candidate_data[spec.label] = _usable([column])
+    if len(available_columns) > 1:
+        combined_usable = _usable(available_columns)
+        combined_spec = single_or_combined_spec("combined", available_columns, maxlags)
+        fitted_specs[combined_spec.label] = combined_spec
+        candidate_data[combined_spec.label] = combined_usable
+
+        average_spec = simple_average_spec(available_columns, maxlags)
+        fitted_specs[average_spec.label] = average_spec
+        # Unlike the kitchen sink, the simple average tolerates a missing signal per row --
+        # scored on the full pre-holdout frame, not the intersection where every column is
+        # present, so it can show the robustness advantage the addendum credits it with.
+        candidate_data[average_spec.label] = pre_holdout
+
+        for method in ("ridge", "lasso"):
+            alpha, _ = select_alpha_by_cv(
+                combined_usable,
+                available_columns,
+                method,
+                cfg.signals.ridge_lasso_alphas,
+                cfg.signals.cv_n_folds,
+                cfg.signals.cv_gap_periods,
+            )
+            method_spec = shrinkage_spec(available_columns, alpha, method)
+            fitted_specs[method_spec.label] = method_spec
+            candidate_data[method_spec.label] = combined_usable
 
     report_rows = []
-    for label, columns in candidates.items():
-        outcome = _cv_evaluate(columns)
+    for label, spec in fitted_specs.items():
+        data = candidate_data[label]
+        outcome = spec.evaluate(data, cfg.signals.cv_n_folds, cfg.signals.cv_gap_periods)
         if outcome is None:
             continue
-        scalars = {k: v for k, v in outcome.items() if not isinstance(v, dict)}
-        report_rows.append({"signal": label, **scalars})
-    report = pd.DataFrame(report_rows).sort_values("cv_oos_r2", ascending=False)
+        report_rows.append(outcome)
+    report = pd.DataFrame(report_rows)
+    if not report.empty:
+        report = report.sort_values("cv_oos_r2", ascending=False)
+
+    # The specification the holdout will (if requested) be spent on -- fixed here, from
+    # pre-holdout cross-validation alone, before any holdout row is touched anywhere below.
+    best_label = str(report.iloc[0]["signal"]) if not report.empty else None
 
     typer.echo(
         f"\nPre-holdout, cross-validated (n_folds={cfg.signals.cv_n_folds}), {h}-day horizon:"
     )
-    _echo_table(report.set_index("signal"))
+    if report.empty:
+        typer.echo("(no candidate had enough data)")
+    else:
+        _echo_table(report.set_index("signal"))
+
+    quantile_usable = _usable(available_columns)
+    if len(quantile_usable) >= cfg.signals.min_regression_observations:
+        pinball = cross_validated_pinball_losses(
+            quantile_usable,
+            available_columns,
+            tuple(cfg.signals.quantile_levels),
+            cfg.signals.cv_n_folds,
+            cfg.signals.cv_gap_periods,
+        )
+        typer.echo("\nQuantile regression (all signals), cross-validated pinball loss by level:")
+        for level, loss in pinball.items():
+            rendered = f"{loss:.6f}" if np.isfinite(loss) else "n/a"
+            typer.echo(f"  q={level:.2f}: {rendered}")
+    else:
+        pinball = {}
+        typer.echo(
+            f"\nQuantile regression: only {len(quantile_usable)} usable rows, skipped "
+            f"(need >= {cfg.signals.min_regression_observations})."
+        )
 
     # Sector tilt, if the industry series has been fetched.
     industry_path = cfg.path(cfg.signals.external_dir) / f"{cfg.signals.industry_series_id}.csv"
@@ -1061,6 +1082,9 @@ def signals(
     run.record("available_columns", available_columns)
     run.record("n_pre_holdout_rows", len(pre_holdout))
     run.record("holdout_start", str(holdout_start.date()))
+    run.record("best_pre_holdout_candidate", best_label)
+    if pinball:
+        run.record("quantile_pinball_loss", {str(k): float(v) for k, v in pinball.items()})
     if sector_result is not None:
         run.record(
             "sector_tilt",
@@ -1080,59 +1104,84 @@ def signals(
                 f"origins). The headline horizon is {cfg.signals.holdout_headline_horizon}d.",
                 fg=typer.colors.YELLOW,
             )
-        holdout_columns = candidates.get("combined", available_columns)
-        usable_holdout = holdout_rows.dropna(subset=[*holdout_columns, "target"])
-        usable_pre = pre_holdout.dropna(subset=[*holdout_columns, "target"])
-        if len(usable_holdout) < 5 or len(usable_pre) < cfg.signals.min_regression_observations:
+        if best_label is None:
             typer.secho(
-                f"\nHoldout requested but only {len(usable_holdout)} holdout rows / "
-                f"{len(usable_pre)} pre-holdout rows are usable; not evaluated.",
+                "\nHoldout requested but no candidate had enough pre-holdout data to select "
+                "a specification; not evaluated.",
                 fg=typer.colors.YELLOW,
             )
         else:
-            final_fit = fit_driscoll_kraay(usable_pre, holdout_columns, maxlags=maxlags)
-            predicted = final_fit.predict(usable_holdout[holdout_columns]).to_numpy()
-            actual = usable_holdout["target"].to_numpy()
-            r2 = oos_r_squared(actual, predicted)
-            cw_t, cw_p = clark_west_statistic(actual, np.zeros_like(actual), predicted)
-            holdout_summary = (
-                f"\n=== ONE-TIME HOLDOUT RESULT ({h}d, {holdout_start.date()} onward, "
-                f"n={len(usable_holdout)}) ===\n"
-                f"OOS R^2: {r2:.4f}   Clark-West t: {cw_t:.2f} (p={cw_p:.3f})\n"
-                "Reported once, regardless of outcome, per the addendum's evaluation rule."
+            # Fixed above, from pre-holdout CV alone -- this is the addendum's "all signal
+            # selection ... happen before that window" rule, enforced by construction: the
+            # holdout section never sees `report` computed on anything but pre_holdout, and
+            # `best_label` was chosen before this branch runs.
+            winning_spec = fitted_specs[best_label]
+            holdout_columns = winning_spec.feature_columns
+            usable_holdout = holdout_rows.dropna(
+                subset=["target"]
+                if best_label == "simple_average"
+                else [*holdout_columns, "target"]
             )
-            typer.echo(holdout_summary)
-            run.record(
-                "holdout_result",
-                {
-                    "horizon": h,
-                    "n_observations": len(usable_holdout),
-                    "oos_r2": r2,
-                    "clark_west_t": cw_t,
-                    "clark_west_p": cw_p,
-                },
-            )
+            usable_pre = candidate_data[best_label]
+            if len(usable_holdout) < 5 or len(usable_pre) < cfg.signals.min_regression_observations:
+                typer.secho(
+                    f"\nHoldout requested but only {len(usable_holdout)} holdout rows / "
+                    f"{len(usable_pre)} pre-holdout rows are usable; not evaluated.",
+                    fg=typer.colors.YELLOW,
+                )
+            else:
+                final_model = winning_spec.fit(usable_pre)
+                predicted = np.asarray(
+                    winning_spec.predict(final_model, usable_holdout), dtype=float
+                )
+                actual = usable_holdout["target"].to_numpy()
+                r2 = oos_r_squared(actual, predicted)
+                cw_t, cw_p = clark_west_statistic(actual, np.zeros_like(actual), predicted)
+                holdout_summary = (
+                    f"\n=== ONE-TIME HOLDOUT RESULT ({h}d, {holdout_start.date()} onward, "
+                    f"n={len(usable_holdout)}) ===\n"
+                    f"Pre-registered specification (best pre-holdout CV OOS R^2): {best_label}\n"
+                    f"OOS R^2: {r2:.4f}   Clark-West t: {cw_t:.2f} (p={cw_p:.3f})\n"
+                    "Reported once, regardless of outcome, per the addendum's evaluation rule."
+                )
+                typer.echo(holdout_summary)
+                run.record(
+                    "holdout_result",
+                    {
+                        "horizon": h,
+                        "specification": best_label,
+                        "n_observations": len(usable_holdout),
+                        "oos_r2": r2,
+                        "clark_west_t": cw_t,
+                        "clark_west_p": cw_p,
+                    },
+                )
 
-            log_path = cfg.path(cfg.signals.research_log)
-            entry = (
-                f"\n## {pd.Timestamp.now().strftime('%Y-%m-%d')} -- holdout evaluation ({h}d)\n\n"
-                f"- Tickers: {', '.join(symbols)}\n"
-                f"- Signals: {', '.join(holdout_columns)}\n"
-                f"- Pre-holdout training rows: {len(usable_pre)}\n"
-                f"- Holdout window: {holdout_start.date()} onward ({len(usable_holdout)} rows)\n"
-                f"- OOS R^2: {r2:.4f}\n"
-                f"- Clark-West t: {cw_t:.2f} (p={cw_p:.3f})\n"
-                f"- Run: {run.path.name}\n"
-            )
-            with log_path.open("a", encoding="utf-8") as handle:
-                handle.write(entry)
-            typer.echo(f"Appended to {log_path}")
+                log_path = cfg.path(cfg.signals.research_log)
+                entry = (
+                    f"\n## {pd.Timestamp.now().strftime('%Y-%m-%d')} -- holdout evaluation "
+                    f"({h}d)\n\n"
+                    f"- Tickers: {', '.join(symbols)}\n"
+                    f"- Specification (selected by pre-holdout CV, before any holdout row "
+                    f"was read): {best_label}\n"
+                    f"- Signals: {', '.join(holdout_columns)}\n"
+                    f"- Pre-holdout training rows: {len(usable_pre)}\n"
+                    f"- Holdout window: {holdout_start.date()} onward "
+                    f"({len(usable_holdout)} rows)\n"
+                    f"- OOS R^2: {r2:.4f}\n"
+                    f"- Clark-West t: {cw_t:.2f} (p={cw_p:.3f})\n"
+                    f"- Run: {run.path.name}\n"
+                )
+                with log_path.open("a", encoding="utf-8") as handle:
+                    handle.write(entry)
+                typer.echo(f"Appended to {log_path}")
 
     text_lines = [
         f"# Signal evaluation: {h}-day horizon",
         "",
         f"Tickers: {', '.join(symbols)}",
         f"Pre-holdout rows: {len(pre_holdout)}; holdout starts {holdout_start.date()}",
+        f"Best pre-holdout candidate (by CV OOS R^2): {best_label or 'none'}",
         "",
         "## Pre-holdout, cross-validated",
         "",
@@ -1140,6 +1189,18 @@ def signals(
         if not report.empty
         else "(no candidate had enough data)",
     ]
+    if pinball:
+        text_lines += [
+            "",
+            "## Quantile regression, cross-validated pinball loss",
+            "",
+            "```\n"
+            + "\n".join(
+                f"q={level:.2f}: {loss:.6f}" if np.isfinite(loss) else f"q={level:.2f}: n/a"
+                for level, loss in pinball.items()
+            )
+            + "\n```",
+        ]
     if holdout_summary:
         text_lines.append(holdout_summary)
     run.write_text("\n".join(text_lines), "summary")

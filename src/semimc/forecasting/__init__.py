@@ -10,6 +10,22 @@ cross-validation; ``tilt.py`` turns fitted regressions into a
 
 from __future__ import annotations
 
+from .combine import (
+    CandidateSpec,
+    QuantileRegressionModel,
+    ShrunkLinearModel,
+    SimpleAverageModel,
+    cross_validated_pinball_losses,
+    evaluate_candidate,
+    fit_quantile_regressions,
+    fit_ridge_or_lasso,
+    fit_simple_average,
+    predict_quantiles,
+    select_alpha_by_cv,
+    shrinkage_spec,
+    simple_average_spec,
+    single_or_combined_spec,
+)
 from .cv import date_grouped_gapped_splits, rows_for_dates
 from .evaluate import (
     clark_west_statistic,
@@ -39,7 +55,11 @@ from .tilt import (
 )
 
 __all__ = [
+    "CandidateSpec",
     "PanelRegressionResult",
+    "QuantileRegressionModel",
+    "ShrunkLinearModel",
+    "SimpleAverageModel",
     "block_bootstrap_date_indices",
     "bootstrap_panel_tilt_draws",
     "bootstrap_sector_tilt_draws",
@@ -47,19 +67,29 @@ __all__ = [
     "build_regression_row",
     "build_sector_regression_row",
     "clark_west_statistic",
+    "cross_validated_pinball_losses",
     "date_grouped_gapped_splits",
+    "evaluate_candidate",
     "fama_macbeth",
     "fit_driscoll_kraay",
+    "fit_quantile_regressions",
+    "fit_ridge_or_lasso",
     "fit_sector_tilt",
+    "fit_simple_average",
     "industry_yoy_growth",
     "newey_west_mean",
     "oos_r_squared",
     "pinball_losses",
+    "predict_quantiles",
     "rank_information_coefficient",
     "rows_for_dates",
     "sector_factor",
+    "select_alpha_by_cv",
     "shrink_and_cap",
+    "shrinkage_spec",
     "sign_flip_rate",
+    "simple_average_spec",
+    "single_or_combined_spec",
     "standardize_cross_sectionally",
     "subset_by_date_range",
     "trailing_betas",

@@ -135,6 +135,8 @@ signals:
   min_regression_observations: 60
   cv_n_folds: 5
   cv_gap_periods: 1   # fold gap, in sampling periods, at least the forecast horizon needs
+  ridge_lasso_alphas: [0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0]   # selected by pre-holdout CV
+  quantile_levels: [0.05, 0.25, 0.5, 0.75, 0.95]
 
 portfolio:
   weights: {}             # empty = equal weight across the requested tickers

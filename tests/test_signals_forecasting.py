@@ -29,6 +29,17 @@ from semimc.forecasting import (
     trailing_betas,
     training_rows,
 )
+from semimc.forecasting.combine import (
+    cross_validated_pinball_losses,
+    fit_quantile_regressions,
+    fit_ridge_or_lasso,
+    fit_simple_average,
+    predict_quantiles,
+    select_alpha_by_cv,
+    shrinkage_spec,
+    simple_average_spec,
+    single_or_combined_spec,
+)
 from semimc.forecasting.evaluate import (
     clark_west_statistic,
     oos_r_squared,
@@ -451,3 +462,168 @@ def test_sign_flip_rate_detects_alternating_signs():
     assert sign_flip_rate(alternating) == pytest.approx(1.0)
     stable = pd.Series([1.0, 1.0, 1.0, 1.0])
     assert sign_flip_rate(stable) == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------------------
+# Combination models (addendum "simple to complex" ladder): simple average, ridge/lasso,
+# quantile regression, and the shared CandidateSpec/evaluate_candidate CV harness.
+# ---------------------------------------------------------------------------------------
+
+
+def _synthetic_signal_panel(rng, n_dates=60, tickers=("A", "B", "C")):
+    """A hand-built panel with a known relationship (``target ~ 0.5 * momentum``, reversal
+    pure noise) -- fast and precise for checking coefficient recovery and combination
+    behaviour without going through the full origin-by-origin pipeline."""
+    dates = pd.bdate_range("2018-01-31", periods=n_dates, freq="ME")
+    rows = []
+    for date in dates:
+        for ticker in tickers:
+            momentum = rng.normal()
+            reversal = rng.normal()
+            target = 0.5 * momentum + rng.normal(scale=0.15)
+            rows.append(
+                {
+                    "date": date,
+                    "ticker": ticker,
+                    "momentum": momentum,
+                    "reversal": reversal,
+                    "target": target,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_fit_simple_average_combines_components_and_tolerates_a_missing_signal():
+    rng = np.random.default_rng(11)
+    panel = _synthetic_signal_panel(rng)
+    model = fit_simple_average(panel, ["momentum", "reversal"], maxlags=1, min_observations=10)
+    assert set(model.models) == {"momentum", "reversal"}
+
+    both = panel.iloc[[0]].copy()
+    momentum_only = model.models["momentum"].predict(both[["momentum"]]).iloc[0]
+    reversal_only = model.models["reversal"].predict(both[["reversal"]]).iloc[0]
+    both_prediction = model.predict(both).iloc[0]
+    assert both_prediction == pytest.approx((momentum_only + reversal_only) / 2)
+
+    missing_reversal = both.copy()
+    missing_reversal["reversal"] = np.nan
+    partial_prediction = model.predict(missing_reversal).iloc[0]
+    assert partial_prediction == pytest.approx(momentum_only)
+
+
+def test_fit_simple_average_drops_a_sparse_component():
+    rng = np.random.default_rng(12)
+    panel = _synthetic_signal_panel(rng)
+    sparse = panel.copy()
+    sparse.loc[sparse.index[5:], "reversal"] = np.nan  # far below min_observations
+    model = fit_simple_average(sparse, ["momentum", "reversal"], maxlags=1, min_observations=10)
+    assert "momentum" in model.models
+    assert "reversal" not in model.models
+
+
+def test_ridge_shrinks_the_momentum_coefficient_as_alpha_grows():
+    rng = np.random.default_rng(13)
+    panel = _synthetic_signal_panel(rng, n_dates=80)
+    small_alpha = fit_ridge_or_lasso(panel, ["momentum", "reversal"], alpha=0.01, method="ridge")
+    large_alpha = fit_ridge_or_lasso(panel, ["momentum", "reversal"], alpha=1000.0, method="ridge")
+    assert small_alpha.coefficients["momentum"] > 0  # recovers the true positive relationship
+    assert abs(large_alpha.coefficients["momentum"]) < abs(small_alpha.coefficients["momentum"])
+
+
+def test_lasso_zeroes_coefficients_at_a_large_enough_alpha():
+    rng = np.random.default_rng(14)
+    panel = _synthetic_signal_panel(rng, n_dates=80)
+    model = fit_ridge_or_lasso(panel, ["momentum", "reversal"], alpha=100.0, method="lasso")
+    assert model.coefficients["momentum"] == pytest.approx(0.0, abs=1e-9)
+    assert model.coefficients["reversal"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_ridge_lasso_raise_below_the_minimum_row_count():
+    tiny = pd.DataFrame({"momentum": [0.1] * 10, "reversal": [0.2] * 10, "target": [0.01] * 10})
+    with pytest.raises(ValueError):
+        fit_ridge_or_lasso(tiny, ["momentum", "reversal"], alpha=1.0, method="ridge")
+
+
+def test_ridge_or_lasso_rejects_an_unknown_method():
+    rng = np.random.default_rng(15)
+    panel = _synthetic_signal_panel(rng)
+    with pytest.raises(ValueError):
+        fit_ridge_or_lasso(panel, ["momentum"], alpha=1.0, method="elasticnet")
+
+
+@pytest.mark.parametrize(
+    "spec_factory",
+    [
+        lambda cols: single_or_combined_spec("combined", cols, maxlags=1),
+        lambda cols: simple_average_spec(cols, maxlags=1),
+        lambda cols: shrinkage_spec(cols, alpha=1.0, method="ridge"),
+        lambda cols: shrinkage_spec(cols, alpha=1.0, method="lasso"),
+    ],
+)
+def test_candidate_spec_evaluate_returns_the_expected_metric_keys(spec_factory):
+    rng = np.random.default_rng(16)
+    panel = _synthetic_signal_panel(rng, n_dates=90)
+    spec = spec_factory(["momentum", "reversal"])
+    outcome = spec.evaluate(panel, n_folds=4, gap_periods=1)
+    assert outcome is not None
+    for key in ("signal", "n_obs", "n_cv_test_obs", "cv_oos_r2", "clark_west_t", "rank_ic_mean"):
+        assert key in outcome
+    assert outcome["signal"] == spec.label
+
+
+def test_candidate_spec_evaluate_recovers_the_true_momentum_effect():
+    """The combined regression should score positively out of sample on data where momentum
+    genuinely predicts the target -- the sanity check that the new CV harness (shared by
+    every candidate on the ladder) isn't silently scoring something other than what it
+    claims to."""
+    rng = np.random.default_rng(17)
+    panel = _synthetic_signal_panel(rng, n_dates=100)
+    spec = single_or_combined_spec("combined", ["momentum", "reversal"], maxlags=1)
+    outcome = spec.evaluate(panel, n_folds=4, gap_periods=1)
+    assert outcome is not None
+    assert outcome["cv_oos_r2"] > 0
+
+
+def test_select_alpha_by_cv_picks_a_value_from_the_grid():
+    rng = np.random.default_rng(18)
+    panel = _synthetic_signal_panel(rng, n_dates=90)
+    grid = [0.1, 1.0, 10.0, 100.0]
+    alpha, outcome = select_alpha_by_cv(panel, ["momentum", "reversal"], "ridge", grid, 4, 1)
+    assert alpha in grid
+    assert outcome is None or "cv_oos_r2" in outcome
+
+
+def test_quantile_regressions_are_monotonic_in_quantile_level_on_average():
+    rng = np.random.default_rng(19)
+    panel = _synthetic_signal_panel(rng, n_dates=80)
+    models = fit_quantile_regressions(
+        panel, ["momentum", "reversal"], (0.05, 0.25, 0.5, 0.75, 0.95)
+    )
+    assert set(models) == {0.05, 0.25, 0.5, 0.75, 0.95}
+    predictions = predict_quantiles(models, panel)
+    means = [predictions[q].mean() for q in (0.05, 0.25, 0.5, 0.75, 0.95)]
+    assert means == sorted(means)
+
+
+def test_quantile_regressions_raises_below_the_minimum_row_count():
+    tiny = pd.DataFrame({"momentum": [0.1] * 10, "reversal": [0.2] * 10, "target": [0.01] * 10})
+    with pytest.raises(ValueError):
+        fit_quantile_regressions(tiny, ["momentum", "reversal"], (0.5,))
+
+
+def test_cross_validated_pinball_losses_are_nonnegative_for_the_median():
+    rng = np.random.default_rng(21)
+    panel = _synthetic_signal_panel(rng, n_dates=90)
+    losses = cross_validated_pinball_losses(
+        panel, ["momentum", "reversal"], (0.5,), n_folds=4, gap_periods=1
+    )
+    assert np.isfinite(losses[0.5])
+    assert losses[0.5] >= 0
+
+
+def test_candidate_spec_evaluate_raises_when_too_few_dates_for_the_requested_folds():
+    rng = np.random.default_rng(22)
+    panel = _synthetic_signal_panel(rng, n_dates=10)  # date_grouped_gapped_splits needs >= 15
+    spec = single_or_combined_spec("combined", ["momentum", "reversal"], maxlags=1)
+    with pytest.raises(ValueError):
+        spec.evaluate(panel, n_folds=5, gap_periods=1)
