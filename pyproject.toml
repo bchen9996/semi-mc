@@ -17,6 +17,11 @@ dependencies = [
     "yfinance>=0.2.40,<1",
     # yfinance scrapes earnings dates via pandas.read_html, which needs an HTML parser.
     "lxml>=5,<7",
+    # Addendum section 4: robust standard errors (Driscoll-Kraay), quantile regression,
+    # and Markov regime switching.
+    "statsmodels>=0.14,<1",
+    # Addendum section 4: ridge/lasso, date-grouped cross-validation, pinball loss.
+    "scikit-learn>=1.4,<2",
 ]
 
 [project.optional-dependencies]

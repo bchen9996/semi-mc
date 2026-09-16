@@ -76,7 +76,21 @@ def volumes() -> pd.DataFrame:
 
 
 @pytest.fixture
-def market(config, prices, volumes) -> MarketData:
+def ohlc() -> dict[str, pd.DataFrame]:
+    """Adjusted OHLC frames for the fixture universe, keyed like ``PriceCache.ohlc``."""
+    columns = {"open": "adj_open", "high": "adj_high", "low": "adj_low", "close": "adj_close"}
+    out: dict[str, pd.DataFrame] = {}
+    for key, column in columns.items():
+        frames = {}
+        for ticker in FIXTURE_TICKERS:
+            frame = pd.read_csv(FIXTURES / f"{ticker}.csv", parse_dates=["date"])
+            frames[ticker] = frame.set_index("date")[column]
+        out[key] = pd.DataFrame(frames)
+    return out
+
+
+@pytest.fixture
+def market(config, prices, volumes, ohlc) -> MarketData:
     """A :class:`MarketData` built straight from the fixture frames."""
     return MarketData(
         prices=prices,
@@ -86,6 +100,7 @@ def market(config, prices, volumes) -> MarketData:
             load_risk_free_series(FIXTURES / "risk_free_3m.csv"), 0.042, expect_point_in_time=True
         ),
         earnings=load_calendar(FIXTURES / "earnings_calendar.csv"),
+        ohlc=ohlc,
     )
 
 

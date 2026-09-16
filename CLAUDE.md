@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-Working notes for this repo. Read `BRIEF.md` for what the project is for; this file is the
-how.
+Working notes for this repo. Read `BRIEF.md` for what the project is for and
+`BRIEF_ADDENDUM.md` for the Phase 4/4B extensions; this file is the how.
 
 ## Stack
 
@@ -9,22 +9,27 @@ Python 3.12 (pinned in `.python-version` — `pyarrow` has no wheels for the new
 interpreter), managed with `uv`, packaged as `semimc` in a `src/` layout. Dependencies are
 pinned in `uv.lock`.
 
-numpy · pandas · scipy · arch (GARCH, block-length estimator) · matplotlib · pyarrow ·
-pydantic v2 (config validation) · typer (CLI) · pyyaml · yfinance. Dev: pytest, ruff.
+numpy · pandas · scipy · arch (GARCH, block-length estimator) · statsmodels (Driscoll-Kraay,
+quantile regression, Markov switching — **never `import statsmodels.api`**, see Gotchas) ·
+scikit-learn (pinball loss) · matplotlib · pyarrow · pydantic v2 (config validation) ·
+typer (CLI) · pyyaml · yfinance · lxml (earnings-date scraping via `pandas.read_html`).
+Dev: pytest, ruff.
 
 ## Commands
 
 ```bash
-uv run pytest                                   # all tests, no network
-uv run ruff check . && uv run ruff format .     # lint + format
-uv run semimc fetch [--risk-free] [--earnings]  # download / refresh cached data
-uv run semimc validate                          # data quality + universe statistics
+uv run pytest                                      # all tests, no network
+uv run ruff check . && uv run ruff format .        # lint + format
+uv run semimc fetch [--risk-free] [--earnings] [--industry]   # download / refresh cached data
+uv run semimc validate                             # data quality + universe statistics
 uv run semimc simulate --ticker NVDA --horizon 126 --model garch_t
 uv run semimc simulate --portfolio "NVDA=0.5,AMD=0.5" --horizon 126
+uv run semimc simulate --ticker NVDA --horizon 21 --tilt   # + the Phase 4B drift tilt
 uv run semimc backtest --models gbm,bootstrap,garch_t --horizons 21,63
+uv run semimc signals --horizon 21 [--holdout]      # evaluate the Phase 4B signals
 uv run semimc scenario --name sector_shock_25
 uv run semimc report --run latest
-uv run semimc models                            # list available models
+uv run semimc models                                # list available models
 ```
 
 Every command takes `--config PATH` and repeatable `--set key.path=value` overrides
@@ -65,6 +70,15 @@ Regenerate test fixtures with `uv run python tests/fixtures/make_fixtures.py`.
   outside `data/provider.py` (and the optional earnings/FRED helpers).
 - **Charts return Figures; they do not write files.** The caller decides where output goes,
   which is why the same code serves the CLI, the HTML report and a notebook.
+- **A drift tilt is a separate, auditable layer, not a change to the drift policy.**
+  `FitContext.drift_tilt` (a `DriftTilt`) is applied in `BaseReturnModel.simulate` on top
+  of `daily_log_drift`, which stays exactly what the configured policy alone implies. This
+  is what lets `--tilt` be optional everywhere and the policy stay recoverable from a
+  fitted model even when a tilt is active.
+- **Signals and regressions never bypass `MarketData`.** `build_full_panel`
+  (`forecasting/pipeline.py`) is the only place a Phase 4B panel is assembled in a loop; it
+  calls `build_regression_row`, which calls `signal_panel`, which is the only caller of the
+  four ticker-level signal builders. One choke point per data path, same as `training_window`.
 
 ## Boundaries
 
@@ -86,6 +100,10 @@ Regenerate test fixtures with `uv run python tests/fixtures/make_fixtures.py`.
 - Changing the model interface, the default assumptions (drift, fit window, universe), or
   the scoring metrics.
 - Changing the phase order in `tasks/plan.md`.
+- Scraping any website. TSMC monthly revenue and SIA global sales were both ruled out for
+  this reason; the industry-cycle signal uses FRED instead (`signals/external.py`).
+- Adding fixed effects to the Phase 4B panel regression, or signals beyond the addendum's
+  list of five.
 
 **Never**
 
@@ -96,13 +114,22 @@ Regenerate test fixtures with `uv run python tests/fixtures/make_fixtures.py`.
 - Present output as a price target or point prediction. Always distributions and
   probabilities.
 - Tune a model on the same periods used to report its backtest results without saying so.
+- Use a Phase 4B signal's value, or a supply-chain link's existence, before its own
+  `release_date`/`as_of` — enforced in `signals/external.py:as_of` and
+  `signals/supply_chain.py:links_known_at`.
+- Use a smoothed regime probability as a simulation's starting state. Filtered only.
+- Look at the Phase 4B holdout result before the final, one-time evaluation
+  (`semimc signals --holdout`). Not yet run against the real universe — see
+  `research_log.md`.
 
 ## Testing
 
 `tests/fixtures/*.csv` are committed synthetic data with known properties: a GJR-GARCH with
 known parameters, Student-t innovations, a market and sector factor, scheduled earnings
-jumps, and one deliberately corrupted file (`BROKEN.csv`) carrying an unadjusted 10-for-1
-split, a gap, a stale run and a zero-volume day.
+jumps, adjusted OHLC generated from a Brownian bridge scaled to a trailing realized-vol
+proxy (so Garman-Klass has something genuine to measure), and one deliberately corrupted
+file (`BROKEN.csv`) carrying an unadjusted 10-for-1 split, a gap, a stale run and a
+zero-volume day. Regenerate with `uv run python tests/fixtures/make_fixtures.py`.
 
 Tests never touch the network: the test config sets `data.provider: csv` pointed at that
 directory. A `network` marker exists and is deselected by default.
@@ -123,5 +150,33 @@ compared to a closed form, the closed form is written out in the test.
 - **A Cholesky factor applied to Student-t draws breaks the marginals.** Use a Gaussian
   copula: correlate normals, push through `Phi`, then the `t` quantile function.
 - **GARCH needs returns rescaled by 100** or the optimizer stalls on a flat likelihood.
+  `MarkovRegression` (the `regime` model) hits the identical failure mode at the identical
+  scale — non-finite filtered probabilities while *reporting* convergence — and is fixed
+  the same way.
 - **Near-integrated GARCH fits are common.** At persistence ≥ 1 the long-run variance does
   not exist; the code falls back to the one-step forecast and warns.
+- **Never `import statsmodels.api`.** It pulls in the Kalman-filter state-space code, whose
+  compiled `_kalman_filter`/`_qn` extensions are blocked by Windows Application Control on
+  this machine. Every submodule actually used here (`regression.linear_model`,
+  `regression.quantile_regression`, `tsa.regime_switching.markov_regression`,
+  `stats.sandwich_covariance`) imports fine on its own — import those directly.
+  `tests/test_imports.py` runs every module in a fresh subprocess and would catch a
+  regression here.
+- **A demeaned series divided by a time-varying scale is not zero-mean.** HAR's
+  standardized residuals looked demeaned (numerator was `x - x.mean()`) but dividing by a
+  scale that correlates with return sign reintroduces a small mean, and bootstrapping that
+  sample as innovations injected real drift into every simulated path. Fixed by
+  demeaning-and-rescaling *after* cross-ticker alignment, the same pattern `fhs.py` already
+  used — see MODEL_NOTES §10.
+- **HAR needs OHLC; an older cache silently doesn't have it.** `PriceCache` carries a
+  `schema_version` in its metadata (currently 2, added for adjusted open/high/low) so a
+  pre-addendum cache is detected as stale and refetched rather than read with columns that
+  don't exist.
+- **`semimc signals --holdout` wrote into the real repo's `research_log.md` during a
+  fixture-based CLI smoke test**, because it resolved the log path from `cfg.project_root`
+  directly instead of through `cfg.path()`, and `project_root` is not one of the things a
+  `--set` override can redirect (`load_config` sets it *after* applying overrides). Fixed
+  by adding `signals.research_log` (default `"research_log.md"`, resolved like every other
+  config-relative path) and using `cfg.path(cfg.signals.research_log)` instead — tests
+  redirect it with an absolute `-s` override. Any future command that writes outside
+  `reporting.runs_dir` needs the same pattern, not a hand-rolled path off `project_root`.

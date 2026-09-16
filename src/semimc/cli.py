@@ -93,6 +93,14 @@ def fetch(
         bool,
         typer.Option("--earnings", help="Also seed the earnings calendar CSV from the provider."),
     ] = False,
+    industry: Annotated[
+        bool,
+        typer.Option(
+            "--industry",
+            help="Also seed the industry-cycle series (addendum signal 4) from FRED. "
+            "Release dates are approximated -- see signals/external.py.",
+        ),
+    ] = False,
     config: ConfigOption = None,
     set_: SetOption = None,
     verbose: VerboseOption = False,
@@ -171,6 +179,35 @@ def fetch(
                 "earnings model.",
                 fg=typer.colors.YELLOW,
             )
+
+    if industry:
+        from .signals.external import (
+            ExternalSeriesError,
+            fetch_fred_series,
+            with_approximate_release_dates,
+            write_external_series,
+        )
+
+        typer.echo(f"\nDownloading {cfg.signals.industry_series_id} from FRED ...")
+        try:
+            raw = fetch_fred_series(cfg.signals.industry_series_id)
+            frame = with_approximate_release_dates(
+                raw, cfg.signals.industry_series_id, cfg.signals.industry_publication_lag_days
+            )
+            series_id = cfg.signals.industry_series_id
+            destination = cfg.path(cfg.signals.external_dir) / f"{series_id}.csv"
+            write_external_series(frame, destination)
+            typer.secho(
+                f"  {len(frame):,} rows, {frame['period'].min().date()} to "
+                f"{frame['period'].max().date()}, written to {destination}.\n"
+                "  This is FRED's revised, current vintage -- not the value as first "
+                "published -- and release_date is approximated as period + "
+                f"{cfg.signals.industry_publication_lag_days}d, not a fact. Revision bias "
+                "is a real limitation on this signal; see MODEL_NOTES.",
+                fg=typer.colors.YELLOW,
+            )
+        except ExternalSeriesError as exc:
+            typer.secho(f"  failed: {exc}", fg=typer.colors.RED)
 
 
 # ---------------------------------------------------------------------------------------
@@ -268,6 +305,16 @@ def simulate(
         typer.Option("--above", help="Report the probability of finishing above this price."),
     ] = None,
     seed: Annotated[int | None, typer.Option("--seed", help="Overrides simulation.seed.")] = None,
+    tilt: Annotated[
+        bool,
+        typer.Option(
+            "--tilt",
+            help="Apply the addendum's Phase 4B regression-based drift tilt on top of the "
+            "configured policy drift. Fits the pooled relative-signal regression on "
+            "everything available up to the forecast origin; if there isn't enough "
+            "history the run proceeds untilted and says so.",
+        ),
+    ] = False,
     config: ConfigOption = None,
     set_: SetOption = None,
     verbose: VerboseOption = False,
@@ -309,11 +356,47 @@ def simulate(
     training = market.training_window(symbols, as_of)
     context = market.context(as_of)
 
+    tilt_diagnostics: dict | None = None
+    if tilt:
+        from .forecasting.pipeline import fit_live_tilt, load_supply_chain_links_if_present
+
+        links = load_supply_chain_links_if_present(cfg.path(cfg.signals.supply_chain_links))
+        outcome = fit_live_tilt(
+            market,
+            cfg,
+            symbols,
+            as_of,
+            horizon_days=horizon,
+            supply_chain_links=links,
+            rng=np.random.default_rng(used_seed),
+        )
+        if outcome.tilt is None:
+            typer.secho(
+                f"--tilt requested but no tilt could be fitted ({outcome.reason}); "
+                "proceeding on the policy drift alone.",
+                fg=typer.colors.YELLOW,
+            )
+        else:
+            context = context.with_tilt(outcome.tilt)
+            typer.echo(
+                f"Drift tilt fitted on {outcome.n_training_rows} rows across "
+                f"{outcome.n_origins} origins ({', '.join(outcome.feature_columns)}): "
+                f"{outcome.tilt.describe()['annual_tilt']}"
+            )
+        tilt_diagnostics = {
+            "applied": outcome.tilt is not None,
+            "reason": outcome.reason,
+            "feature_columns": outcome.feature_columns,
+            "n_training_rows": outcome.n_training_rows,
+            "n_origins": outcome.n_origins,
+            "diagnostics": outcome.diagnostics,
+        }
+
     typer.echo(
         f"Fitting {model} on {len(training):,} days to {as_of.date()} "
         f"({training.index.min().date()} onward), drift policy {cfg.drift.policy}."
     )
-    fitted = build_model(model, cfg).fit(training, context)
+    fitted = build_model(model, cfg, market=market).fit(training, context)
 
     run = RunDirectory.create(
         cfg.runs_path,
@@ -327,6 +410,8 @@ def simulate(
     run.record("horizon", horizon)
     run.record("n_paths", n_paths)
     run.record("as_of", str(as_of.date()))
+    if tilt_diagnostics is not None:
+        run.record("drift_tilt", tilt_diagnostics)
 
     spot = market.spot(symbols, as_of)
     result = run_simulation(
@@ -617,7 +702,7 @@ def scenario(
 
     from .models import build_model
 
-    fitted = build_model(model, cfg).fit(training, context)
+    fitted = build_model(model, cfg, market=market).fit(training, context)
     simulated = np.asarray(fitted.simulate(n_paths, horizon, rng), dtype=float)
 
     sector = market.log_returns.get(cfg.benchmarks.sector)
@@ -776,6 +861,289 @@ def models() -> None:
     typer.echo("Available models:")
     for name in MODEL_NAMES:
         typer.echo(f"  {name}")
+
+
+# ---------------------------------------------------------------------------------------
+# signals (addendum Phase 4B)
+# ---------------------------------------------------------------------------------------
+
+
+@app.command()
+def signals(
+    tickers: Annotated[str | None, typer.Option("--tickers", "-t", help="Comma-separated.")] = None,
+    horizon: Annotated[
+        int | None,
+        typer.Option("--horizon", "-h", help="Trading days. Defaults to signals.horizons[0]."),
+    ] = None,
+    holdout: Annotated[
+        bool,
+        typer.Option(
+            "--holdout",
+            help="Also evaluate the frozen holdout window. Reported once, whatever it "
+            "shows -- refuses to run twice against the same config so the holdout cannot "
+            "quietly be re-tried until it looks good.",
+        ),
+    ] = False,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Evaluate the Phase 4B candidate signals: single-signal, combined, and the sector tilt.
+
+    Everything before the holdout is standard walk-forward cross-validation on dates, with
+    a gap at least as long as the horizon (``forecasting.cv``) -- never a plain random
+    split, which would let two halves of one overlapping return window land on opposite
+    sides of a fold. Pass ``--holdout`` only when you are ready to see the one-time result;
+    it is written to ``research_log.md`` and cannot be silently re-run.
+    """
+    cfg = _setup(config, set_, verbose)
+    from .data import load_market_data
+    from .forecasting import (
+        date_grouped_gapped_splits,
+        fit_driscoll_kraay,
+        training_rows,
+    )
+    from .forecasting.evaluate import (
+        clark_west_statistic,
+        oos_r_squared,
+        rank_information_coefficient,
+    )
+    from .forecasting.pipeline import (
+        RELATIVE_SIGNAL_COLUMNS,
+        build_full_panel,
+        load_supply_chain_links_if_present,
+    )
+    from .forecasting.sector import build_sector_regression_row, fit_sector_tilt, sector_factor
+    from .runs import RunDirectory
+    from .signals.external import ExternalSeriesError, load_external_series
+
+    symbols = [t.strip().upper() for t in tickers.split(",")] if tickers else cfg.universe.tickers
+    h = horizon or cfg.signals.horizons[0]
+
+    market = load_market_data(
+        cfg, tickers=list(dict.fromkeys(symbols + cfg.benchmarks.tickers)), for_backtest=True
+    )
+    links = load_supply_chain_links_if_present(cfg.path(cfg.signals.supply_chain_links))
+    customer_returns = market.log_returns if links is not None else None
+
+    last_date = market.last_date
+    holdout_start = last_date - pd.DateOffset(months=cfg.signals.holdout_months)
+
+    typer.echo(f"Building the signal panel for {len(symbols)} tickers at {h}-day horizon ...")
+    panel = build_full_panel(
+        market,
+        symbols,
+        h,
+        start=cfg.backtest.start,
+        end=last_date,
+        supply_chain_links=links,
+        customer_returns=customer_returns,
+        momentum_lookback_days=cfg.signals.momentum_lookback_days,
+        momentum_skip_days=cfg.signals.momentum_skip_days,
+        relative_strength_lookback_days=cfg.signals.relative_strength_lookback_days,
+        earnings_drift_active_days=cfg.signals.earnings_drift_active_days,
+    )
+    if panel.empty:
+        typer.secho("No origins produced a panel row.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    realized = training_rows(panel, last_date)
+    pre_holdout = realized[realized["date"] < holdout_start].copy()
+    holdout_rows = realized[realized["date"] >= holdout_start].copy() if holdout else pd.DataFrame()
+
+    available_columns = [c for c in RELATIVE_SIGNAL_COLUMNS if pre_holdout[c].notna().mean() > 0.5]
+    if not available_columns:
+        typer.secho("No signal has enough coverage to evaluate.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    maxlags = max(1, round(cfg.signals.driscoll_kraay_lag_per_horizon * h / 21))
+    candidates: dict[str, list[str]] = {c: [c] for c in available_columns}
+    if len(available_columns) > 1:
+        candidates["combined"] = available_columns
+
+    def _cv_evaluate(columns: list[str]) -> dict | None:
+        usable = pre_holdout.dropna(subset=[*columns, "target"])
+        if len(usable) < cfg.signals.min_regression_observations:
+            return None
+        splits = date_grouped_gapped_splits(
+            usable["date"], n_folds=cfg.signals.cv_n_folds, gap_periods=cfg.signals.cv_gap_periods
+        )
+        actual_folds, pred_folds, date_folds = [], [], []
+        for train_dates, test_dates in splits:
+            train_fold = usable[usable["date"].isin(train_dates)]
+            test_fold = usable[usable["date"].isin(test_dates)]
+            if len(train_fold) < 15 or test_fold.empty:
+                continue
+            try:
+                result = fit_driscoll_kraay(train_fold, columns, maxlags=maxlags)
+            except ValueError:
+                continue
+            actual_folds.append(test_fold["target"].to_numpy())
+            pred_folds.append(result.predict(test_fold[columns]).to_numpy())
+            date_folds.append(test_fold["date"])
+        if not actual_folds:
+            return None
+        actual = np.concatenate(actual_folds)
+        predicted = np.concatenate(pred_folds)
+        dates = pd.concat(date_folds, ignore_index=True)
+        r2 = oos_r_squared(actual, predicted)
+        cw_t, cw_p = clark_west_statistic(actual, np.zeros_like(actual), predicted)
+        ic = rank_information_coefficient(pd.Series(predicted), pd.Series(actual), dates)
+        full_fit = fit_driscoll_kraay(usable, columns, maxlags=maxlags)
+        effect = full_fit.annualized_effect_size(cfg.simulation.trading_days_per_year, h)
+        return {
+            "n_obs": len(usable),
+            "n_cv_test_obs": len(actual),
+            "cv_oos_r2": r2,
+            "clark_west_t": cw_t,
+            "clark_west_p": cw_p,
+            "rank_ic_mean": ic["mean_ic"],
+            "rank_ic_t": ic["t_stat"],
+            "rank_ic_n_dates": ic["n_dates"],
+            "coefficients": full_fit.coefficients.to_dict(),
+            "t_stats": full_fit.t_stats.to_dict(),
+            "annualized_effect": {c: float(effect.get(c, float("nan"))) for c in columns},
+        }
+
+    report_rows = []
+    for label, columns in candidates.items():
+        outcome = _cv_evaluate(columns)
+        if outcome is None:
+            continue
+        scalars = {k: v for k, v in outcome.items() if not isinstance(v, dict)}
+        report_rows.append({"signal": label, **scalars})
+    report = pd.DataFrame(report_rows).sort_values("cv_oos_r2", ascending=False)
+
+    typer.echo(
+        f"\nPre-holdout, cross-validated (n_folds={cfg.signals.cv_n_folds}), {h}-day horizon:"
+    )
+    _echo_table(report.set_index("signal"))
+
+    # Sector tilt, if the industry series has been fetched.
+    industry_path = cfg.path(cfg.signals.external_dir) / f"{cfg.signals.industry_series_id}.csv"
+    sector_result = None
+    if industry_path.exists():
+        try:
+            external = load_external_series(industry_path)
+            sector_returns = sector_factor(
+                market.log_returns[cfg.benchmarks.market], market.log_returns[cfg.benchmarks.sector]
+            )
+            origins = panel["date"].drop_duplicates().sort_values()
+            sector_rows = pd.DataFrame(
+                [build_sector_regression_row(sector_returns, external, o, h) for o in origins]
+            )
+            sector_pre = sector_rows[sector_rows["date"] < holdout_start].dropna(
+                subset=["industry_yoy", "target"]
+            )
+            if len(sector_pre) >= 12:
+                sector_result = fit_sector_tilt(sector_pre, maxlags=maxlags)
+                coef = sector_result.coefficients["industry_yoy"]
+                t_stat = sector_result.t_stats["industry_yoy"]
+                typer.echo(
+                    f"\nSector tilt (industry cycle -> sector factor), "
+                    f"n={sector_result.n_observations}: coef={coef:.4f} t={t_stat:.2f} "
+                    f"R^2={sector_result.r_squared:.4f}"
+                )
+            else:
+                typer.echo(f"\nSector tilt: only {len(sector_pre)} usable rows, skipped.")
+        except ExternalSeriesError as exc:
+            typer.echo(f"\nSector tilt unavailable: {exc}")
+    else:
+        typer.echo(
+            f"\nSector tilt unavailable: no {industry_path.name} in {cfg.signals.external_dir}. "
+            "Run `semimc fetch --industry` to seed it."
+        )
+
+    run = RunDirectory.create(cfg.runs_path, "signals", cfg.to_dict(), seed=cfg.simulation.seed)
+    run.write_table(report, "signal_report", index=False)
+    run.record("horizon", h)
+    run.record("tickers", symbols)
+    run.record("available_columns", available_columns)
+    run.record("n_pre_holdout_rows", len(pre_holdout))
+    run.record("holdout_start", str(holdout_start.date()))
+    if sector_result is not None:
+        run.record(
+            "sector_tilt",
+            {
+                "coefficient": float(sector_result.coefficients["industry_yoy"]),
+                "t_stat": float(sector_result.t_stats["industry_yoy"]),
+                "r_squared": sector_result.r_squared,
+                "n_observations": sector_result.n_observations,
+            },
+        )
+
+    holdout_summary = ""
+    if holdout:
+        if h != cfg.signals.holdout_headline_horizon:
+            typer.secho(
+                f"\nWARNING: holdout at {h}d has low power (24mo leaves ~8 non-overlapping "
+                f"origins). The headline horizon is {cfg.signals.holdout_headline_horizon}d.",
+                fg=typer.colors.YELLOW,
+            )
+        holdout_columns = candidates.get("combined", available_columns)
+        usable_holdout = holdout_rows.dropna(subset=[*holdout_columns, "target"])
+        usable_pre = pre_holdout.dropna(subset=[*holdout_columns, "target"])
+        if len(usable_holdout) < 5 or len(usable_pre) < cfg.signals.min_regression_observations:
+            typer.secho(
+                f"\nHoldout requested but only {len(usable_holdout)} holdout rows / "
+                f"{len(usable_pre)} pre-holdout rows are usable; not evaluated.",
+                fg=typer.colors.YELLOW,
+            )
+        else:
+            final_fit = fit_driscoll_kraay(usable_pre, holdout_columns, maxlags=maxlags)
+            predicted = final_fit.predict(usable_holdout[holdout_columns]).to_numpy()
+            actual = usable_holdout["target"].to_numpy()
+            r2 = oos_r_squared(actual, predicted)
+            cw_t, cw_p = clark_west_statistic(actual, np.zeros_like(actual), predicted)
+            holdout_summary = (
+                f"\n=== ONE-TIME HOLDOUT RESULT ({h}d, {holdout_start.date()} onward, "
+                f"n={len(usable_holdout)}) ===\n"
+                f"OOS R^2: {r2:.4f}   Clark-West t: {cw_t:.2f} (p={cw_p:.3f})\n"
+                "Reported once, regardless of outcome, per the addendum's evaluation rule."
+            )
+            typer.echo(holdout_summary)
+            run.record(
+                "holdout_result",
+                {
+                    "horizon": h,
+                    "n_observations": len(usable_holdout),
+                    "oos_r2": r2,
+                    "clark_west_t": cw_t,
+                    "clark_west_p": cw_p,
+                },
+            )
+
+            log_path = cfg.path(cfg.signals.research_log)
+            entry = (
+                f"\n## {pd.Timestamp.now().strftime('%Y-%m-%d')} -- holdout evaluation ({h}d)\n\n"
+                f"- Tickers: {', '.join(symbols)}\n"
+                f"- Signals: {', '.join(holdout_columns)}\n"
+                f"- Pre-holdout training rows: {len(usable_pre)}\n"
+                f"- Holdout window: {holdout_start.date()} onward ({len(usable_holdout)} rows)\n"
+                f"- OOS R^2: {r2:.4f}\n"
+                f"- Clark-West t: {cw_t:.2f} (p={cw_p:.3f})\n"
+                f"- Run: {run.path.name}\n"
+            )
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(entry)
+            typer.echo(f"Appended to {log_path}")
+
+    text_lines = [
+        f"# Signal evaluation: {h}-day horizon",
+        "",
+        f"Tickers: {', '.join(symbols)}",
+        f"Pre-holdout rows: {len(pre_holdout)}; holdout starts {holdout_start.date()}",
+        "",
+        "## Pre-holdout, cross-validated",
+        "",
+        "```\n" + report.set_index("signal").to_string() + "\n```"
+        if not report.empty
+        else "(no candidate had enough data)",
+    ]
+    if holdout_summary:
+        text_lines.append(holdout_summary)
+    run.write_text("\n".join(text_lines), "summary")
+    typer.echo(f"\nWritten to {run.close()}")
 
 
 if __name__ == "__main__":  # pragma: no cover

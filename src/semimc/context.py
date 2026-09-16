@@ -11,10 +11,105 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:  # imported for typing only, so no runtime dependency on semimc.data
     from .data.earnings import EarningsCalendar
+
+
+@dataclass(frozen=True)
+class DriftTilt:
+    """A regression-implied adjustment to the configured drift (addendum Phase 4B).
+
+    The drift policy decides a baseline expected return that no model may override. A
+    tilt is the one sanctioned way to move it, and it is kept as a separate object rather
+    than folded into the policy so that the baseline is always recoverable and the tilt is
+    always auditable: every number below is a *deviation*, in annual arithmetic units.
+
+    Attributes
+    ----------
+    tickers
+        Column order the arrays below are indexed by.
+    point
+        ``(n_tickers,)`` annual arithmetic tilt, already shrunk towards zero and capped.
+    draws
+        ``(n_sets, n_tickers)`` coefficient-uncertainty sets from a block bootstrap over
+        *dates*. Demeaned at construction so their column means equal ``point`` exactly,
+        which is what lets the simulator add per-path deviations without moving the
+        expected drift.
+    horizon_days
+        Number of simulated steps the tilt applies for. Beyond that the path reverts to
+        the policy drift, because a tilt estimated on 21-day forward returns says nothing
+        about day 200.
+    label
+        Which specification produced it, recorded in run manifests.
+    """
+
+    tickers: list[str]
+    point: np.ndarray
+    draws: np.ndarray
+    horizon_days: int
+    label: str = "tilt"
+
+    @staticmethod
+    def build(
+        tickers: list[str],
+        point: np.ndarray,
+        draws: np.ndarray | None,
+        horizon_days: int,
+        label: str = "tilt",
+    ) -> DriftTilt:
+        """Construct a tilt, centring ``draws`` on ``point``.
+
+        Centring matters: an uncentred bootstrap cloud would shift the mean drift by
+        whatever asymmetry the resampling happened to produce, so coefficient uncertainty
+        would silently become a second, unintended drift policy.
+        """
+        centre = np.asarray(point, dtype=float).reshape(-1)
+        if centre.shape[0] != len(tickers):
+            raise ValueError(f"point tilt has {centre.shape[0]} entries for {len(tickers)} tickers")
+        if draws is None or len(draws) == 0:
+            cloud = centre.reshape(1, -1)
+        else:
+            raw = np.asarray(draws, dtype=float)
+            if raw.ndim != 2 or raw.shape[1] != len(tickers):
+                raise ValueError(f"draws must be (n_sets, {len(tickers)}), got {raw.shape}")
+            cloud = raw - raw.mean(axis=0, keepdims=True) + centre.reshape(1, -1)
+        return DriftTilt(
+            tickers=list(tickers),
+            point=centre,
+            draws=cloud,
+            horizon_days=int(horizon_days),
+            label=label,
+        )
+
+    def aligned_to(self, tickers: list[str]) -> DriftTilt | None:
+        """Reorder to ``tickers``, or ``None`` when any of them has no tilt.
+
+        Returning ``None`` rather than a zero is deliberate: a model fitted on a ticker the
+        regression never saw should run untilted, not run with a silently invented tilt.
+        """
+        try:
+            positions = [self.tickers.index(t) for t in tickers]
+        except ValueError:
+            return None
+        return DriftTilt(
+            tickers=list(tickers),
+            point=self.point[positions],
+            draws=self.draws[:, positions],
+            horizon_days=self.horizon_days,
+            label=self.label,
+        )
+
+    def describe(self) -> dict:
+        """Summary for run manifests."""
+        return {
+            "label": self.label,
+            "horizon_days": int(self.horizon_days),
+            "n_coefficient_sets": int(self.draws.shape[0]),
+            "annual_tilt": {t: float(v) for t, v in zip(self.tickers, self.point, strict=True)},
+        }
 
 
 @dataclass(frozen=True)
@@ -41,6 +136,7 @@ class FitContext:
     shrinkage_weight: float = 0.25
     manual_annual_return: dict[str, float] = field(default_factory=dict)
     earnings: EarningsCalendar | None = None
+    drift_tilt: DriftTilt | None = None
 
     @property
     def market(self) -> pd.Series | None:
@@ -87,4 +183,22 @@ class FitContext:
             shrinkage_weight=self.shrinkage_weight,
             manual_annual_return=dict(self.manual_annual_return),
             earnings=self.earnings,  # schedule stays known; see the docstring above
+            drift_tilt=self.drift_tilt,
+        )
+
+    def with_tilt(self, tilt: DriftTilt | None) -> FitContext:
+        """Copy carrying ``tilt``. The only supported way to set one."""
+        return FitContext(
+            as_of=self.as_of,
+            risk_free_rate=self.risk_free_rate,
+            benchmark_returns=self.benchmark_returns,
+            market_ticker=self.market_ticker,
+            sector_ticker=self.sector_ticker,
+            trading_days_per_year=self.trading_days_per_year,
+            drift_policy=self.drift_policy,
+            equity_risk_premium=self.equity_risk_premium,
+            shrinkage_weight=self.shrinkage_weight,
+            manual_annual_return=dict(self.manual_annual_return),
+            earnings=self.earnings,
+            drift_tilt=tilt,
         )

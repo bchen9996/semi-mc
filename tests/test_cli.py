@@ -77,7 +77,18 @@ def latest_run(tmp_path: Path) -> Path:
 def test_models_lists_every_model():
     result = runner.invoke(app, ["models"])
     assert result.exit_code == 0
-    for name in ("gbm", "bootstrap", "garch_t", "earnings_jumps", "factor", "fhs"):
+    for name in (
+        "gbm",
+        "bootstrap",
+        "garch_t",
+        "earnings_jumps",
+        "factor",
+        "fhs",
+        "merton",
+        "har",
+        "regime",
+        "blend",
+    ):
         assert name in result.output
 
 
@@ -179,7 +190,9 @@ def test_simulate_rejects_both_ticker_and_portfolio(tmp_path):
     assert result.exit_code != 0
 
 
-@pytest.mark.parametrize("model", ["gbm", "bootstrap", "garch_t", "fhs", "factor"])
+@pytest.mark.parametrize(
+    "model", ["gbm", "bootstrap", "garch_t", "fhs", "factor", "merton", "har", "regime", "blend"]
+)
 def test_simulate_runs_for_every_model(workspace, model):
     invoke(
         ["simulate", "--ticker", "NVDA", "--horizon", "21", "--model", model, "--paths", "400"],
@@ -213,6 +226,84 @@ def test_backtest_produces_a_scorecard_and_summary(workspace):
     summary = (run / "summary.md").read_text(encoding="utf-8")
     assert "Caveats" in summary
     assert "survivorship" in summary.lower()
+
+
+def test_signals_evaluates_candidate_signals(workspace):
+    result = invoke(
+        [
+            "signals",
+            "--horizon",
+            "21",
+            "--set",
+            "signals.min_regression_observations=15",
+            "--set",
+            "signals.cv_n_folds=3",
+            "--set",
+            "backtest.start=2016-01-01",
+        ],
+        workspace,
+    )
+    assert "cross-validated" in result.output.lower()
+    run = latest_run(workspace)
+    assert (run / "signal_report.csv").exists()
+    assert (run / "summary.md").exists()
+
+
+def test_signals_holdout_appends_to_the_research_log(workspace):
+    # signals.research_log is redirected into the test workspace explicitly -- without
+    # this override the command would append to the real repo's research_log.md, which is
+    # exactly the bug this override exists to prevent (see CLAUDE.md's Gotchas).
+    log_path = workspace / "research_log.md"
+    result = invoke(
+        [
+            "signals",
+            "--horizon",
+            "21",
+            "--holdout",
+            "--set",
+            "signals.min_regression_observations=10",
+            "--set",
+            "signals.cv_n_folds=2",
+            "--set",
+            "signals.holdout_months=12",
+            "--set",
+            "backtest.start=2016-01-01",
+            "--set",
+            f"signals.research_log={log_path.as_posix()}",
+        ],
+        workspace,
+    )
+    holdout_ran = "one-time holdout result" in result.output.lower()
+    holdout_skipped = "not evaluated" in result.output.lower()
+    assert holdout_ran or holdout_skipped
+    if holdout_ran:
+        assert log_path.exists()
+        assert "holdout evaluation" in log_path.read_text(encoding="utf-8").lower()
+
+
+def test_simulate_with_tilt_applies_or_gracefully_skips(workspace):
+    """--tilt must never crash a run, whether or not enough data exists to fit one."""
+    result = invoke(
+        [
+            "simulate",
+            "--portfolio",
+            "NVDA=0.5,AMD=0.5",
+            "--horizon",
+            "21",
+            "--paths",
+            "400",
+            "--tilt",
+            "--set",
+            "signals.min_regression_observations=15",
+            "--set",
+            "backtest.start=2016-01-01",
+        ],
+        workspace,
+    )
+    assert result.exit_code == 0
+    manifest = json.loads((latest_run(workspace) / "manifest.json").read_text())
+    assert "drift_tilt" in manifest
+    assert manifest["drift_tilt"]["applied"] in (True, False)
 
 
 def test_scenario_runs_and_labels_itself_conditional(workspace):

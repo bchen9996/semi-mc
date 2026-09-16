@@ -35,6 +35,22 @@ MODULES = [
     "semimc.models.fhs",
     "semimc.models.garch_t",
     "semimc.models.gbm",
+    "semimc.models.merton",
+    "semimc.models.har",
+    "semimc.models.regime",
+    "semimc.models.blend",
+    "semimc.signals",
+    "semimc.signals.build",
+    "semimc.signals.external",
+    "semimc.signals.supply_chain",
+    "semimc.forecasting",
+    "semimc.forecasting.panel",
+    "semimc.forecasting.sector",
+    "semimc.forecasting.cv",
+    "semimc.forecasting.tilt",
+    "semimc.forecasting.evaluate",
+    "semimc.forecasting.pipeline",
+    "semimc.data.realized",
     "semimc.engine.runner",
     "semimc.engine",
     "semimc.analytics.convergence",
@@ -68,3 +84,26 @@ def test_fitcontext_is_the_same_object_from_both_packages():
     from semimc.models.base import FitContext as FromModels
 
     assert FromContext is FromModels
+
+
+def test_statsmodels_api_is_never_imported():
+    """``import statsmodels.api`` pulls in the Kalman-filter state-space code, whose
+    compiled extensions are blocked by Windows Application Control on the machine this was
+    built on (see CLAUDE.md's Gotchas). Every submodule this project actually needs
+    (regression.linear_model, regression.quantile_regression,
+    tsa.regime_switching.markov_regression, stats.sandwich_covariance) imports fine on its
+    own -- this test only forbids reaching for the umbrella import by mistake."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import semimc.cli, semimc.models, semimc.forecasting, semimc.signals; "
+            "import sys; "
+            "assert 'statsmodels.api' not in sys.modules, "
+            "'statsmodels.api got imported somewhere in the semimc import graph'",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stderr

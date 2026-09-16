@@ -17,11 +17,16 @@ from pathlib import Path
 
 import pandas as pd
 
-from .provider import DataProvider, ProviderError
+from .provider import PRICE_COLUMNS, DataProvider, ProviderError
 
 LOGGER = logging.getLogger(__name__)
 
 META_FILENAME = "_cache_meta.json"
+
+# Bumped when the cached column set changes, so an older cache is refetched instead of
+# being read with columns that silently do not exist. v2 added adjusted open/high/low for
+# the addendum's HAR variance proxy.
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -87,26 +92,46 @@ class PriceCache:
             raise KeyError(f"none of {tickers} are cached in {self.directory}")
         return pd.concat(frames, ignore_index=True).sort_values(["ticker", "date"])
 
-    def prices(self, tickers: list[str]) -> pd.DataFrame:
-        """Return a wide price frame (index: date, columns: ticker) for cached tickers.
+    def field(self, tickers: list[str], column: str) -> pd.DataFrame:
+        """Wide frame of one cached column (index: date, columns: ticker).
 
         Dates are the union of the tickers' trading days; cells before a ticker's first
         listed day, or after its last, stay ``NaN``. Nothing is forward-filled here --
         alignment decisions belong to :mod:`semimc.data.returns`, which logs them.
+
+        A column absent from an older cache yields an all-``NaN`` frame rather than a
+        ``KeyError``, so a stale cache degrades to "no intraday range available" instead
+        of crashing every command.
         """
         long = self.read_many(tickers)
-        wide = long.pivot_table(index="date", columns="ticker", values="adj_close")
+        if column not in long.columns:
+            LOGGER.warning(
+                "cached data has no %r column; refetch with `semimc fetch --force` to get it",
+                column,
+            )
+            index = pd.DatetimeIndex(sorted(long["date"].unique()), name="date")
+            return pd.DataFrame(float("nan"), index=index, columns=list(tickers))
+        wide = long.pivot_table(index="date", columns="ticker", values=column)
         wide.index = pd.DatetimeIndex(wide.index, name="date")
         present = [t for t in tickers if t in wide.columns]
         return wide.loc[:, present].sort_index()
 
+    def prices(self, tickers: list[str]) -> pd.DataFrame:
+        """Wide adjusted-close frame."""
+        return self.field(tickers, "adj_close")
+
     def volumes(self, tickers: list[str]) -> pd.DataFrame:
         """Wide volume frame, same shape conventions as :meth:`prices`."""
-        long = self.read_many(tickers)
-        wide = long.pivot_table(index="date", columns="ticker", values="volume")
-        wide.index = pd.DatetimeIndex(wide.index, name="date")
-        present = [t for t in tickers if t in wide.columns]
-        return wide.loc[:, present].sort_index()
+        return self.field(tickers, "volume")
+
+    def ohlc(self, tickers: list[str]) -> dict[str, pd.DataFrame]:
+        """Adjusted OHLC as four wide frames, keyed ``open``/``high``/``low``/``close``."""
+        return {
+            "open": self.field(tickers, "adj_open"),
+            "high": self.field(tickers, "adj_high"),
+            "low": self.field(tickers, "adj_low"),
+            "close": self.field(tickers, "adj_close"),
+        }
 
     def coverage(self) -> pd.DataFrame:
         """One row per cached ticker: row count, date span, and fetch timestamp."""
@@ -138,6 +163,12 @@ class PriceCache:
             fetched_at = dt.datetime.fromisoformat(meta["fetched_at"])
         except (KeyError, ValueError):
             return True, "unreadable fetch timestamp"
+
+        if int(meta.get("schema_version", 1)) < SCHEMA_VERSION:
+            return True, (
+                f"cache schema v{meta.get('schema_version', 1)} predates v{SCHEMA_VERSION} "
+                "(no adjusted open/high/low)"
+            )
 
         age_days = (dt.datetime.now() - fetched_at).days
         if age_days > max_staleness_days:
@@ -196,7 +227,7 @@ class PriceCache:
                 fetched = provider.fetch(to_fetch, start=start, end=end)
             except ProviderError as exc:
                 LOGGER.error("provider failed for the whole batch: %s", exc)
-                fetched = pd.DataFrame(columns=["date", "ticker", "adj_close", "volume"])
+                fetched = pd.DataFrame(columns=PRICE_COLUMNS)
 
             now = dt.datetime.now().isoformat(timespec="seconds")
             for ticker in to_fetch:
@@ -210,6 +241,7 @@ class PriceCache:
                 subset.to_parquet(self._path_for(ticker), index=False)
                 meta[ticker] = {
                     "fetched_at": now,
+                    "schema_version": SCHEMA_VERSION,
                     "requested_start": str(pd.Timestamp(start).date()),
                     "first_date": str(pd.Timestamp(subset["date"].min()).date()),
                     "last_date": str(pd.Timestamp(subset["date"].max()).date()),

@@ -90,6 +90,51 @@ models:
     idio_model: garch_t
   fhs:
     block_length: 1       # 1 = i.i.d. by-date resampling of standardized residuals
+  merton:
+    max_jumps_per_day: 3   # truncated Poisson mixture; mass beyond this is negligible
+    exclude_earnings_days: true   # scheduled gaps stay with the earnings overlay
+  har:
+    horizons: [1, 21, 63, 126, 252]   # a separate direct regression is fit per horizon
+    estimator: garman_klass           # garman_klass | rogers_satchell
+    innovations: bootstrap            # bootstrap (resampled residuals) | normal
+    exclude_earnings_variance: true
+  regime:
+    search_reps: 20         # random restarts; best log-likelihood wins
+    switching_mean: false   # variance-only by default; drift stays exactly the policy's
+    min_expected_duration_days: 15.0   # below this, refit on weekly returns instead
+  blend:
+    components: [gbm, garch_t]   # addendum: "equal weights are often hard to beat"
+    weights: {}                  # empty = equal weight across components
+
+# Addendum Phase 4B: point-in-time signals and the regression-based drift tilt.
+signals:
+  horizons: [21, 63]
+  holdout_months: 24
+  holdout_headline_horizon: 21   # 24mo leaves ~8 non-overlapping 63d origins -- too few to
+                                  # carry a conclusion; the 63d holdout cell is still
+                                  # computed and reported, flagged low_power.
+  shrinkage_lambda: 0.5
+  tilt_cap_annual: 0.10
+  n_coefficient_bootstraps: 500
+  momentum_lookback_days: 252    # 12 months
+  momentum_skip_days: 21         # most recent month excluded, used separately as reversal
+  relative_strength_lookback_days: 126   # ~6 months, vs. the sector benchmark
+  earnings_drift_active_days: 60
+  # TSMC monthly revenue and SIA global sales both need scraping (an ask-first boundary
+  # in CLAUDE.md) and neither publishes a free, key-free API. FRED's IPG3344S --
+  # semiconductor and related electronic component manufacturing industrial production --
+  # needs neither, at the cost of being a revised-only series with no published vintage,
+  # so its release date is approximated by a conservative publication lag. Flagged as a
+  # limitation in MODEL_NOTES, not hidden.
+  industry_series_id: IPG3344S
+  industry_publication_lag_days: 45
+  customer_tickers: [AAPL, MSFT, GOOGL, AMZN, META, TSLA, DELL, HPQ, CSCO]
+  supply_chain_links: data/external/supply_chain_links.csv
+  external_dir: data/external
+  driscoll_kraay_lag_per_horizon: 1.0   # maxlags = ceil(this * horizon / 21)
+  min_regression_observations: 60
+  cv_n_folds: 5
+  cv_gap_periods: 1   # fold gap, in sampling periods, at least the forecast horizon needs
 
 portfolio:
   weights: {}             # empty = equal weight across the requested tickers

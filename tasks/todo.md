@@ -61,9 +61,65 @@ or a produced artifact.
 - [x] README, MODEL_NOTES, CLAUDE.md complete
 - [x] `uv run pytest` green, `uv run ruff check .` clean
 
+## Addendum Phase 4 — more single-stock dynamics
+- [x] Merton jump-diffusion: MLE on a truncated Poisson mixture, compensator falls out of
+      the base class's existing `annualized_variance` hook with no interface change
+- [x] Threshold jump estimate as an MLE cross-check (`threshold_jump_estimate`)
+- [x] Refit-stability diagnostic across rolling sub-windows (`refit_stability`)
+- [x] HAR volatility: Garman-Klass/Rogers-Satchell proxy, direct per-horizon regressions,
+      log-bias (Duan smearing) correction, earnings-day variance replaced pre-fit
+- [x] QLIKE scoring for volatility forecasts (`data/realized.py:qlike`)
+- [x] Regime switching: two-state `MarkovRegression`, filtered (never smoothed) start
+      state, variance-only by default, daily→weekly fallback below a duration threshold
+- [x] Blending: whole simulated paths per component, drift contract exact by construction,
+      CRPS-optimized weights via pooled-mixture-sample SLSQP (not a linear-loss shortcut,
+      which would always corner-solve to the single best component)
+- [x] Adjusted OHLC added to the provider/cache schema (`schema_version` bump forces a
+      clean refetch of any pre-addendum cache)
+- [x] Drift tilt plumbing (`context.DriftTilt`, `BaseReturnModel._path_drift_tilt`):
+      per-path deviation, expires after its fitted horizon, demeaned bootstrap draws widen
+      dispersion without moving the mean
+
+## Addendum Phase 4B — signals and the regression-based drift tilt
+- [x] Point-in-time signal store (`signals/external.py`) with release-date enforcement
+- [x] Four ticker-level signals: momentum, reversal, relative strength, earnings drift
+- [x] Customer lead-lag signal + hand-curated `supply_chain_links.csv` (21 links, `as_of`
+      dated so the signal is correctly inert before it in any backtest)
+- [x] Industry-cycle signal from FRED `IPG3344S` (TSMC/SIA both need scraping — an
+      ask-first boundary — so neither was used; revision bias flagged, not corrected)
+- [x] Pooled panel regression with Driscoll-Kraay SEs; Fama-MacBeth robustness check
+- [x] Sector-tilt regression (industry cycle → SOXX residualized on SPY)
+- [x] Date-grouped, gapped cross-validation (`forecasting/cv.py`)
+- [x] Shrinkage + cap + date-block coefficient bootstrap → `DriftTilt`
+      (`forecasting/tilt.py`)
+- [x] Evaluation: OOS R² (Campbell-Thompson), Clark-West, rank IC with Newey-West,
+      pinball loss, sign-flip stability check
+- [x] `semimc signals` (cross-validated pre-holdout evaluation, `--holdout` for the
+      one-time holdout) and `semimc simulate --tilt`
+- [x] `semimc fetch --industry`
+- [x] Real evaluation run on the 14-ticker universe, pre-holdout only — see
+      `research_log.md`. Every signal's OOS R² was negative at 21d and 63d; nothing
+      cleared the addendum's own significance bar. `--tilt` stays off by default.
+- [ ] **Holdout not yet spent** against the real universe. `semimc signals --holdout` is
+      built and tested against fixtures; running it for real is a research decision, not a
+      build one, and is left to the project owner.
+- [ ] **Simple-average combination model**, which the addendum suggests trying before a
+      full multi-signal regression ("often more robust than one regression containing
+      every signal"). `semimc signals` currently reports only the Driscoll-Kraay combined
+      fit, which underperformed every single signal on the real data — exactly the
+      overfitting pattern the simple average is meant to avoid. Worth adding before
+      spending the holdout.
+- [ ] Ridge/lasso combination models (scikit-learn is a declared dependency; not wired up)
+- [ ] Quantile regression (`QuantReg`) at 5/25/50/75/95, scored by pinball loss against the
+      simulation's own quantiles
+- [ ] Shared sector-level regime switching feeding the multi-asset/portfolio simulation
+      (Phase 5 addition — regime switching itself is built per-ticker; making it shared
+      across the sector factor for portfolio runs is not)
+- [ ] Rolling-coefficient stability charts and a 2022-downturn-vs-rally split report
+      (`evaluate.py:subset_by_date_range` and `sign_flip_rate` exist; not wired into a
+      report yet)
+
 ## Not built (stretch — only on request)
-- [ ] Signal-conditioned drift/volatility
-- [ ] Markov regime switching
 - [ ] Options-implied vol calibration
 - [ ] Streamlit dashboard
 

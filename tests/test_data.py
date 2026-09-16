@@ -123,7 +123,15 @@ def test_summary_statistics_reports_per_ticker_histories(prices):
 
 def test_csv_provider_returns_the_documented_frame(fixture_provider):
     frame = fixture_provider.fetch(["NVDA", "AMD"], start=pd.Timestamp("2016-01-01").date())
-    assert list(frame.columns) == ["date", "ticker", "adj_close", "volume"]
+    assert list(frame.columns) == [
+        "date",
+        "ticker",
+        "adj_close",
+        "adj_open",
+        "adj_high",
+        "adj_low",
+        "volume",
+    ]
     assert set(frame["ticker"]) == {"NVDA", "AMD"}
     assert frame["adj_close"].gt(0).all()
     assert frame["date"].is_monotonic_increasing is False  # sorted by ticker, then date

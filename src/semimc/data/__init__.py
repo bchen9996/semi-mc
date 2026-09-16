@@ -10,7 +10,7 @@ and :meth:`MarketData.context`, both of which take an ``as_of`` and refuse to lo
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -42,9 +42,24 @@ class MarketData:
     config: object
     risk_free: RiskFreeCurve
     earnings: EarningsCalendar | None = None
+    ohlc: dict[str, pd.DataFrame] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.log_returns = compute_log_returns(self.prices)
+
+    def has_ohlc(self, ticker: str) -> bool:
+        """True when an intraday range is available for ``ticker``.
+
+        HAR needs one and refuses to run without it rather than substituting a
+        close-to-close proxy, which would be a different estimator wearing the same name.
+        """
+        frames = self.ohlc
+        if not frames or any(k not in frames for k in ("open", "high", "low", "close")):
+            return False
+        return all(
+            ticker in frames[k].columns and frames[k][ticker].notna().any()
+            for k in ("open", "high", "low")
+        )
 
     # -- views ----------------------------------------------------------------------
 
@@ -217,4 +232,5 @@ def load_market_data(
         config=config,
         risk_free=build_curve(config, for_backtest=for_backtest),
         earnings=load_calendar(config.path(config.data.earnings_calendar)),
+        ohlc=cache.ohlc(cached),
     )

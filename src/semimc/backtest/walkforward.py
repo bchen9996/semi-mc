@@ -263,7 +263,7 @@ def run_walk_forward(
                 rng = np.random.default_rng(stream)
 
                 try:
-                    model: BaseReturnModel = build_model(model_name, config)
+                    model: BaseReturnModel = build_model(model_name, config, market=market)
                     model.fit(training, context)
                     fit_counts[model_name] += 1
                 except Exception as exc:  # noqa: BLE001 - one bad cell must not end the run

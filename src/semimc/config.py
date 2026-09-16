@@ -151,12 +151,88 @@ class FHSModelConfig(_Base):
     block_length: int = Field(1, ge=1)
 
 
+class MertonModelConfig(_Base):
+    max_jumps_per_day: int = Field(3, ge=1, le=10)
+    exclude_earnings_days: bool = True
+
+
+class HARModelConfig(_Base):
+    horizons: list[int] = Field(default_factory=lambda: [1, 21, 63, 126, 252])
+    estimator: Literal["garman_klass", "rogers_satchell"] = "garman_klass"
+    innovations: Literal["bootstrap", "normal"] = "bootstrap"
+    exclude_earnings_variance: bool = True
+
+
+class RegimeModelConfig(_Base):
+    search_reps: int = Field(20, ge=1)
+    switching_mean: bool = False
+    min_expected_duration_days: float = Field(15.0, gt=0)
+
+
+class BlendModelConfig(_Base):
+    components: list[str] = Field(default_factory=lambda: ["gbm", "garch_t"])
+    weights: dict[str, float] = Field(default_factory=dict)  # empty = equal weight
+
+
 class ModelsConfig(_Base):
     bootstrap: BootstrapModelConfig = Field(default_factory=BootstrapModelConfig)
     garch_t: GarchModelConfig = Field(default_factory=GarchModelConfig)
     earnings_jumps: EarningsModelConfig = Field(default_factory=EarningsModelConfig)
     factor: FactorModelConfig = Field(default_factory=FactorModelConfig)
     fhs: FHSModelConfig = Field(default_factory=FHSModelConfig)
+    merton: MertonModelConfig = Field(default_factory=MertonModelConfig)
+    har: HARModelConfig = Field(default_factory=HARModelConfig)
+    regime: RegimeModelConfig = Field(default_factory=RegimeModelConfig)
+    blend: BlendModelConfig = Field(default_factory=BlendModelConfig)
+
+
+class SignalsConfig(_Base):
+    """Addendum Phase 4B: point-in-time signals and the regression-based drift tilt.
+
+    Defaults follow Section 3 of the addendum, with two decisions made explicitly rather
+    than silently: the industry-cycle series is FRED's ``IPG3344S`` (semiconductor and
+    related electronic component manufacturing, industrial production index) rather than
+    TSMC/SIA, because those need scraping (an ask-first boundary) and FRED needs neither a
+    key nor a scraper; and the holdout, while still 24 months as specified, reports its
+    headline verdict at 21 days only -- the addendum's own numbers imply roughly 8
+    non-overlapping 63-day observations in 24 months, too few to carry a conclusion. The
+    63-day holdout cell is still computed and written out, flagged ``low_power``.
+    """
+
+    horizons: list[int] = Field(default_factory=lambda: [21, 63])
+    holdout_months: int = Field(24, gt=0)
+    holdout_headline_horizon: int = 21
+    shrinkage_lambda: float = Field(0.5, ge=0, le=1)
+    tilt_cap_annual: float = Field(0.10, gt=0, le=2)
+    n_coefficient_bootstraps: int = Field(500, gt=0)
+    momentum_lookback_days: int = Field(252, gt=0)  # ~12 months
+    momentum_skip_days: int = Field(21, gt=0)  # most recent month, used separately as reversal
+    relative_strength_lookback_days: int = Field(126, gt=0)  # ~6 months, vs. sector benchmark
+    earnings_drift_active_days: int = Field(60, gt=0)
+    industry_series_id: str = "IPG3344S"
+    industry_publication_lag_days: int = Field(45, ge=0)
+    customer_tickers: list[str] = Field(
+        default_factory=lambda: [
+            "AAPL",
+            "MSFT",
+            "GOOGL",
+            "AMZN",
+            "META",
+            "TSLA",
+            "DELL",
+            "HPQ",
+            "CSCO",
+        ]
+    )
+    supply_chain_links: str = "data/external/supply_chain_links.csv"
+    external_dir: str = "data/external"
+    driscoll_kraay_lag_per_horizon: float = Field(1.0, gt=0)  # maxlags = ceil(lag * H / 21)
+    min_regression_observations: int = Field(60, gt=0)
+    cv_n_folds: int = Field(5, ge=2)
+    cv_gap_periods: int = Field(1, ge=1)
+    # Resolved via Config.path(), same as every other config-relative path, so tests can
+    # redirect it with an absolute -s override instead of writing into the real repo.
+    research_log: str = "research_log.md"
 
 
 class PortfolioConfig(_Base):
@@ -181,6 +257,7 @@ class Config(_Base):
     data: DataConfig = Field(default_factory=DataConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
+    signals: SignalsConfig = Field(default_factory=SignalsConfig)
     portfolio: PortfolioConfig = Field(default_factory=PortfolioConfig)
     scenarios: dict[str, dict[str, Any]] = Field(default_factory=dict)
     reporting: ReportingConfig = Field(default_factory=ReportingConfig)

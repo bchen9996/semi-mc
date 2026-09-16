@@ -1,0 +1,67 @@
+"""Addendum Phase 4B: regressions, shrinkage, and the coefficient bootstrap that turn
+point-in-time signals into a drift tilt.
+
+``panel.py`` fits the pooled cross-sectional regression (relative tilt) and its
+Fama-MacBeth robustness check; ``sector.py`` fits the single-series sector-tilt regression;
+``cv.py`` splits panel data on dates, with a gap, for anything that needs
+cross-validation; ``tilt.py`` turns fitted regressions into a
+:class:`~semimc.context.DriftTilt`; ``evaluate.py`` scores all of it.
+"""
+
+from __future__ import annotations
+
+from .cv import date_grouped_gapped_splits, rows_for_dates
+from .evaluate import (
+    clark_west_statistic,
+    oos_r_squared,
+    pinball_losses,
+    rank_information_coefficient,
+    sign_flip_rate,
+    subset_by_date_range,
+)
+from .panel import (
+    PanelRegressionResult,
+    build_regression_row,
+    fama_macbeth,
+    fit_driscoll_kraay,
+    newey_west_mean,
+    standardize_cross_sectionally,
+    trailing_betas,
+    training_rows,
+)
+from .sector import build_sector_regression_row, fit_sector_tilt, industry_yoy_growth, sector_factor
+from .tilt import (
+    block_bootstrap_date_indices,
+    bootstrap_panel_tilt_draws,
+    bootstrap_sector_tilt_draws,
+    build_drift_tilt,
+    shrink_and_cap,
+)
+
+__all__ = [
+    "PanelRegressionResult",
+    "block_bootstrap_date_indices",
+    "bootstrap_panel_tilt_draws",
+    "bootstrap_sector_tilt_draws",
+    "build_drift_tilt",
+    "build_regression_row",
+    "build_sector_regression_row",
+    "clark_west_statistic",
+    "date_grouped_gapped_splits",
+    "fama_macbeth",
+    "fit_driscoll_kraay",
+    "fit_sector_tilt",
+    "industry_yoy_growth",
+    "newey_west_mean",
+    "oos_r_squared",
+    "pinball_losses",
+    "rank_information_coefficient",
+    "rows_for_dates",
+    "sector_factor",
+    "shrink_and_cap",
+    "sign_flip_rate",
+    "standardize_cross_sectionally",
+    "subset_by_date_range",
+    "trailing_betas",
+    "training_rows",
+]

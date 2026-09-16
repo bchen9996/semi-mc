@@ -2,9 +2,11 @@
 runs/
 data_cache/
 data_csv/
-# The earnings calendar is user-edited input worth keeping in history; the risk-free
-# series is a reproducible download, so it is not.
+# The earnings calendar and supply_chain_links.csv are user-edited input worth keeping in
+# history; the risk-free series and the industry-cycle series are reproducible downloads,
+# so they are not.
 config/risk_free_3m.csv
+data/external/IPG3344S.csv
 
 # Python
 __pycache__/

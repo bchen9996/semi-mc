@@ -18,12 +18,12 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 import pandas as pd
 
-from ..context import FitContext
+from ..context import DriftTilt, FitContext
 from .drift import annual_arithmetic_drift
 
 LOGGER = logging.getLogger(__name__)
 
-__all__ = ["BaseReturnModel", "FitContext", "NotFittedError", "ReturnModel"]
+__all__ = ["BaseReturnModel", "DriftTilt", "FitContext", "NotFittedError", "ReturnModel"]
 
 
 @runtime_checkable
@@ -163,7 +163,54 @@ class BaseReturnModel(ABC):
 
         drift = self.daily_log_drift(horizon).to_numpy(dtype=np.float64)
         out = shocks + drift.reshape(1, 1, -1)
+
+        tilt = self._path_drift_tilt(n_paths, horizon, rng)
+        if tilt is not None:
+            out = out + tilt
         return np.asarray(out, dtype=self.dtype)
+
+    def _path_drift_tilt(
+        self, n_paths: int, horizon: int, rng: np.random.Generator
+    ) -> np.ndarray | None:
+        """Per-path daily log tilt, shape ``(n_paths, horizon, n_tickers)``, or ``None``.
+
+        Three things happen here, and each is a requirement from the addendum.
+
+        **Coefficient uncertainty becomes path dispersion.** Every path is assigned one
+        bootstrap coefficient set, so the spread of plausible regressions widens the
+        simulated distribution instead of being thrown away in favour of a point estimate.
+
+        **The tilt expires.** A tilt estimated on 21-day forward returns is applied for
+        21 steps and then stops; beyond that the path runs on the policy drift alone.
+
+        **No Ito adjustment is needed.** The tilt shifts the *arithmetic* drift, and the
+        variance is untouched, so the log-space shift is exactly ``tau / 252`` per day.
+
+        ``daily_log_drift`` deliberately excludes all of this: it stays the drift the
+        configured policy asks for, so the policy remains recoverable from a fitted model
+        and the tilt stays separately auditable.
+        """
+        assert self.context is not None
+        tilt = self.context.drift_tilt
+        if tilt is None:
+            return None
+        aligned = tilt.aligned_to(self.tickers)
+        if aligned is None:
+            LOGGER.debug("%s: no drift tilt covers %s; running untilted", self.name, self.tickers)
+            return None
+
+        active = min(int(aligned.horizon_days), horizon)
+        if active <= 0:
+            return None
+
+        sets = aligned.draws
+        chosen = sets[rng.integers(0, sets.shape[0], size=n_paths)] if sets.shape[0] > 1 else None
+        per_path = chosen if chosen is not None else np.broadcast_to(sets, (n_paths, sets.shape[1]))
+
+        daily = per_path / float(self.context.trading_days_per_year)
+        out = np.zeros((n_paths, horizon, len(self.tickers)), dtype=np.float64)
+        out[:, :active, :] = daily[:, None, :]
+        return out
 
     @abstractmethod
     def _simulate_zero_mean(
@@ -194,4 +241,7 @@ class BaseReturnModel(ABC):
             "annual_arithmetic_drift": {
                 k: float(v) for k, v in self.annual_arithmetic_drift.items()
             },
+            "drift_tilt": (
+                self.context.drift_tilt.describe() if self.context.drift_tilt is not None else None
+            ),
         }

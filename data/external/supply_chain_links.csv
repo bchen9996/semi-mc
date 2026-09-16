@@ -1,0 +1,29 @@
+# semimc customer-to-supplier lead-lag links (addendum signal 5).
+# Columns: supplier,customer,source,as_of
+# as_of is the date this relationship was recorded here, NOT when it started -- it is what
+# makes the link usable point-in-time (signals/supply_chain.py:links_known_at). Applying
+# today's customer list to 2016 is a real survivorship bias; recording as_of makes that
+# bias visible rather than silent. Sources are the companies' own public disclosures
+# (10-K customer-concentration notes, earnings-call commentary) as of this file's creation.
+supplier,customer,source,as_of
+NVDA,MSFT,"10-K customer concentration note; hyperscaler GPU capex commentary",2026-09-15
+NVDA,GOOGL,"Earnings-call commentary; hyperscaler GPU capex",2026-09-15
+NVDA,AMZN,"Earnings-call commentary; hyperscaler GPU capex",2026-09-15
+NVDA,META,"Earnings-call commentary; hyperscaler GPU capex",2026-09-15
+NVDA,TSLA,"Public reporting on data-center/training GPU purchases",2026-09-15
+AMD,MSFT,"Earnings-call commentary; server CPU/GPU customer",2026-09-15
+AMD,GOOGL,"Earnings-call commentary; server CPU/GPU customer",2026-09-15
+AMD,DELL,"OEM customer for EPYC server CPUs",2026-09-15
+AMD,HPQ,"OEM customer for EPYC server CPUs and client CPUs",2026-09-15
+AVGO,AAPL,"10-K customer concentration note (RF/connectivity components)",2026-09-15
+QCOM,AAPL,"Historical modem/RF supplier relationship; 10-K disclosure",2026-09-15
+TSM,AAPL,"10-K customer concentration note (largest foundry customer)",2026-09-15
+TSM,NVDA,"Foundry customer; public disclosure",2026-09-15
+TSM,AMD,"Foundry customer; public disclosure",2026-09-15
+INTC,DELL,"OEM customer for client and server CPUs",2026-09-15
+INTC,HPQ,"OEM customer for client and server CPUs",2026-09-15
+MRVL,AMZN,"Custom silicon / networking supplier; earnings-call commentary",2026-09-15
+MRVL,MSFT,"Custom silicon / networking supplier; earnings-call commentary",2026-09-15
+MU,DELL,"Memory supplier to OEM customer",2026-09-15
+MU,AAPL,"Memory supplier; 10-K customer concentration note",2026-09-15
+CSCO,MSFT,"Networking-equipment customer relationship (as a downstream signal proxy)",2026-09-15

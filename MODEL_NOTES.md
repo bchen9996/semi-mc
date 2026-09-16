@@ -410,3 +410,268 @@ winning.
 - **Models were not tuned on the backtest periods, but they were designed knowing 2020 and
   2022 happened**, which is a milder form of the same problem and is worth remembering when
   reading a favourable scorecard.
+
+---
+
+## 9. Merton jump-diffusion
+
+Daily log return, before drift: `sigma_d * Z + (sum of N jumps, Y ~ N(mu_J, sigma_J^2)) -
+lambda_d * mu_J`, with `N ~ Poisson(lambda_d)`. The last term is the **compensator** — it
+keeps the jump component's own contribution to the mean at zero, exactly the way every
+other model's shocks are zero-mean by construction.
+
+**Relationship to GARCH and the earnings overlay.** GJR-GARCH-t widens its tails by raising
+*conditional volatility after* a shock; a jump process can produce a large move straight out
+of a calm state, closer to how an unscheduled headline (export controls, a customer
+cutting guidance) actually arrives. Scheduled earnings gaps stay with the earnings overlay:
+reaction days are excluded from the jump MLE so the two models can be combined without
+double counting the same gap twice.
+
+**The compensator falls out of the base class for free.** The base class simulates
+`mu_A - V/2 + shocks` where `V` is whatever `annualized_variance()` returns. For
+`E[S_T/S_0] = exp(mu_A * T)` this process needs `V = sigma_d^2 + 2*lambda*(k - mu_J)`,
+`k = exp(mu_J + sigma_J^2/2) - 1`, which makes the net log drift `mu_A - sigma_d^2/2 -
+lambda*k` — the textbook Merton drift — with zero special-casing in `base.py`. The
+consequence worth remembering: this `V` is *not* the log-return variance
+`sigma_d^2 + lambda*(mu_J^2 + sigma_J^2)`; the two differ by a term of order
+`lambda * mu_J^2`, usually small but not zero.
+
+**Weak identification.** On daily data a larger jump intensity offset by a smaller
+diffusion volatility gives nearly the same likelihood — the addendum names this explicitly.
+`refit_stability()` in `models/merton.py` refits on rolling sub-windows and reports each
+parameter's coefficient of variation across refits; treat a CV near or above 1 as "this
+parameter is not identified," whatever the point estimate says.
+
+**What it does not model.** Jumps are independent across tickers — an export-control
+headline that hits the whole sector at once is not represented as a shared shock here. The
+factor model is the one built for shared shocks; a portfolio simulated with Merton alone
+will understate the correlation of tail events across names.
+
+---
+
+## 10. HAR volatility
+
+`log RVbar(t+1..t+h) = a + b_d log RV_d + b_w log RV_w + b_m log RV_m`, fit as a **separate
+direct regression per horizon** rather than iterating a one-day model forward (which
+compounds its own forecast error). The variance proxy is Garman-Klass by default —
+`0.5 ln(H/L)^2 - (2 ln2 - 1) ln(C/O)^2` — plus the overnight squared return
+`ln(O_t / C_{t-1})^2`, because a range estimator alone misses gaps that happen while the
+market is shut, which is exactly when semiconductor names move on earnings and headlines.
+
+**Getting the per-step path back from direct forecasts.** A direct forecast at horizon `h`
+pins the *cumulative* variance `C(h) = h * Vbar(h)`. `per_step_variance_path()` recovers the
+variance for the steps between two fitted horizons as the forward difference
+`(C(h_k) - C(h_{k-1})) / (h_k - h_{k-1})`, so the simulator reproduces every direct
+forecast exactly rather than interpolating between averages.
+
+**A bug the drift test caught.** The first implementation demeaned standardized residuals
+*before* dividing by a time-varying scale, which does not preserve zero mean when
+volatility scaling correlates with return sign (a heteroskedasticity effect). The fix —
+demean and rescale to unit variance again *after* alignment across tickers, exactly the
+pattern `models/fhs.py` already used — is the same "shocks must be zero-mean by
+construction" discipline as everywhere else in this codebase, just caught on the fitting
+side instead of the simulation side. `test_addendum_models_impose_the_configured_drift`
+would fail again if this regressed.
+
+**Earnings variance replacement.** A report day's realized-variance spike is replaced with
+the trailing 22-day median of *non-earnings* days before HAR ever sees it — otherwise HAR
+learns to forecast a permanently elevated diffusion volatility for the whole horizon, and
+stacking it with the earnings overlay would count the same report twice.
+
+---
+
+## 11. Regime switching
+
+Two-state `MarkovRegression` (`statsmodels.tsa.regime_switching`), variance-switching by
+default, ordered so regime 0 is always the calmer one (the fit has no such constraint on
+its own, and which fitted index is "calm" is otherwise arbitrary between near-identical
+refits).
+
+**Rescaling by 100, for the same reason as GARCH.** At daily log-return scale (~1e-2) the
+optimizer stalled with non-finite filtered probabilities even while *reporting*
+convergence — the same flat-likelihood problem `garch_t.py` already documents. Returns are
+scaled up before fitting and every parameter converted back afterward.
+
+**Filtered, never smoothed.** The simulation starts from `filtered_marginal_probabilities`
+at the origin — conditioned only on data up to that day — never the smoothed probability,
+which uses observations after it and would leak the future into the one place leakage is
+easiest to miss: the starting point. `test_regime_filtered_probability_is_causal` checks
+this by filtering a longer sample at a shorter sample's fitted parameters and confirming
+the probability at the shared boundary date does not move.
+
+**Drift stays exact.** Regime means enter only as deviations, re-centred so their
+*stationary-distribution-weighted* average is exactly zero — not their simple average,
+because the calm regime is visited far more often. `switching_mean` defaults to `false`
+(variance-only), which makes the drift contract trivially exact; turning it on is a real
+statement about the world and is tested separately.
+
+**Daily-to-weekly fallback.** When either regime's expected duration falls under 15 trading
+days, the fitter refits on weekly returns instead — a regime that short is a volatility
+cluster, not an industry cycle — and maps the result back by dividing variance by 5,
+holding the fitted regime fixed across each 5-day block during simulation. Which route was
+taken is recorded in `describe()`.
+
+---
+
+## 12. Blending
+
+Whole simulated **paths** are drawn from each fitted component in proportion to its weight,
+so a path drawn from Merton still has Merton's jump distribution end to end — never a
+pointwise average of two densities, which no single model could actually generate.
+
+**The drift contract holds exactly, not approximately.** Every component targets the same
+annual arithmetic drift `mu_A` (the shared policy), so each component's own bias-corrected
+daily drift is `mu_A - V_i/2`. Because `mu_A` is linear and shared across components, the
+weight-averaged drift equals `mu_A - (sum_i w_i * V_i)/2` — exactly what the base class
+computes on its own if the blend reports `sum_i w_i * V_i` as *its* `annualized_variance`.
+So `BlendModel` needs no override of `simulate()`, no special case anywhere in the shared
+machinery: it draws each path's *shape* from one component's own zero-mean shock generator,
+and the base class adds the (correctly blended) drift once, uniformly.
+`test_blend_imposes_the_configured_drift` checks the two ways of computing it agree to
+floating-point precision, not just approximately.
+
+**Weight optimization scores a real mixture, not a shortcut.** Minimizing a linear
+combination of each component's own CRPS always puts every weight on the single best
+component — it cannot see the benefit of mixing distributions at all. `pooled_mixture_crps`
+instead draws a pooled sample from each candidate weight vector the way a live blend
+actually would, and `optimize_crps_weights` runs SLSQP over the simplex against that. This
+is also why "equal weights are often hard to beat," per the addendum: the diversification
+benefit of mixing is often close to its maximum already at 50/50.
+
+---
+
+## 13. Phase 4B: signals and the regression-based drift tilt
+
+### The point-in-time rule, stated once
+
+A row of any signal may reach a fit at origin `t` only if that row's `release_date <= t`.
+For a *training* row there is a second rule: its forward target realizes at
+`target_end_date`, and the row is usable only if `target_end_date <= t` too — a 63-day
+forward return computed today is not knowable for 63 more trading days. Both are enforced
+in one place each (`signals/external.py:as_of`, `forecasting/panel.py:training_rows`) with
+tests that fail on violation (`tests/test_signals_forecasting.py`).
+
+### Splitting the forecast: exposure first, signal second
+
+The panel regression predicts each stock's return **net of** its trailing market and
+sector-factor beta — not the raw forward return. Betas are estimated on the window
+*ending at* the origin, never on the forward window the target comes from (that would leak
+the realized covariance into what is supposed to be a residual). This gives the regression
+a more stationary target and makes a coefficient interpretable as "return beyond what this
+stock's own market/sector exposure already implies" — which is the quantity that is safe
+to add to the drift without double-counting CAPM.
+
+### Driscoll-Kraay, and why not something simpler
+
+`cov_type="hac-groupsum"` handles cross-sectional correlation (15 semiconductor names share
+a sector factor) *and* serial correlation (forward returns sampled monthly overlap) at
+once. A plain cluster-by-ticker or cluster-by-date standard error only catches one half.
+Fama-MacBeth (per-date cross-sectional OLS, averaged with a Newey-West standard error) runs
+alongside it as the addendum's requested robustness check — it is more robust to a few
+extreme dates dominating a pooled fit, at the cost of needing enough names per date to be
+meaningful (`min_cross_section`, default 5 — a 2-ticker test fixture cannot exercise this
+in the same way the real 14-name universe can, and the tests for it use `min_cross_section
+= 2` accordingly).
+
+**No fixed effects, deliberately.** A ticker or sub-industry fixed effect would reintroduce
+each stock's own historical average return into the regression — precisely the leak
+Section 8 of the original brief bans for every model's drift. The addendum repeats the ban
+for this regression by name; it is not implemented, not disabled by a flag.
+
+### Coefficient uncertainty as path dispersion, not a discarded number
+
+`n_coefficient_bootstraps` (default 500) coefficient sets come from resampling **dates**,
+not rows, in contiguous blocks (`block_bootstrap_date_indices`) — a row-level bootstrap
+would erase exactly the serial correlation Driscoll-Kraay exists to account for. Each
+simulated path draws one coefficient set and predicts from it; `DriftTilt.build` centres
+the whole cloud on the point estimate, so the spread widens the simulated distribution
+without moving its mean off what the point estimate (after shrinkage and the cap) already
+set.
+
+### Shrinkage, the cap, and expiry
+
+`drift = policy drift + lambda * tilt`, `lambda` fixed before any holdout evaluation
+(`signals.shrinkage_lambda`, default 0.5), the annualized result clipped to
+`signals.tilt_cap_annual` (default ±10%) regardless of what the regression says. The tilt
+is a **daily, per-path deviation** added on top of the ordinary drift term in
+`BaseReturnModel.simulate` — see `_path_drift_tilt` in `models/base.py` — active only for
+the first `horizon_days` steps of a simulated path, then reverting to the policy drift.
+Because the bootstrap draws are demeaned to the point estimate at construction, this
+deviation sums to exactly zero across a chunk-independent draw, which is what keeps the
+long-standing "chunk size must not change results" invariant intact for the tilt too.
+
+### The industry-cycle signal is FRED, not TSMC or SIA, and that has a cost
+
+TSMC's monthly revenue and SIA's global semiconductor sales both need scraping — an
+ask-first boundary — and neither offers a free, key-free API. FRED's `IPG3344S`
+(semiconductor and related electronic component manufacturing, industrial production
+index) needs neither, using the same public CSV endpoint `data/riskfree.py` already reads
+for the risk-free curve. The cost: FRED serves the **current, revised** vintage with no
+published history of earlier vintages, so (a) `release_date` here is an *approximation*
+(`period + industry_publication_lag_days`, default 45 days), not a fact, and (b) every
+value carries some revision bias — a first estimate for semiconductor industrial
+production typically moves in later revisions, so a signal built on the revised number
+will look more predictive in-sample than it would have looked in real time. Both are
+stated in `signals/external.py`'s docstring and repeated here rather than only in code.
+
+### Customer lead-lag and its survivorship problem
+
+`data/external/supply_chain_links.csv` is hand-curated, not inferred, per the addendum.
+Each link carries the date it was recorded (`as_of`) and is usable at an origin only at or
+after that date — the same point-in-time discipline applied to the *existence of a
+relationship* rather than to a data value, because "AAPL is NVDA's largest customer today"
+says nothing about who was buying NVDA chips in 2016. Every link committed in this
+project's `supply_chain_links.csv` has `as_of = 2026-09-15` (when the file was written),
+so the signal is presently usable only from that date forward in any backtest — it is
+correctly inert further back, by design, not by omission. A supplier whose customers were
+never fetched into the cache gets `NaN` for this signal, never a substituted zero.
+
+### The holdout, and why its horizon matters
+
+Twenty-four months of monthly origins is 24 observations before non-overlap is enforced;
+after it, roughly 24 at 21 days but only about 8 at 63 days — against five candidate
+signals, several combination methods, and a shrinkage parameter. The default therefore
+keeps the 24-month holdout the addendum specifies, but the *headline* verdict is reported
+only at `signals.holdout_headline_horizon` (21 days); the 63-day holdout cell is still
+computed and printed, explicitly flagged as low-power, and is not allowed to carry a
+conclusion on its own. `semimc signals --holdout` writes the result once and appends it to
+`research_log.md`; running it twice against the same data is exactly the thing the
+addendum's evaluation rule forbids, and nothing in this codebase automates a second attempt.
+
+---
+
+## 14. What the addendum's signal evaluation actually found
+
+Run 2026-09-15 on the real 14-name universe (ARM excluded — insufficient history), 2018
+onward, monthly origins, 5-fold walk-forward cross-validation with a one-period gap,
+**pre-holdout only** — the 24-month holdout has deliberately not been spent yet. See
+`research_log.md` for the exact run and numbers.
+
+**Every signal's out-of-sample R² was negative at both 21 and 63 days**, including the
+combined Driscoll-Kraay fit. Predicting nothing (the zero-tilt null the target is already
+net of CAPM and sector exposure against) beat every candidate on raw prediction error.
+
+**Two signals cleared nominal significance at 63 days, not at 21.** `relative_strength`
+(Clark-West t = 2.36, p = 0.009; rank IC t = 2.03) and, on rank IC alone, `earnings_drift`
+(t = 2.34) — but both are well under the addendum's own "~3" bar for treating a t-statistic
+as more than noise after this many specifications were tried, and neither corresponds to a
+positive OOS R². Read as: *statistically distinguishable from zero forecasting skill* is
+not the same claim as *economically useful forecast*, and this project treats the second as
+the one that matters.
+
+**The combined multi-signal regression was worse than any single signal**, at both
+horizons — a textbook small-sample overfitting signature the addendum anticipated when it
+suggested starting with a simple average of single-signal forecasts rather than one
+regression containing every signal (`semimc signals` currently reports only the
+Driscoll-Kraay combination, not that simple-average alternative; see the todo list).
+
+**The sector tilt found nothing** (t = -0.31 at 21 days, t = 0.13 at 63 days, R² ≈ 0 at
+both) — expected, since there is exactly one sector series and the addendum said as much
+going in.
+
+**Bottom line:** `simulate --tilt` is fully wired and will apply a regression-based drift
+tilt on request, but on the evidence gathered so far there is no case for turning it on by
+default. `signals.shrinkage_lambda` defaults to 0.5 and the cap to ±10% annualized
+specifically so that even a spurious tilt cannot move a forecast very far; a user who runs
+`--tilt` today is, on this evidence, adding noise dressed as signal. This is stated here
+rather than left to be discovered the way the drift-policy selection issue was — see §7.

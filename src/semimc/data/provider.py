@@ -5,17 +5,27 @@ paid API or a CSV drop can be swapped in by changing ``data.provider`` in the co
 
 All providers return the same *long* frame:
 
-===========  =========================================================
-column       meaning
-===========  =========================================================
-``date``     trading date (``datetime64[ns]``, tz-naive, normalized)
-``ticker``   symbol as requested
-``adj_close``  split- and dividend-adjusted close, in USD
-``volume``   shares traded (used only for the stale/zero-volume check)
-===========  =========================================================
+=================  ===================================================
+column             meaning
+=================  ===================================================
+``date``           trading date (``datetime64[ns]``, tz-naive, normalized)
+``ticker``         symbol as requested
+``adj_close``      split- and dividend-adjusted close, in USD
+``adj_open``       adjusted open (may be ``NaN``)
+``adj_high``       adjusted session high (may be ``NaN``)
+``adj_low``        adjusted session low (may be ``NaN``)
+``volume``         shares traded (used only for the stale/zero-volume check)
+=================  ===================================================
 
 Adjusted closes are mandatory: NVDA and AVGO both split 10-for-1 in 2024, and an
 unadjusted series would read those splits as a 90% crash.
+
+Open, high and low arrived with the addendum's HAR model, which needs an intraday range.
+They are **optional**: a source that supplies only closes still loads, and the models that
+need a range say so rather than silently substituting one. When they are present they must
+be adjusted on the same basis as the close -- yfinance's ``auto_adjust=True`` scales every
+OHLC field by the same factor, which is what makes ``low <= close <= high`` a usable check
+that the adjustment bases did not get mixed.
 """
 
 from __future__ import annotations
@@ -25,11 +35,13 @@ import logging
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+import numpy as np
 import pandas as pd
 
 LOGGER = logging.getLogger(__name__)
 
-PRICE_COLUMNS = ["date", "ticker", "adj_close", "volume"]
+PRICE_COLUMNS = ["date", "ticker", "adj_close", "adj_open", "adj_high", "adj_low", "volume"]
+OHLC_COLUMNS = ["adj_open", "adj_high", "adj_low"]
 
 
 class ProviderError(RuntimeError):
@@ -62,22 +74,38 @@ def _empty_frame() -> pd.DataFrame:
             "date": pd.Series(dtype="datetime64[ns]"),
             "ticker": pd.Series(dtype="object"),
             "adj_close": pd.Series(dtype="float64"),
+            "adj_open": pd.Series(dtype="float64"),
+            "adj_high": pd.Series(dtype="float64"),
+            "adj_low": pd.Series(dtype="float64"),
             "volume": pd.Series(dtype="float64"),
         }
     )
+
+
+def _column(frame: pd.DataFrame, name: str) -> np.ndarray | float:
+    """One column of a provider response as a float array, or ``NaN`` when absent."""
+    return frame[name].to_numpy(dtype="float64") if name in frame else float("nan")
 
 
 def _tidy(frame: pd.DataFrame) -> pd.DataFrame:
     """Normalize dtypes and ordering of a long price frame."""
     if frame.empty:
         return _empty_frame()
-    out = frame.loc[:, PRICE_COLUMNS].copy()
+    out = frame.copy()
+    for column in PRICE_COLUMNS:
+        if column not in out.columns:
+            out[column] = float("nan")
+    out = out.loc[:, PRICE_COLUMNS]
     out["date"] = pd.to_datetime(out["date"]).dt.tz_localize(None).dt.normalize()
     out["ticker"] = out["ticker"].astype(str)
-    out["adj_close"] = pd.to_numeric(out["adj_close"], errors="coerce").astype("float64")
-    out["volume"] = pd.to_numeric(out["volume"], errors="coerce").astype("float64")
+    for column in ["adj_close", *OHLC_COLUMNS, "volume"]:
+        out[column] = pd.to_numeric(out[column], errors="coerce").astype("float64")
     out = out.dropna(subset=["adj_close"])
     out = out[out["adj_close"] > 0]
+    # A non-positive open/high/low is not a price; blank it rather than letting a zero
+    # reach a log in the variance proxy.
+    for column in OHLC_COLUMNS:
+        out.loc[out[column] <= 0, column] = float("nan")
     return out.sort_values(["ticker", "date"]).reset_index(drop=True)
 
 
@@ -130,14 +158,18 @@ class YFinanceProvider:
             if isinstance(raw.columns, pd.MultiIndex):
                 raw = raw.droplevel(1, axis=1)
 
+            # auto_adjust=True scales Open/High/Low/Close by the same factor, so all four
+            # share one adjustment basis. That is what the low <= close <= high check in
+            # validation.py is actually testing.
             frame = pd.DataFrame(
                 {
                     "date": raw.index,
                     "ticker": ticker,
                     "adj_close": raw["Close"].to_numpy(dtype="float64"),
-                    "volume": raw["Volume"].to_numpy(dtype="float64")
-                    if "Volume" in raw
-                    else float("nan"),
+                    "adj_open": _column(raw, "Open"),
+                    "adj_high": _column(raw, "High"),
+                    "adj_low": _column(raw, "Low"),
+                    "volume": _column(raw, "Volume"),
                 }
             )
             frames.append(frame)
@@ -167,6 +199,9 @@ class CSVProvider:
     _DATE_NAMES = ("date", "datetime", "timestamp")
     _PRICE_NAMES = ("adj_close", "adjclose", "adj close", "adjusted_close", "close")
     _VOLUME_NAMES = ("volume", "vol")
+    _OPEN_NAMES = ("adj_open", "adjopen", "adj open", "adjusted_open", "open")
+    _HIGH_NAMES = ("adj_high", "adjhigh", "adj high", "adjusted_high", "high")
+    _LOW_NAMES = ("adj_low", "adjlow", "adj low", "adjusted_low", "low")
 
     def __init__(self, directory: str | Path) -> None:
         self.directory = Path(directory)
@@ -199,12 +234,18 @@ class CSVProvider:
                 LOGGER.warning("CSV provider: %s lacks a date or adjusted-close column", path)
                 continue
             volume_col = self._pick(columns, self._VOLUME_NAMES)
+            open_col = self._pick(columns, self._OPEN_NAMES)
+            high_col = self._pick(columns, self._HIGH_NAMES)
+            low_col = self._pick(columns, self._LOW_NAMES)
             frames.append(
                 pd.DataFrame(
                     {
                         "date": raw[date_col],
                         "ticker": ticker,
                         "adj_close": raw[price_col],
+                        "adj_open": raw[open_col] if open_col else float("nan"),
+                        "adj_high": raw[high_col] if high_col else float("nan"),
+                        "adj_low": raw[low_col] if low_col else float("nan"),
                         "volume": raw[volume_col] if volume_col else float("nan"),
                     }
                 )

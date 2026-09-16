@@ -66,6 +66,12 @@ uv run semimc scenario --name replay_covid_2020
 
 # A self-contained HTML report for any run
 uv run semimc report --run latest
+
+# Cross-validated evaluation of the regression-based drift signals (addendum Phase 4B)
+uv run semimc signals --horizon 21
+
+# Apply the fitted signal tilt on top of the configured drift policy
+uv run semimc simulate --ticker NVDA --horizon 21 --tilt
 ```
 
 Development:
@@ -119,6 +125,35 @@ policy leaning 25% on the realized mean was always going to look good; in a sect
 it will look correspondingly bad. `capm` is one flag away and is the more conservative
 default. `MODEL_NOTES.md` §7 has the detail.
 
+## What the signal evaluation found (addendum Phase 4B)
+
+Also stated up front. `semimc signals` evaluates five candidate signals — momentum,
+short-term reversal, relative strength vs. SOXX, earnings drift, and an industry-cycle
+sector tilt — meant to regression-tilt the drift away from CAPM. Run 2026-09-15, real
+14-name universe, 2018 onward, 5-fold walk-forward cross-validation, **pre-holdout only**
+(the 24-month holdout has deliberately not been spent):
+
+**Every signal's out-of-sample R² was negative, at both 21 and 63 days.** Predicting no
+tilt at all beat every candidate, including the combined Driscoll-Kraay regression, on raw
+prediction error.
+
+**Two results were nominally significant at 63 days, not at 21**: `relative_strength`
+(Clark-West t = 2.36, p = 0.009) and, on rank IC, `earnings_drift` (t = 2.34). Both are
+short of the addendum's own "~3" skepticism bar for a search this size, and neither
+corresponds to a positive OOS R² — distinguishable from a zero forecast is not the same
+claim as economically useful.
+
+**The combined multi-signal regression underperformed every single signal** at both
+horizons, a small-sample overfitting signature. **The sector tilt found nothing** (R² ≈ 0
+at both horizons) — expected, with only one sector series.
+
+`simulate --tilt` is fully built and works — point-in-time signal store, pooled panel
+regression with Driscoll-Kraay standard errors, a Fama-MacBeth robustness check, shrinkage,
+a ±10% annualized cap, and a 500-set coefficient bootstrap that widens the simulated
+distribution without moving its mean — but on this evidence there is no case for it by
+default, and none of the commands here turn it on unless asked. `research_log.md` has the
+full numbers; `MODEL_NOTES.md` §13–14 has the mechanism and the reasoning.
+
 ## Models
 
 | name | what it adds | see |
@@ -129,9 +164,14 @@ default. `MODEL_NOTES.md` §7 has the detail.
 | `earnings_jumps` | scheduled earnings gaps, overlaid on any base model | §4 |
 | `factor` | market + sector factors with their own dynamics | §5 |
 | `fhs` | filtered historical simulation, cross-section resampled by date | §6 |
+| `merton` | unscheduled jump-diffusion, excludes earnings reaction days | §9 |
+| `har` | volatility forecast from a Garman-Klass realized-variance proxy | §10 |
+| `regime` | two-state Markov-switching volatility (calm / turbulent) | §11 |
+| `blend` | whole simulated paths mixed from several fitted models | §12 |
 
 `MODEL_NOTES.md` gives the equations, the assumptions, and — for each model — where it is
-known to break.
+known to break. §13–14 cover the Phase 4B signal store and drift tilt, which is not a
+model but a modifier `simulate --tilt` applies on top of one.
 
 ## Output
 
@@ -156,6 +196,25 @@ The provider only returns a handful of recent quarters and rarely supplies timin
 the result as a starting point: review it, fix the `timing` column (`bmo` before the open,
 `amc` after the close), and extend it backwards for backtesting and forwards for
 forecasting. Without future-dated rows the overlay warns and injects no jumps.
+
+## Signal data (addendum Phase 4B)
+
+The industry-cycle signal needs FRED's `IPG3344S` series, and the customer lead-lag signal
+needs a hand-curated link file:
+
+```bash
+uv run semimc fetch --industry     # writes data/external/IPG3344S.csv
+```
+
+No API key needed, but read the caveat before trusting it: FRED serves the current,
+*revised* vintage with no published history of earlier ones, so `release_date` in that file
+is an approximation (`period + 45 days`), not a fact, and the signal carries a real
+revision-bias limitation as a result — see `MODEL_NOTES.md` §13.
+
+`data/external/supply_chain_links.csv` is hand-maintained, never inferred or scraped: each
+row is one supplier→customer relationship with a source and the date it was recorded
+(`as_of`), which is what makes the signal usable point-in-time despite being built from
+today's knowledge of who buys from whom.
 
 ## Configuration
 
@@ -193,9 +252,12 @@ Read these before trusting any number this produces.
 
 ```
 config/default.yaml        every default, validated by pydantic
+data/external/              versioned CSVs: industry cycle, supply-chain links
 src/semimc/
   data/                    providers, parquet cache, validation, returns, earnings
-  models/                  the six models + the shared drift machinery
+  models/                  ten models + the shared drift machinery
+  signals/                 point-in-time signal store, the five candidate signals
+  forecasting/             panel/sector regressions, CV, tilt construction, evaluation
   engine/                  chunked simulation, portfolio aggregation
   analytics/               VaR/CVaR, CRPS, PIT, coverage, convergence
   backtest/                walk-forward runner and scorecard
@@ -203,9 +265,10 @@ src/semimc/
   reporting/               matplotlib charts, self-contained HTML
   cli.py                   typer CLI
 tests/                     fixtures only, no network
-tasks/                     plan.md and todo.md
+tasks/                     plan.md, plan_addendum.md, todo.md
+research_log.md             every signal specification tried, including failures
 runs/                      one folder per run (gitignored)
 ```
 
-`CLAUDE.md` records conventions and boundaries; `tasks/plan.md` records the architecture
-and the decisions taken, including the ones that are reversible.
+`CLAUDE.md` records conventions and boundaries; `tasks/plan.md` and `tasks/plan_addendum.md`
+record the architecture and the decisions taken, including the ones that are reversible.
