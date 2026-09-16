@@ -67,7 +67,10 @@ Regenerate test fixtures with `uv run python tests/fixtures/make_fixtures.py`.
   `capm` is the conservative alternative and is one flag away.
   Subclasses implement `_fit_shape`, `_simulate_zero_mean`, and `annualized_variance`.
 - **The provider interface is the only route to price data.** Nothing imports yfinance
-  outside `data/provider.py` (and the optional earnings/FRED helpers).
+  outside `data/provider.py` (and the optional earnings/FRED/options helpers:
+  `data/earnings.py`, `signals/external.py`, `data/options.py`). `data/options.py` is
+  live-only by nature (today's option chain, no historical equivalent exists) and is
+  never called from anywhere point-in-time-sensitive -- only `simulate --implied-vol`.
 - **Charts return Figures; they do not write files.** The caller decides where output goes,
   which is why the same code serves the CLI, the HTML report and a notebook.
 - **A drift tilt is a separate, auditable layer, not a change to the drift policy.**

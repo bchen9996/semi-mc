@@ -130,7 +130,17 @@ or a produced artifact.
       printed, and written to the run directory (`rolling_coefficients.csv` + `.png`).
 
 ## Not built (stretch — only on request)
-- [ ] Options-implied vol calibration
+- [x] **Options-implied vol calibration.** Owner decision 2026-09-16: built as a
+      **live-only** override, not part of the backtester (no free historical option data
+      exists — the same reason the addendum declined Heston). `data/options.py`: current
+      option chain via yfinance, implied vols recomputed from bid/ask via our own
+      Black-Scholes inversion (yfinance's own `impliedVolatility` field was confirmed
+      unreliable on illiquid strikes during development — 1300%/870% "vols" on
+      `openInterest = 1` contracts), OTM/liquid-only, variance-interpolated across the
+      term structure to the requested horizon. `GBMModel.implied_annual_vol` is a
+      per-ticker override set before `.fit()`, keeping `_fit_shape` itself network-free.
+      `simulate --implied-vol`, requires `--model gbm` and a single `--ticker`. See
+      MODEL_NOTES §16.
 - [ ] Streamlit dashboard
 
 ## Known gaps (deliberate, with reasons)

@@ -773,3 +773,42 @@ factors is dropped — expected to be small, since the sector factor is already 
 residualized on SPY by construction, but real and worth naming rather than hiding. A
 sector-shared regime chain is what the addendum specifically asked for; a `regime`-switched
 *market* factor, or an idiosyncratic-level shared regime, was not, and neither is built.
+
+---
+
+## 16. Options-implied volatility (`simulate --implied-vol`)
+
+The original brief's one remaining stretch item: "Calibrating volatility to
+options-implied volatility." Owner decision 2026-09-16: build it as a **live-only**
+override of GBM's volatility estimator, not a new stochastic-volatility model and not
+part of the backtester — free historical option chains do not exist, the exact reason the
+addendum itself gave for declining a Heston model. There is no walk-forward counterpart
+to check this against, and that is stated here rather than left to be inferred from its
+absence in `semimc backtest`.
+
+**Mechanism.** `data/options.py` fetches the current option chain (`yfinance`) for one
+ticker, and recomputes every implied vol itself via a from-scratch Black-Scholes
+inversion (`scipy.optimize.brentq`) rather than trusting the exchange-computed
+`impliedVolatility` field Yahoo returns — a live check on NVDA during development found
+that field reporting 1300%/870% "implied vols" on deep-in-the-money contracts with
+`openInterest = 1` and no volume: a stale or non-existent market re-priced through
+Black-Scholes with a garbage quote. Only out-of-the-money, liquid quotes (positive bid, ask
+above bid, nonzero volume or open interest) within `options.moneyness_band` (default
+±10%) of spot are used, volume-weighted per expiry. A target horizon that falls between
+two listed expiries is handled by interpolating *linearly in total variance*
+(`sigma^2 * T`, additive under a diffusion's independent increments — not linear in
+volatility itself), holding flat at the nearer endpoint outside the listed range rather
+than extrapolating a slope that was never quoted.
+
+**Wiring.** `GBMModel.implied_annual_vol: dict[str, float]` is a per-ticker override set
+*before* `.fit()` by the CLI layer, not inside `_fit_shape` — fitting stays a network-free,
+deterministic function of `log_returns` for every model, including this one; only the CLI
+command that requests `--implied-vol` ever touches the network. `--implied-vol` requires
+`--model gbm` and a single `--ticker` (not `--portfolio`): the feature calibrates one
+name's own option chain, which has no portfolio-level meaning.
+
+**What is not attempted.** A full implied-vol smile or a Heston-style stochastic-vol
+process — this stays a single scalar annual volatility, exactly the brief's literal ask.
+Dividend yield defaults to 0 (`options.dividend_yield`); TXN and ADI pay real dividends, a
+known, small, disclosed bias in their Black-Scholes inversion rather than a hidden one.
+Same-day (0-DTE) expiries are excluded outright, not inverted.

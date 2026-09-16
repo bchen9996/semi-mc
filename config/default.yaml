@@ -152,6 +152,14 @@ portfolio:
   weights: {}             # empty = equal weight across the requested tickers
   rebalance: none         # none | monthly | quarterly
 
+# `simulate --implied-vol`. Live-only -- fetches today's option chain, so it has no
+# backtest counterpart and cannot be validated against history. See data/options.py.
+options:
+  moneyness_band: 0.10        # strikes within +/- 10% of spot
+  max_expiries: 6              # nearest listed expiries fetched and considered
+  min_quotes_per_expiry: 2     # below this, an expiry contributes no vol (NaN, not a guess)
+  dividend_yield: 0.0          # continuous yield in Black-Scholes; TXN/ADI pay real dividends
+
 scenarios:
   sector_shock_25:
     kind: sector_shock

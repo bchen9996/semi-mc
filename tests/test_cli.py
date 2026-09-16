@@ -191,6 +191,25 @@ def test_simulate_rejects_both_ticker_and_portfolio(tmp_path):
     assert result.exit_code != 0
 
 
+def test_simulate_implied_vol_rejects_a_non_gbm_model(tmp_path):
+    """--implied-vol only overrides GBM's vol_estimator; no other model has one."""
+    result = runner.invoke(
+        app,
+        ["simulate", "--ticker", "NVDA", "--model", "garch_t", "--implied-vol"]
+        + base_overrides(tmp_path),
+    )
+    assert result.exit_code != 0
+
+
+def test_simulate_implied_vol_rejects_a_portfolio(tmp_path):
+    """--implied-vol fetches one ticker's option chain; it has no portfolio meaning."""
+    result = runner.invoke(
+        app,
+        ["simulate", "--portfolio", "NVDA=1.0", "--implied-vol"] + base_overrides(tmp_path),
+    )
+    assert result.exit_code != 0
+
+
 @pytest.mark.parametrize(
     "model",
     [

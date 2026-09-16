@@ -24,6 +24,7 @@ MODULES = [
     "semimc.data.earnings",
     "semimc.data.provider",
     "semimc.data.returns",
+    "semimc.data.options",
     "semimc.data.riskfree",
     "semimc.data.validation",
     "semimc.models",

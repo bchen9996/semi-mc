@@ -245,6 +245,16 @@ class PortfolioConfig(_Base):
     rebalance: Literal["none", "monthly", "quarterly"] = "none"
 
 
+class OptionsConfig(_Base):
+    """Brief §6 stretch item: `simulate --implied-vol`. Live-only -- see
+    `data/options.py`'s module docstring for why this has no backtest counterpart."""
+
+    moneyness_band: float = Field(0.10, gt=0, le=1)  # strikes within +/- this of spot
+    max_expiries: int = Field(6, gt=0)  # nearest listed expiries to fetch and consider
+    min_quotes_per_expiry: int = Field(2, ge=1)  # below this, an expiry's vol is NaN
+    dividend_yield: float = Field(0.0, ge=0, le=1)  # continuous yield used in Black-Scholes
+
+
 class ReportingConfig(_Base):
     fan_percentiles: list[int] = Field(default_factory=lambda: [5, 25, 50, 75, 95])
     figure_dpi: int = Field(120, gt=0)
@@ -264,6 +274,7 @@ class Config(_Base):
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     signals: SignalsConfig = Field(default_factory=SignalsConfig)
     portfolio: PortfolioConfig = Field(default_factory=PortfolioConfig)
+    options: OptionsConfig = Field(default_factory=OptionsConfig)
     scenarios: dict[str, dict[str, Any]] = Field(default_factory=dict)
     reporting: ReportingConfig = Field(default_factory=ReportingConfig)
 

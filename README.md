@@ -173,7 +173,9 @@ full numbers; `MODEL_NOTES.md` §13–14 has the mechanism and the reasoning.
 `MODEL_NOTES.md` gives the equations, the assumptions, and — for each model — where it is
 known to break. §13–14 cover the Phase 4B signal store and drift tilt, which is not a
 model but a modifier `simulate --tilt` applies on top of one; §15 covers the combination
-ladder and `factor_regime`.
+ladder and `factor_regime`; §16 covers `simulate --implied-vol`, a **live-only** GBM
+volatility override calibrated to today's option chain — it has no backtest counterpart,
+since free historical option data doesn't exist.
 
 ## Output
 

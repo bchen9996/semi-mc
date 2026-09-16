@@ -134,6 +134,34 @@ def test_drift_uses_the_ito_correction(panel, context, config):
     assert model.daily_log_drift(63)["NVDA"] == pytest.approx((mu - sigma**2 / 2) / 252)
 
 
+def test_gbm_implied_vol_override_replaces_the_historical_estimate(panel, context):
+    """A ticker present in ``implied_annual_vol`` must use that number exactly, not the
+    historical realized/EWMA estimate -- the whole point of the override."""
+    override = {"NVDA": 0.9999}  # implausible as a realized estimate, so no ambiguity
+    model = GBMModel(vol_window_days=500, implied_annual_vol=override).fit(
+        panel.loc[:, ["NVDA"]], context
+    )
+    assert float(model.annual_vol["NVDA"]) == pytest.approx(0.9999)
+    assert "NVDA" in model.describe()["implied_vol_tickers"]
+
+
+def test_gbm_implied_vol_override_only_applies_to_named_tickers(panel, context):
+    """A multi-ticker fit with an override for only one ticker must leave the other's
+    historical estimate untouched."""
+    plain = GBMModel(vol_window_days=500).fit(panel.loc[:, ["NVDA", "AMD"]], context)
+    overridden = GBMModel(vol_window_days=500, implied_annual_vol={"NVDA": 0.9999}).fit(
+        panel.loc[:, ["NVDA", "AMD"]], context
+    )
+    assert float(overridden.annual_vol["NVDA"]) == pytest.approx(0.9999)
+    assert float(overridden.annual_vol["AMD"]) == pytest.approx(float(plain.annual_vol["AMD"]))
+    assert overridden.describe()["implied_vol_tickers"] == ["NVDA"]
+
+
+def test_gbm_without_an_override_reports_no_implied_vol_tickers(panel, context):
+    model = GBMModel(vol_window_days=500).fit(panel.loc[:, ["NVDA"]], context)
+    assert model.describe()["implied_vol_tickers"] == []
+
+
 def test_manual_drift_requires_every_ticker(panel, context, config):
     with pytest.raises(ValueError, match="manual_annual_return"):
         annual_arithmetic_drift(

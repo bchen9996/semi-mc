@@ -315,6 +315,17 @@ def simulate(
             "history the run proceeds untilted and says so.",
         ),
     ] = False,
+    implied_vol: Annotated[
+        bool,
+        typer.Option(
+            "--implied-vol",
+            help="Override GBM's historical volatility with today's options-implied "
+            "volatility for this horizon (brief stretch item). Live-only: fetches the "
+            "current option chain over the network, so it cannot be backtested or "
+            "validated against history the way every other number here is -- see "
+            "data/options.py. Requires --model gbm and a single --ticker.",
+        ),
+    ] = False,
     config: ConfigOption = None,
     set_: SetOption = None,
     verbose: VerboseOption = False,
@@ -334,6 +345,11 @@ def simulate(
         terminal_histogram,
     )
     from .runs import RunDirectory
+
+    if implied_vol and model != "gbm":
+        raise typer.BadParameter("--implied-vol only supports --model gbm")
+    if implied_vol and portfolio is not None:
+        raise typer.BadParameter("--implied-vol only supports --ticker, not --portfolio")
 
     if (ticker is None) == (portfolio is None):
         raise typer.BadParameter("give exactly one of --ticker or --portfolio")
@@ -392,11 +408,58 @@ def simulate(
             "diagnostics": outcome.diagnostics,
         }
 
+    implied_vol_diagnostics: dict | None = None
+    implied_vol_override: dict[str, float] = {}
+    if implied_vol:
+        from .data.options import OptionsUnavailableError, fetch_implied_vol_term_structure
+
+        typer.echo(f"Fetching the live option chain for {symbols[0]} ...")
+        try:
+            term_structure = fetch_implied_vol_term_structure(
+                symbols[0],
+                rate=cfg.drift.risk_free_rate,
+                dividend_yield=cfg.options.dividend_yield,
+                moneyness_band=cfg.options.moneyness_band,
+                max_expiries=cfg.options.max_expiries,
+                min_quotes=cfg.options.min_quotes_per_expiry,
+            )
+            annual_vol, vol_diagnostics = term_structure.annual_vol_for_horizon(
+                horizon, cfg.simulation.trading_days_per_year
+            )
+            implied_spot = term_structure.spot
+        except OptionsUnavailableError as exc:
+            typer.secho(
+                f"  unavailable ({exc}); using historical volatility instead.",
+                fg=typer.colors.YELLOW,
+            )
+            annual_vol, vol_diagnostics, implied_spot = float("nan"), {"error": str(exc)}, None
+
+        if np.isfinite(annual_vol):
+            implied_vol_override = {symbols[0]: annual_vol}
+            typer.echo(
+                f"  implied annual vol for {horizon}d: {annual_vol:.1%} "
+                f"(spot {implied_spot:.2f}, {vol_diagnostics.get('method', '?')})"
+            )
+        else:
+            typer.secho(
+                "  no usable implied vol from the chain; using historical volatility instead.",
+                fg=typer.colors.YELLOW,
+            )
+        implied_vol_diagnostics = {
+            "applied": bool(implied_vol_override),
+            "annual_vol": annual_vol if np.isfinite(annual_vol) else None,
+            "spot": implied_spot,
+            **vol_diagnostics,
+        }
+
     typer.echo(
         f"Fitting {model} on {len(training):,} days to {as_of.date()} "
         f"({training.index.min().date()} onward), drift policy {cfg.drift.policy}."
     )
-    fitted = build_model(model, cfg, market=market).fit(training, context)
+    unfitted = build_model(model, cfg, market=market)
+    if implied_vol_override:
+        unfitted.implied_annual_vol = implied_vol_override
+    fitted = unfitted.fit(training, context)
 
     run = RunDirectory.create(
         cfg.runs_path,
@@ -412,6 +475,8 @@ def simulate(
     run.record("as_of", str(as_of.date()))
     if tilt_diagnostics is not None:
         run.record("drift_tilt", tilt_diagnostics)
+    if implied_vol_diagnostics is not None:
+        run.record("implied_vol", implied_vol_diagnostics)
 
     spot = market.spot(symbols, as_of)
     result = run_simulation(

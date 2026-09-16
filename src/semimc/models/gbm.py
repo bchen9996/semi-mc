@@ -71,12 +71,18 @@ class GBMModel(BaseReturnModel):
         vol_estimator: str = "realized",
         vol_window_days: int = 252,
         ewma_lambda: float = 0.94,
+        implied_annual_vol: dict[str, float] | None = None,
         dtype: str = "float64",
     ) -> None:
         super().__init__(dtype=dtype)
         self.vol_estimator = vol_estimator
         self.vol_window_days = vol_window_days
         self.ewma_lambda = ewma_lambda
+        # A per-ticker override, set before `.fit()` by a caller that has already fetched
+        # a live options-implied volatility (`data/options.py`) -- kept out of `_fit_shape`
+        # itself so fitting stays a network-free, deterministic function of `log_returns`,
+        # like every other model. A ticker not present here falls back to `vol_estimator`.
+        self.implied_annual_vol = dict(implied_annual_vol) if implied_annual_vol else {}
         self.daily_vol: pd.Series | None = None
         self.annual_vol: pd.Series | None = None
         self.correlation: pd.DataFrame | None = None
@@ -87,6 +93,9 @@ class GBMModel(BaseReturnModel):
         annual_vol: dict[str, float] = {}
 
         for ticker in self.tickers:
+            if ticker in self.implied_annual_vol:
+                annual_vol[ticker] = float(self.implied_annual_vol[ticker])
+                continue
             series = log_returns[ticker].dropna()
             if self.vol_estimator == "ewma":
                 annual_vol[ticker] = ewma_volatility(series, self.ewma_lambda, tdpy)
@@ -140,6 +149,7 @@ class GBMModel(BaseReturnModel):
                 "vol_estimator": self.vol_estimator,
                 "vol_window_days": self.vol_window_days,
                 "annual_vol": {k: float(v) for k, v in self.annual_vol.items()},
+                "implied_vol_tickers": sorted(self.implied_annual_vol),
             }
         )
         return info
