@@ -154,8 +154,11 @@ def fetch(
             typer.secho("  the provider returned no earnings dates.", fg=typer.colors.YELLOW)
         else:
             existing = load_calendar(destination).events
+            # Concatenating an all-empty frame changes dtype inference in pandas, so only
+            # merge when there is something to merge with.
+            frames = [f for f in (existing, fetched) if not f.empty]
             combined = (
-                pd.concat([existing, fetched], ignore_index=True)
+                pd.concat(frames, ignore_index=True)
                 .drop_duplicates(subset=["ticker", "date"])
                 .sort_values(["ticker", "date"])
             )
@@ -547,6 +550,24 @@ def backtest(
     run.record("elapsed_seconds", round(result.elapsed_seconds, 1))
     run.record("fit_counts", result.fit_counts)
     run.record("n_origins", len(result.origins))
+    # The config snapshot records the *file*, not what the CLI overrode on top of it, so
+    # a run invoked with --models/--horizons/--tickers could not be reproduced from its
+    # own record. Store what was actually run.
+    run.record(
+        "effective",
+        {
+            "models": result.models,
+            "horizons": result.horizons,
+            "tickers": result.tickers,
+            "baseline": result.baseline,
+            "n_paths": result.n_paths,
+            "seed": result.seed,
+            "drift_policy": cfg.drift.policy,
+            "first_origin": str(pd.Timestamp(result.origins.min()).date()),
+            "last_origin": str(pd.Timestamp(result.origins.max()).date()),
+            "risk_free_point_in_time": market.risk_free.is_point_in_time,
+        },
+    )
     typer.echo("\n" + text)
     typer.echo(f"\nWritten to {run.close()}")
 
