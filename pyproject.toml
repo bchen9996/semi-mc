@@ -15,6 +15,8 @@ dependencies = [
     "typer>=0.12,<1",
     "pyyaml>=6,<7",
     "yfinance>=0.2.40,<1",
+    # yfinance scrapes earnings dates via pandas.read_html, which needs an HTML parser.
+    "lxml>=5,<7",
 ]
 
 [project.optional-dependencies]

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from ..models.base import FitContext
+from ..context import FitContext
 from .cache import PriceCache
 from .earnings import EarningsCalendar, load_calendar
 from .provider import build_provider
@@ -150,8 +150,13 @@ class MarketData:
     def context(self, as_of: pd.Timestamp, for_backtest: bool = False) -> FitContext:
         """Build the :class:`FitContext` for a forecast origin.
 
-        Every field is truncated to ``as_of``: benchmark returns, the risk-free curve and
-        the earnings calendar alike.
+        Benchmark returns and the risk-free curve are truncated to ``as_of``. The earnings
+        calendar deliberately is not: a company confirms its next report date weeks ahead,
+        so the forward *schedule* is genuinely known at the origin, while the *reaction*
+        to each report is what the model has to forecast. Truncating it here would delete
+        every future date and silently reduce the earnings overlay to its own base model.
+        Models estimate the jump distribution from ``calendar.truncated(as_of)``, so past
+        reactions stay strictly point-in-time. See MODEL_NOTES section 4.
         """
         stamp = pd.Timestamp(as_of).normalize()
         curve = self.risk_free.truncated(stamp) if for_backtest else self.risk_free
@@ -166,7 +171,7 @@ class MarketData:
             equity_risk_premium=self.config.drift.equity_risk_premium,
             shrinkage_weight=self.config.drift.shrinkage_weight,
             manual_annual_return=dict(self.config.drift.manual_annual_return),
-            earnings=self.earnings.truncated(stamp) if self.earnings is not None else None,
+            earnings=self.earnings,  # schedule stays known; see the docstring above
         )
 
 

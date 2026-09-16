@@ -327,9 +327,7 @@ def test_pit_diagnosis_detects_a_biased_centre():
     from semimc.backtest.scorecard import diagnose_pit
 
     high = pd.DataFrame({"count": [0] * 10})
-    high.attrs.update(
-        {"mean_pit": 0.70, "tail_mass": 0.20, "uniform_tail_mass": 0.20, "n": 200}
-    )
+    high.attrs.update({"mean_pit": 0.70, "tail_mass": 0.20, "uniform_tail_mass": 0.20, "n": 200})
     text = diagnose_pit(high)
     assert "land high" in text and "drift was too low" in text
     assert "width is about right" in text
@@ -340,9 +338,7 @@ def test_pit_diagnosis_detects_an_overconfident_width():
     from semimc.backtest.scorecard import diagnose_pit
 
     narrow = pd.DataFrame({"count": [0] * 10})
-    narrow.attrs.update(
-        {"mean_pit": 0.50, "tail_mass": 0.35, "uniform_tail_mass": 0.20, "n": 200}
-    )
+    narrow.attrs.update({"mean_pit": 0.50, "tail_mass": 0.35, "uniform_tail_mass": 0.20, "n": 200})
     text = diagnose_pit(narrow)
     assert "centre is unbiased" in text
     assert "too narrow" in text
