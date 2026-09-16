@@ -19,10 +19,14 @@ from semimc.analytics.risk import (
     value_at_risk,
 )
 from semimc.analytics.scoring import (
+    block_bootstrap_origins,
     christoffersen_independence,
     crps_from_samples,
     crps_normal,
+    diebold_mariano,
+    diebold_mariano_bootstrap,
     kupiec_pof,
+    pit_bias_bootstrap_test,
     pit_value,
 )
 from semimc.models.base import FitContext
@@ -242,3 +246,164 @@ def test_christoffersen_detects_clustered_exceptions():
 
     assert christoffersen_independence(clustered)["p_value"] < 0.01
     assert christoffersen_independence(independent)["p_value"] > 0.05
+
+
+# ---------------------------------------------------------------------------------------
+# Block bootstrap over origins (cross-sectional dependence correction)
+# ---------------------------------------------------------------------------------------
+
+
+def _co_moving_dm_rows(rng, n_origins, n_tickers, mean_difference, origin_noise=0.02):
+    """Paired model/baseline CRPS "differences" where every ticker at a given origin
+    shares exactly the same draw -- the extreme case of the thing tickers actually do
+    (co-move), used to make the dependence-correction's effect unambiguous rather than a
+    matter of statistical luck."""
+    rows = []
+    for origin in range(n_origins):
+        shared_difference = mean_difference + rng.normal(0, origin_noise)
+        for ticker in range(n_tickers):
+            rows.append(
+                {
+                    "origin": origin,
+                    "ticker": ticker,
+                    "model_crps": shared_difference,
+                    "baseline_crps": 0.0,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_block_bootstrap_origins_only_ever_combines_whole_origin_blocks():
+    """Every replicate must be built from complete origin blocks -- never part of one --
+    so a per-origin constant value survives resampling exactly, unchanged."""
+    rows = pd.DataFrame(
+        {
+            "origin": [0, 0, 0, 1, 1, 1, 2, 2, 2],
+            "value": [10.0, 10.0, 10.0, 20.0, 20.0, 20.0, 30.0, 30.0, 30.0],
+        }
+    )
+    rng = np.random.default_rng(0)
+    replicates = block_bootstrap_origins(rows, lambda frame: float(frame["value"].mean()), 500, rng)
+    # Every replicate's mean must be an average of *whole* origins drawn (with
+    # replacement) from {10, 20, 30} -- never a value that could only come from mixing
+    # partial origins, which is what row-level resampling would allow.
+    legal_means = _all_origin_mixture_means()
+    for replicate in replicates:
+        assert any(abs(replicate - combo) < 1e-9 for combo in legal_means)
+
+
+def _all_origin_mixture_means():
+    """Every possible mean of a multiset drawn (with replacement) from {10, 20, 30},
+    for up to 3 draws -- the exhaustive set of values a 3-origin bootstrap replicate here
+    could legitimately produce."""
+    values = [10.0, 20.0, 30.0]
+    seen = set()
+    for a in values:
+        for b in values:
+            for c in values:
+                seen.add(round((a + b + c) / 3, 9))
+    return seen
+
+
+def test_block_bootstrap_origins_is_reproducible_with_the_same_rng_state():
+    rows = _co_moving_dm_rows(
+        np.random.default_rng(1), n_origins=20, n_tickers=5, mean_difference=0.1
+    )
+    first = block_bootstrap_origins(
+        rows, lambda f: float(f["model_crps"].mean()), 100, np.random.default_rng(42)
+    )
+    second = block_bootstrap_origins(
+        rows, lambda f: float(f["model_crps"].mean()), 100, np.random.default_rng(42)
+    )
+    np.testing.assert_array_equal(first, second)
+
+
+def test_block_bootstrap_origins_returns_empty_for_no_data():
+    empty = pd.DataFrame(columns=["origin", "value"])
+    result = block_bootstrap_origins(
+        empty, lambda f: float(f["value"].mean()), 50, np.random.default_rng(0)
+    )
+    assert result.size == 0
+
+
+def test_diebold_mariano_bootstrap_se_exceeds_naive_se_under_cross_sectional_dependence():
+    """The whole point of the correction: when tickers within an origin are perfectly
+    co-moving (the extreme, cleanest case of what the project's caveats describe as real),
+    the plain test's row-level standard error is too small, and the bootstrap's
+    origin-level standard error must be visibly larger -- not just different."""
+    rng = np.random.default_rng(7)
+    rows = _co_moving_dm_rows(rng, n_origins=30, n_tickers=6, mean_difference=0.05)
+
+    naive = diebold_mariano(rows["model_crps"].to_numpy(), rows["baseline_crps"].to_numpy())
+    assert np.isfinite(naive["dm_statistic"])
+    naive_se = float((rows["model_crps"] - rows["baseline_crps"]).std(ddof=1) / np.sqrt(len(rows)))
+
+    bootstrap = diebold_mariano_bootstrap(
+        rows, "model_crps", "baseline_crps", 1000, np.random.default_rng(0)
+    )
+    assert bootstrap["n_origins"] == 30
+    assert np.isfinite(bootstrap["bootstrap_se"])
+    # With 6 perfectly co-moving tickers per origin, the true effective sample size is the
+    # origin count, not the row count -- the bootstrap SE should be well over naive_se's
+    # sqrt(6) ~= 2.45x, allowing generous slack for bootstrap noise.
+    assert bootstrap["bootstrap_se"] > naive_se * 1.5
+
+
+def test_diebold_mariano_bootstrap_returns_nan_below_the_minimum_origin_count():
+    rng = np.random.default_rng(2)
+    rows = _co_moving_dm_rows(rng, n_origins=4, n_tickers=5, mean_difference=0.1)
+    result = diebold_mariano_bootstrap(
+        rows, "model_crps", "baseline_crps", 200, np.random.default_rng(0), min_origins=8
+    )
+    assert np.isnan(result["dm_statistic"])
+    assert np.isnan(result["p_value"])
+    assert result["n_origins"] == 4
+
+
+def test_diebold_mariano_bootstrap_detects_a_genuine_difference_with_many_origins():
+    """A real, consistent difference across many origins should still come through as
+    significant even after the dependence correction widens the standard error."""
+    rng = np.random.default_rng(9)
+    rows = _co_moving_dm_rows(
+        rng, n_origins=60, n_tickers=4, mean_difference=0.20, origin_noise=0.01
+    )
+    result = diebold_mariano_bootstrap(
+        rows, "model_crps", "baseline_crps", 1000, np.random.default_rng(3)
+    )
+    assert result["p_value"] < 0.01
+
+
+def _co_moving_pit_rows(rng, n_origins, n_tickers, mean_pit, origin_noise=0.05):
+    """PIT values where every ticker at a given origin shares one origin-level draw plus
+    a small idiosyncratic wobble -- co-movement, the same construction as the DM rows."""
+    rows = []
+    for origin in range(n_origins):
+        centre = np.clip(mean_pit + rng.normal(0, origin_noise), 0.01, 0.99)
+        for ticker in range(n_tickers):
+            pit = float(np.clip(centre + rng.normal(0, 0.01), 0.0, 1.0))
+            rows.append({"origin": origin, "ticker": ticker, "pit": pit})
+    return pd.DataFrame(rows)
+
+
+def test_pit_bias_bootstrap_detects_a_genuinely_biased_centre():
+    rng = np.random.default_rng(11)
+    rows = _co_moving_pit_rows(rng, n_origins=50, n_tickers=5, mean_pit=0.75, origin_noise=0.03)
+    result = pit_bias_bootstrap_test(rows, 1000, np.random.default_rng(0), bins=10)
+    assert result["n_origins"] == 50
+    assert result["mean_pit"] == pytest.approx(0.75, abs=0.05)
+    assert result["mean_pit_p_value"] < 0.01
+
+
+def test_pit_bias_bootstrap_does_not_flag_a_well_calibrated_centre():
+    rng = np.random.default_rng(12)
+    rows = _co_moving_pit_rows(rng, n_origins=50, n_tickers=5, mean_pit=0.5, origin_noise=0.03)
+    result = pit_bias_bootstrap_test(rows, 1000, np.random.default_rng(0), bins=10)
+    assert result["mean_pit_p_value"] > 0.05
+
+
+def test_pit_bias_bootstrap_returns_nan_below_the_minimum_origin_count():
+    rng = np.random.default_rng(13)
+    rows = _co_moving_pit_rows(rng, n_origins=5, n_tickers=5, mean_pit=0.8)
+    result = pit_bias_bootstrap_test(rows, 200, np.random.default_rng(0), min_origins=8)
+    assert np.isnan(result["mean_pit_p_value"])
+    assert np.isnan(result["tail_mass_p_value"])

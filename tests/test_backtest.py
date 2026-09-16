@@ -242,6 +242,70 @@ def test_var_tests_use_only_non_overlapping_origins(backtest_result, config):
         assert record["n_independent"] < len(subset) or record["horizon"] <= 21
 
 
+def test_dm_table_bootstrap_columns_appear_only_when_requested(backtest_result):
+    plain = dm_table(backtest_result.rows, backtest_result.baseline)
+    with_bootstrap = dm_table(
+        backtest_result.rows,
+        backtest_result.baseline,
+        n_bootstrap=200,
+        rng=np.random.default_rng(0),
+    )
+    if plain.empty:
+        pytest.skip("too few independent origins in the fixture window")
+    assert "bootstrap_p_value" not in plain.columns
+    assert "bootstrap_p_value" in with_bootstrap.columns
+    assert "bootstrap_n_origins" in with_bootstrap.columns
+
+
+def test_dm_table_bootstrap_is_reproducible_given_the_same_seed(backtest_result):
+    first = dm_table(
+        backtest_result.rows,
+        backtest_result.baseline,
+        n_bootstrap=200,
+        rng=np.random.default_rng(5),
+    )
+    second = dm_table(
+        backtest_result.rows,
+        backtest_result.baseline,
+        n_bootstrap=200,
+        rng=np.random.default_rng(5),
+    )
+    if first.empty:
+        pytest.skip("too few independent origins in the fixture window")
+    pd.testing.assert_series_equal(
+        first["bootstrap_p_value"].reset_index(drop=True),
+        second["bootstrap_p_value"].reset_index(drop=True),
+    )
+
+
+def test_pit_tables_attach_bootstrap_only_when_requested(backtest_result):
+    plain = pit_tables(backtest_result.rows, bins=10)
+    with_bootstrap = pit_tables(
+        backtest_result.rows, bins=10, n_bootstrap=200, rng=np.random.default_rng(0)
+    )
+    for table in plain.values():
+        assert "bootstrap" not in table.attrs
+    at_least_one_bootstrapped = any("bootstrap" in table.attrs for table in with_bootstrap.values())
+    assert at_least_one_bootstrapped, "expected at least one model|horizon to have enough origins"
+
+
+def test_written_summary_prefers_the_bootstrap_reading_when_available(backtest_result, config):
+    scorecard = build_scorecard(
+        backtest_result, config.backtest.coverage_levels, config.risk.var_levels
+    )
+    summary = model_summary(scorecard, backtest_result.baseline)
+    rng = np.random.default_rng(0)
+    text = written_summary(
+        backtest_result,
+        scorecard,
+        summary,
+        pit_tables(backtest_result.rows, n_bootstrap=200, rng=rng),
+        dm_table(backtest_result.rows, backtest_result.baseline, n_bootstrap=200, rng=rng),
+    )
+    assert "bootstrap p" in text.lower() or "block-bootstrap" in text.lower()
+    assert "no correction for" not in text.lower()
+
+
 def test_pit_tables_cover_every_model_and_horizon(backtest_result):
     """Histogram counts come from every origin; the chi-squared test does not.
 

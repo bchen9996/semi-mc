@@ -310,6 +310,30 @@ observations are flagged `low_power`. At a 252-day horizon over this history the
 around 15 per ticker, and 15 observations cannot distinguish 90% coverage from 75%
 coverage. Those rows are reported, not interpreted.
 
+**Non-overlapping origins fix dependence through time, not across tickers.**
+Semiconductor names co-move (pairwise return correlations roughly 0.5-0.7), so a Diebold-
+Mariano test or PIT chi-squared that pools `(ticker, origin)` rows as independent
+observations is still oversized after the non-overlapping filter -- the effective sample
+size is far closer to the origin count than to the ticker-origin count. `analytics/scoring.py`
+now runs a **block bootstrap over origins**
+(`block_bootstrap_origins`, `diebold_mariano_bootstrap`, `pit_bias_bootstrap_test`) to
+correct for this: whole origins, not individual rows, are resampled with replacement, so a
+sector-wide move that hit every ticker on one date stays intact -- appearing together, or
+not at all -- in each replicate, and the spread of the resulting statistic reflects the
+real degree of cross-sectional dependence instead of assuming there is none. Owner decision
+2026-09-16: build this rather than continue only disclosing the limitation. Two things are
+*not* attempted: a dependence-corrected version of the multi-bin chi-squared statistic
+itself (a Rao-Scott-style correction needs the full multinomial covariance structure,
+which a few dozen origins cannot estimate reliably), and a correction to Kupiec/
+Christoffersen (VaR exceptions are already tested per ticker, not pooled, so the pooling
+problem does not apply there). Instead, the PIT correction tests the two summary
+statistics the written report already interprets -- mean PIT (centre bias) and tail mass
+(width) -- against a block-bootstrap standard error, which is the more modest and more
+robust question. `backtest.n_dependence_bootstraps` (default 2,000) controls the replicate
+count; both corrections are seeded from the run's own seed, so they reproduce exactly on
+rerun. `written_summary` reports the corrected numbers as the read to prefer and drops the
+"no correction applied" caveat once they are present.
+
 ### What the first real run actually found
 
 177 monthly origins, 2012-01 to 2026-09, 14 tickers (ARM lacks the history), 2,000 paths.

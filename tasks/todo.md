@@ -141,11 +141,15 @@ or a produced artifact.
       parameters risks a silent mismatch between the stored and rebuilt model, which is a
       worse failure than a slow rerun. The full 15-ticker, 3-model, 4-horizon backtest
       takes about 3.5 minutes, so the payoff is small.
-- [ ] **Cross-sectional dependence in significance tests.** Non-overlapping origins fix
-      dependence through time, but pooled tickers co-move (pairwise correlations ~0.5-0.7),
-      so Diebold-Mariano and the PIT chi-squared remain oversized. Disclosed in every
-      written summary rather than corrected; a block bootstrap over origins would be the
-      fix.
+- [x] **Cross-sectional dependence in significance tests.** Owner decision 2026-09-16:
+      build the block-bootstrap-over-origins fix rather than continue only disclosing it.
+      `analytics/scoring.py`: `block_bootstrap_origins`, `diebold_mariano_bootstrap`,
+      `pit_bias_bootstrap_test` (the PIT correction tests mean-PIT and tail-mass bias
+      against a bootstrap SE, not a dependence-corrected chi-squared -- that would need a
+      Rao-Scott-style correction and the full multinomial covariance structure, unreliable
+      to estimate from a few dozen origins). Wired into `dm_table`/`pit_tables`/
+      `written_summary`, controlled by `backtest.n_dependence_bootstraps` (default 2000),
+      seeded from the run's own seed for reproducibility. See MODEL_NOTES §7.
 - [x] **ARM truncates the common calendar.** Owner decision 2026-09-16: drop ARM from
       `universe.groups.compute_fabless` (`config/default.yaml`) rather than build ragged-
       panel support. The default universe is now 14 tickers and whole-universe models get

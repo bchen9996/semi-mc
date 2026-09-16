@@ -25,7 +25,9 @@ from ..analytics.scoring import (
     christoffersen_independence,
     crps_skill_score,
     diebold_mariano,
+    diebold_mariano_bootstrap,
     kupiec_pof,
+    pit_bias_bootstrap_test,
     pit_histogram,
 )
 
@@ -128,7 +130,12 @@ def var_test_table(rows: pd.DataFrame, levels: list[float]) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-def pit_tables(rows: pd.DataFrame, bins: int = 10) -> dict[str, pd.DataFrame]:
+def pit_tables(
+    rows: pd.DataFrame,
+    bins: int = 10,
+    n_bootstrap: int = 0,
+    rng: np.random.Generator | None = None,
+) -> dict[str, pd.DataFrame]:
     """PIT histograms keyed by ``model|horizon``, pooled across tickers.
 
     Pooling across tickers is deliberate: a single ticker at a 252-day horizon has too few
@@ -138,16 +145,18 @@ def pit_tables(rows: pd.DataFrame, bins: int = 10) -> dict[str, pd.DataFrame]:
     The histogram *shape* uses every origin, because shape is what the chart is for. The
     chi-squared test is computed on **non-overlapping origins only**, since overlapping
     windows would inflate the sample by an order of magnitude and reject uniformity for
-    essentially any model. Even so the test remains oversized, because pooled tickers move
-    together -- that residual dependence is disclosed in the written summary rather than
-    corrected here.
+    essentially any model. It remains oversized even so, because pooled tickers move
+    together; when ``n_bootstrap > 0`` a block-bootstrap-over-origins bias/width test
+    (:func:`~semimc.analytics.scoring.pit_bias_bootstrap_test`) is attached under
+    ``table.attrs["bootstrap"]`` as the dependence-aware read to prefer.
     """
     if rows.empty:
         return {}
     out: dict[str, pd.DataFrame] = {}
     for (model, horizon), group in rows.groupby(["model", "horizon"], sort=False):
         table = pit_histogram(group["pit"].to_numpy(), bins=bins)
-        independent = group.loc[group["non_overlapping"], "pit"].to_numpy()
+        independent_rows = group.loc[group["non_overlapping"]]
+        independent = independent_rows["pit"].to_numpy()
         independent_table = pit_histogram(independent, bins=bins)
 
         table.attrs["n_all"] = table.attrs.get("n", 0)
@@ -167,6 +176,11 @@ def pit_tables(rows: pd.DataFrame, bins: int = 10) -> dict[str, pd.DataFrame]:
         else:
             table.attrs["tail_mass"] = np.nan
             table.attrs["uniform_tail_mass"] = 2.0 / bins
+
+        if n_bootstrap > 0 and rng is not None and not independent_rows.empty:
+            table.attrs["bootstrap"] = pit_bias_bootstrap_test(
+                independent_rows, n_bootstrap, rng, bins=bins, origin_column="origin"
+            )
         out[f"{model}|{int(horizon)}"] = table
     return out
 
@@ -221,11 +235,21 @@ def diagnose_pit(table: pd.DataFrame) -> str:
     return "; ".join(parts)
 
 
-def dm_table(rows: pd.DataFrame, baseline: str) -> pd.DataFrame:
+def dm_table(
+    rows: pd.DataFrame,
+    baseline: str,
+    n_bootstrap: int = 0,
+    rng: np.random.Generator | None = None,
+) -> pd.DataFrame:
     """Diebold-Mariano tests of each model against the baseline, per horizon.
 
     Paired on the exact (ticker, origin) cells both models scored, using non-overlapping
     origins only. A negative statistic favours the model over the baseline.
+
+    When ``n_bootstrap > 0``, also runs the block-bootstrap-over-origins correction
+    (:func:`~semimc.analytics.scoring.diebold_mariano_bootstrap`) alongside the plain
+    test, prefixed ``bootstrap_`` -- the read this project's caveats say to prefer, since
+    it does not assume pooled tickers are independent observations.
     """
     if rows.empty:
         return pd.DataFrame()
@@ -248,15 +272,19 @@ def dm_table(rows: pd.DataFrame, baseline: str) -> pd.DataFrame:
             if paired.empty:
                 continue
             test = diebold_mariano(paired[model].to_numpy(), paired[baseline].to_numpy())
-            records.append(
-                {
-                    "model": model,
-                    "baseline": baseline,
-                    "horizon": int(horizon),
-                    "mean_crps_difference": float((paired[model] - paired[baseline]).mean()),
-                    **test,
-                }
-            )
+            record = {
+                "model": model,
+                "baseline": baseline,
+                "horizon": int(horizon),
+                "mean_crps_difference": float((paired[model] - paired[baseline]).mean()),
+                **test,
+            }
+            if n_bootstrap > 0 and rng is not None:
+                bootstrap = diebold_mariano_bootstrap(
+                    paired.reset_index(), model, baseline, n_bootstrap, rng, origin_column="origin"
+                )
+                record.update({f"bootstrap_{k}": v for k, v in bootstrap.items()})
+            records.append(record)
     return pd.DataFrame(records)
 
 
@@ -327,6 +355,9 @@ def written_summary(
     if scorecard.empty:
         return "# Backtest summary\n\nNo scoreable cells were produced.\n"
 
+    dependence_corrected = (dm is not None and "bootstrap_p_value" in dm.columns) or (
+        pit is not None and any("bootstrap" in table.attrs for table in pit.values())
+    )
     lines: list[str] = ["# Backtest summary", ""]
     lines.append(
         f"{len(result.origins)} forecast origins from "
@@ -377,6 +408,7 @@ def written_summary(
         lines.append("")
 
     if dm is not None and not dm.empty:
+        has_bootstrap = "bootstrap_p_value" in dm.columns and dm["bootstrap_p_value"].notna().any()
         lines.append("## Is the CRPS difference significant?")
         lines.append("")
         lines.append(
@@ -384,15 +416,26 @@ def written_summary(
             "model; p < 0.05 means the difference is unlikely to be noise."
         )
         lines.append("")
-        lines.append(
-            "**Read these p-values as optimistic.** Non-overlapping origins remove "
-            "dependence *through time*, but the test still pools tickers, and "
-            "semiconductor names move together -- their pairwise return correlations run "
-            "roughly 0.5 to 0.7. The effective number of independent observations is "
-            "therefore far closer to the origin count than to the ticker-origin count "
-            "printed below, so a borderline p-value near 0.05 should not be read as a "
-            "result."
-        )
+        if has_bootstrap:
+            lines.append(
+                "**Two p-values are shown.** The plain test pools tickers and treats each "
+                "(ticker, origin) row as independent; semiconductor names move together "
+                "(pairwise return correlations roughly 0.5-0.7), so it is optimistic. "
+                "`bootstrap p` corrects this by resampling whole origins rather than rows "
+                "(`analytics.scoring.diebold_mariano_bootstrap`), which keeps co-moving "
+                "tickers together in each resample instead of counting them as independent "
+                "evidence -- **read the bootstrap p-value, not the plain one.**"
+            )
+        else:
+            lines.append(
+                "**Read these p-values as optimistic.** Non-overlapping origins remove "
+                "dependence *through time*, but the test still pools tickers, and "
+                "semiconductor names move together -- their pairwise return correlations run "
+                "roughly 0.5 to 0.7. The effective number of independent observations is "
+                "therefore far closer to the origin count than to the ticker-origin count "
+                "printed below, so a borderline p-value near 0.05 should not be read as a "
+                "result."
+            )
         for _, row in dm.iterrows():
             if not np.isfinite(row.get("dm_statistic", np.nan)):
                 lines.append(
@@ -400,17 +443,32 @@ def written_summary(
                     f"observations (n = {int(row['n'])}) to test."
                 )
                 continue
+            bootstrap_p = row.get("bootstrap_p_value", np.nan)
+            verdict_p = (
+                bootstrap_p if has_bootstrap and np.isfinite(bootstrap_p) else row["p_value"]
+            )
+            verdict_stat = (
+                row.get("bootstrap_dm_statistic", np.nan)
+                if has_bootstrap and np.isfinite(bootstrap_p)
+                else row["dm_statistic"]
+            )
             verdict = (
                 "significantly better"
-                if row["dm_statistic"] < 0 and row["p_value"] < 0.05
+                if verdict_stat < 0 and verdict_p < 0.05
                 else "significantly worse"
-                if row["dm_statistic"] > 0 and row["p_value"] < 0.05
+                if verdict_stat > 0 and verdict_p < 0.05
                 else "not distinguishable"
+            )
+            n_origins = int(row.get("bootstrap_n_origins", 0))
+            bootstrap_text = (
+                f", bootstrap p = {bootstrap_p:.3f} (n_origins = {n_origins})"
+                if has_bootstrap and np.isfinite(bootstrap_p)
+                else ""
             )
             lines.append(
                 f"- {row['model']} at {int(row['horizon'])}d: DM {row['dm_statistic']:+.2f}, "
-                f"p = {row['p_value']:.3f}, n = {int(row['n'])} -- **{verdict}** from "
-                f"{row['baseline']}."
+                f"p = {row['p_value']:.3f}, n = {int(row['n'])}{bootstrap_text} -- "
+                f"**{verdict}** from {row['baseline']}."
             )
         lines.append("")
 
@@ -459,6 +517,23 @@ def written_summary(
                 f"- **{model} at {horizon}d** -- {verdict} ({p_text}, "
                 f"n = {table.attrs.get('n', 0)}): {diagnose_pit(table)}."
             )
+            bootstrap = table.attrs.get("bootstrap")
+            if bootstrap and np.isfinite(bootstrap.get("mean_pit_p_value", np.nan)):
+                centre_sig = (
+                    "significant" if bootstrap["mean_pit_p_value"] < 0.05 else "not significant"
+                )
+                width_sig = (
+                    "significant"
+                    if np.isfinite(bootstrap.get("tail_mass_p_value", np.nan))
+                    and bootstrap["tail_mass_p_value"] < 0.05
+                    else "not significant"
+                )
+                lines.append(
+                    f"  Dependence-corrected (block-bootstrap over "
+                    f"{bootstrap['n_origins']} origins, prefer this read): centre bias "
+                    f"p = {bootstrap['mean_pit_p_value']:.3f} ({centre_sig}), width bias "
+                    f"p = {bootstrap.get('tail_mass_p_value', float('nan')):.3f} ({width_sig})."
+                )
         lines.append("")
 
         biased = [
@@ -486,9 +561,17 @@ def written_summary(
             "- Monthly origins with multi-month horizons overlap heavily. Coverage and PIT "
             "histograms use every origin (they are descriptive); every significance test "
             "uses the non-overlapping subset only.",
-            "- Tickers are pooled and semiconductor names co-move, so even the "
-            "non-overlapping tests overstate their significance. No correction for "
-            "cross-sectional dependence is applied.",
+            (
+                "- Tickers are pooled and semiconductor names co-move, so the plain "
+                "significance tests overstate significance. A block-bootstrap-over-origins "
+                "correction is reported alongside them (`bootstrap p` for Diebold-Mariano, "
+                "the dependence-corrected line under each PIT verdict) -- read those, not "
+                "the plain p-values."
+                if dependence_corrected
+                else "- Tickers are pooled and semiconductor names co-move, so even the "
+                "non-overlapping tests overstate their significance. No correction for "
+                "cross-sectional dependence is applied."
+            ),
             "- 126- and 252-day horizons have few independent observations by construction. "
             "Cells with fewer than "
             f"{LOW_POWER_THRESHOLD} are flagged `low_power` in the scorecard.",

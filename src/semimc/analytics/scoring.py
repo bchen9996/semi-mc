@@ -16,6 +16,8 @@ chart looks. These are the instruments:
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -283,3 +285,172 @@ def diebold_mariano(
         "p_value": float(2.0 * stats.t.sf(abs(statistic), df=n - 1)),
         "n": float(n),
     }
+
+
+def block_bootstrap_origins(
+    rows: pd.DataFrame,
+    statistic_fn: Callable[[pd.DataFrame], float],
+    n_bootstrap: int,
+    rng: np.random.Generator,
+    origin_column: str = "origin",
+) -> np.ndarray:
+    """Resample whole origins with replacement, keeping every row that shares an origin
+    together in each replicate.
+
+    This is the fix the project's own caveats name but do not apply: every significance
+    test above treats each ``(ticker, origin)`` row as an independent observation, but
+    semiconductor tickers co-move (pairwise return correlations roughly 0.5-0.7), so
+    resampling individual rows would treat that co-movement as independent evidence.
+    Resampling *origins* instead means a sector-wide move that hit every ticker on one
+    date stays intact -- appearing together, or not at all -- in each replicate, so the
+    spread of ``statistic_fn`` across replicates reflects the real degree of
+    cross-sectional dependence rather than assuming there is none.
+    """
+    # Row *positions* per origin, not sub-frames: concatenating position arrays (cheap
+    # numpy) and taking one `.iloc` slice per replicate is far faster than concatenating
+    # `n_origins` small DataFrames on every one of `n_bootstrap` replicates, which matters
+    # at the 2,000-replicate default over a real multi-ticker backtest.
+    positions = pd.Series(np.arange(len(rows)), index=rows.index)
+    groups = {
+        origin: group.to_numpy()
+        for origin, group in positions.groupby(rows[origin_column].to_numpy())
+    }
+    origins = np.array(list(groups.keys()), dtype=object)
+    n = len(origins)
+    if n == 0:
+        return np.array([])
+    replicates = np.empty(int(n_bootstrap), dtype=float)
+    for b in range(int(n_bootstrap)):
+        draw = rng.choice(origins, size=n, replace=True)
+        row_positions = np.concatenate([groups[o] for o in draw])
+        resampled = rows.iloc[row_positions]
+        replicates[b] = statistic_fn(resampled)
+    return replicates
+
+
+def diebold_mariano_bootstrap(
+    paired: pd.DataFrame,
+    model_column: str,
+    baseline_column: str,
+    n_bootstrap: int,
+    rng: np.random.Generator,
+    origin_column: str = "origin",
+    min_origins: int = 8,
+) -> dict[str, float]:
+    """Block-bootstrap-over-origins version of :func:`diebold_mariano`.
+
+    The plain test's standard error assumes every ``(ticker, origin)`` row is an
+    independent draw; pooled semiconductor tickers co-move, so that standard error is too
+    small and the plain p-value too optimistic -- disclosed as a caveat throughout this
+    project's written summaries rather than corrected, until this function. The point
+    estimate (mean CRPS difference) is unchanged; what changes is the standard error,
+    estimated by resampling whole origins via :func:`block_bootstrap_origins` instead of
+    assuming row-level independence.
+
+    Requires at least ``min_origins`` distinct origins -- the resampling unit here is the
+    origin, not the row, so origin count (not row count) is what determines whether the
+    bootstrap standard error means anything.
+    """
+    mask = np.isfinite(paired[model_column]) & np.isfinite(paired[baseline_column])
+    usable = paired.loc[mask]
+    n_origins = int(usable[origin_column].nunique()) if not usable.empty else 0
+    out = {
+        "dm_statistic": float("nan"),
+        "p_value": float("nan"),
+        "mean_difference": float("nan"),
+        "bootstrap_se": float("nan"),
+        "n": int(len(usable)),
+        "n_origins": n_origins,
+    }
+    if usable.empty or n_origins < min_origins:
+        return out
+
+    def _mean_difference(frame: pd.DataFrame) -> float:
+        return float((frame[model_column] - frame[baseline_column]).mean())
+
+    observed = _mean_difference(usable)
+    replicates = block_bootstrap_origins(usable, _mean_difference, n_bootstrap, rng, origin_column)
+    bootstrap_se = float(np.std(replicates, ddof=1))
+    out["mean_difference"] = observed
+    out["bootstrap_se"] = bootstrap_se
+    if bootstrap_se == 0 or not np.isfinite(bootstrap_se):
+        return out
+    statistic = observed / bootstrap_se
+    out["dm_statistic"] = float(statistic)
+    out["p_value"] = float(2.0 * stats.norm.sf(abs(statistic)))
+    return out
+
+
+def pit_bias_bootstrap_test(
+    rows: pd.DataFrame,
+    n_bootstrap: int,
+    rng: np.random.Generator,
+    bins: int = 10,
+    origin_column: str = "origin",
+    pit_column: str = "pit",
+    min_origins: int = 8,
+) -> dict[str, float]:
+    """Block-bootstrap-over-origins significance test for PIT miscalibration.
+
+    The classic multi-bin chi-squared goodness-of-fit test (:func:`pit_histogram`) has the
+    same row-independence problem as the plain Diebold-Mariano test. Correcting the
+    chi-squared statistic itself for clustering (a Rao-Scott-style correction) needs the
+    full multinomial covariance structure, which is easy to get subtly wrong with only a
+    few dozen origins to estimate it from -- a worse failure than the disclosed limitation
+    it would replace. Instead this tests the two summary statistics the written report
+    already interprets (:func:`diagnose_pit`): mean PIT (centre bias, null 0.5) and tail
+    mass (width, null ``2/bins``), each against a block-bootstrap standard error. That is a
+    more modest and more robust question than "is the full shape uniform": not whether the
+    histogram is exactly uniform, but whether the specific bias or width already being
+    described in prose is distinguishable from noise once co-moving tickers stop being
+    counted as independent evidence.
+    """
+    usable = rows.loc[np.isfinite(rows[pit_column].to_numpy(dtype=float))]
+    n_origins = int(usable[origin_column].nunique()) if not usable.empty else 0
+    edges = np.linspace(0.0, 1.0, bins + 1)
+    uniform_tail = 2.0 / bins
+
+    out = {
+        "mean_pit": float("nan"),
+        "mean_pit_bootstrap_se": float("nan"),
+        "mean_pit_z": float("nan"),
+        "mean_pit_p_value": float("nan"),
+        "tail_mass": float("nan"),
+        "tail_mass_bootstrap_se": float("nan"),
+        "tail_mass_z": float("nan"),
+        "tail_mass_p_value": float("nan"),
+        "n": int(usable.shape[0]),
+        "n_origins": n_origins,
+    }
+    if usable.empty or n_origins < min_origins:
+        return out
+
+    def _mean_pit(frame: pd.DataFrame) -> float:
+        return float(frame[pit_column].mean())
+
+    def _tail_mass(frame: pd.DataFrame) -> float:
+        counts, _ = np.histogram(frame[pit_column].to_numpy(dtype=float), bins=edges)
+        total = int(counts.sum())
+        return float((counts[0] + counts[-1]) / total) if total else float("nan")
+
+    observed_mean = _mean_pit(usable)
+    observed_tail = _tail_mass(usable)
+    out["mean_pit"] = observed_mean
+    out["tail_mass"] = observed_tail
+
+    mean_replicates = block_bootstrap_origins(usable, _mean_pit, n_bootstrap, rng, origin_column)
+    mean_se = float(np.std(mean_replicates, ddof=1))
+    if mean_se > 0 and np.isfinite(mean_se):
+        z = (observed_mean - 0.5) / mean_se
+        out["mean_pit_bootstrap_se"] = mean_se
+        out["mean_pit_z"] = float(z)
+        out["mean_pit_p_value"] = float(2.0 * stats.norm.sf(abs(z)))
+
+    tail_replicates = block_bootstrap_origins(usable, _tail_mass, n_bootstrap, rng, origin_column)
+    tail_se = float(np.std(tail_replicates, ddof=1))
+    if tail_se > 0 and np.isfinite(tail_se):
+        z = (observed_tail - uniform_tail) / tail_se
+        out["tail_mass_bootstrap_se"] = tail_se
+        out["tail_mass_z"] = float(z)
+        out["tail_mass_p_value"] = float(2.0 * stats.norm.sf(abs(z)))
+    return out

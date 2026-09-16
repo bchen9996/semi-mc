@@ -592,8 +592,21 @@ def backtest(
 
     scorecard = build_scorecard(result, cfg.backtest.coverage_levels, cfg.risk.var_levels)
     summary = model_summary(scorecard, result.baseline)
-    pit = pit_tables(result.rows, bins=cfg.backtest.pit_bins)
-    dm = dm_table(result.rows, result.baseline)
+    # Same seed the run itself used, so the block-bootstrap correction is reproducible
+    # from the recorded seed like everything else in the run.
+    dependence_rng = np.random.default_rng(result.seed)
+    pit = pit_tables(
+        result.rows,
+        bins=cfg.backtest.pit_bins,
+        n_bootstrap=cfg.backtest.n_dependence_bootstraps,
+        rng=dependence_rng,
+    )
+    dm = dm_table(
+        result.rows,
+        result.baseline,
+        n_bootstrap=cfg.backtest.n_dependence_bootstraps,
+        rng=dependence_rng,
+    )
 
     typer.echo("\nModel summary (averaged across tickers):")
     _echo_table(summary)

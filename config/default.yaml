@@ -78,6 +78,11 @@ backtest:
   pit_bins: 10
   cache_fits: true
   risk_free_series: config/risk_free_3m.csv   # point-in-time 3-month T-bill
+  # Block-bootstrap-over-origins replicates for the dependence-corrected Diebold-Mariano
+  # and PIT-bias tests (analytics/scoring.py). Resampling whole origins, not individual
+  # ticker-origin rows, keeps co-moving tickers together in each replicate instead of
+  # treating them as independent, which is what the plain (uncorrected) tests do.
+  n_dependence_bootstraps: 2000
 
 models:
   bootstrap:

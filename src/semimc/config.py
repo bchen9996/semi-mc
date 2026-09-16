@@ -115,6 +115,7 @@ class BacktestConfig(_Base):
     coverage_levels: list[float] = Field(default_factory=lambda: [0.50, 0.90])
     pit_bins: int = Field(10, gt=1)
     cache_fits: bool = True
+    n_dependence_bootstraps: int = Field(2_000, gt=0)
     risk_free_series: str = "config/risk_free_3m.csv"
 
     @model_validator(mode="after")
