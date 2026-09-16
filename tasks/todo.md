@@ -146,10 +146,10 @@ or a produced artifact.
       so Diebold-Mariano and the PIT chi-squared remain oversized. Disclosed in every
       written summary rather than corrected; a block bootstrap over origins would be the
       fix.
-- [ ] **ARM truncates the common calendar.** Whole-universe models using complete-case
-      alignment get a ~3-year window instead of 5. A warning names the binding ticker.
-      Dropping ARM or allowing ragged panels per model would both be reasonable; neither
-      is done without a decision from the owner.
+- [x] **ARM truncates the common calendar.** Owner decision 2026-09-16: drop ARM from
+      `universe.groups.compute_fabless` (`config/default.yaml`) rather than build ragged-
+      panel support. The default universe is now 14 tickers and whole-universe models get
+      the full ~5-year window without a config override.
 - [x] **`earnings_jumps` verified on real data.** `lxml` added; `fetch --earnings` seeded
       712 real report dates (15 tickers, 2012-2026, timing populated: 569 amc / 139 bmo /
       4 unknown, plus one future date per ticker). Backtested 2018-2026: the only model

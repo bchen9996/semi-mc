@@ -3,8 +3,13 @@
 
 universe:
   # Grouped for reporting; the flat list is the union of the groups.
+  # ARM excluded deliberately: complete-case alignment truncates every whole-universe
+  # model's estimation window to its shortest member's history, and ARM's 2023 IPO cost
+  # everyone else about 2 years of window (~5y -> ~3y). Owner decision 2026-09-16; add it
+  # back with `-s universe.groups.compute_fabless=[...,ARM]` once it has more history, or
+  # if ragged-panel support (per-ticker history, not a shared intersection) gets built.
   groups:
-    compute_fabless: [NVDA, AMD, AVGO, QCOM, MRVL, ARM]
+    compute_fabless: [NVDA, AMD, AVGO, QCOM, MRVL]
     foundry_idm: [TSM, INTC]
     memory: [MU]
     equipment: [ASML, AMAT, LRCX, KLAC]
