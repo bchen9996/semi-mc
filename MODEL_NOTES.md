@@ -642,36 +642,110 @@ addendum's evaluation rule forbids, and nothing in this codebase automates a sec
 
 ## 14. What the addendum's signal evaluation actually found
 
-Run 2026-09-15 on the real 14-name universe (ARM excluded — insufficient history), 2018
-onward, monthly origins, 5-fold walk-forward cross-validation with a one-period gap,
-**pre-holdout only** — the 24-month holdout has deliberately not been spent yet. See
-`research_log.md` for the exact run and numbers.
+Runs of 2026-09-15 and 2026-09-16 on the real 14-name universe (ARM excluded —
+insufficient history), 2012 onward, monthly origins, 5-fold walk-forward cross-validation
+with a one-period gap. Every candidate signal, the combination methods, and finally the
+24-month holdout are all spent. See `research_log.md` for the exact runs and numbers; this
+section is the summary.
 
-**Every signal's out-of-sample R² was negative at both 21 and 63 days**, including the
-combined Driscoll-Kraay fit. Predicting nothing (the zero-tilt null the target is already
-net of CAPM and sector exposure against) beat every candidate on raw prediction error.
+**Every mean-forecast candidate's pre-holdout out-of-sample R² was negative or
+approximately zero**, including the combined Driscoll-Kraay fit — predicting nothing (the
+zero-tilt null the target is already net of CAPM and sector exposure against) beat or tied
+every candidate on raw prediction error. `relative_strength` came closest at both horizons
+on Clark-West and rank IC.
 
-**Two signals cleared nominal significance at 63 days, not at 21.** `relative_strength`
-(Clark-West t = 2.36, p = 0.009; rank IC t = 2.03) and, on rank IC alone, `earnings_drift`
-(t = 2.34) — but both are well under the addendum's own "~3" bar for treating a t-statistic
-as more than noise after this many specifications were tried, and neither corresponds to a
-positive OOS R². Read as: *statistically distinguishable from zero forecasting skill* is
-not the same claim as *economically useful forecast*, and this project treats the second as
-the one that matters.
+**The combined multi-signal (kitchen-sink) regression was worse than any single signal**,
+at both horizons — a textbook small-sample overfitting signature. The addendum anticipated
+this and suggested starting with a simple average of single-signal forecasts rather than
+one regression containing every signal; `forecasting/combine.py` implements exactly that
+ladder (simple average, then ridge, then lasso, then quantile regression — see §15), and it
+held up: `simple_average` beat `combined` by a wide margin at both horizons, and at 63 days
+it was, briefly, the first candidate anywhere in this search to post a positive pre-holdout
+OOS R² (+0.0004), a Clark-West p under 0.05 (0.011), and a rank-IC t-statistic above the
+addendum's own "~3" skepticism bar (3.27) — all at once.
 
-**The combined multi-signal regression was worse than any single signal**, at both
-horizons — a textbook small-sample overfitting signature the addendum anticipated when it
-suggested starting with a simple average of single-signal forecasts rather than one
-regression containing every signal (`semimc signals` currently reports only the
-Driscoll-Kraay combination, not that simple-average alternative; see the todo list).
+**It did not replicate.** The one-time, 24-month holdout — spent 2026-09-16, with each
+horizon's specification frozen from pre-holdout cross-validation alone, before any holdout
+row was read — came back null at both cells: 21 days (headline, spec `relative_strength`)
+OOS R² −0.0057, Clark-West t −0.69; 63 days (low-power, spec `simple_average`) OOS R²
+−0.0058, t −0.94. This is the exact failure mode a holdout exists to catch: a search wide
+enough (five signals, a kitchen sink, a simple average, two shrinkage methods, five
+quantile levels, two horizons) will eventually clear a "~3" bar somewhere by chance, and
+this project's own honest evaluation rule caught it rather than shipping on it.
 
-**The sector tilt found nothing** (t = -0.31 at 21 days, t = 0.13 at 63 days, R² ≈ 0 at
+**The sector tilt found nothing** (t = −0.31 at 21 days, t = 0.13 at 63 days, R² ≈ 0 at
 both) — expected, since there is exactly one sector series and the addendum said as much
 going in.
 
 **Bottom line:** `simulate --tilt` is fully wired and will apply a regression-based drift
-tilt on request, but on the evidence gathered so far there is no case for turning it on by
-default. `signals.shrinkage_lambda` defaults to 0.5 and the cap to ±10% annualized
+tilt on request, but nothing in this search — pre-holdout or holdout — justifies turning it
+on by default. `signals.shrinkage_lambda` defaults to 0.5 and the cap to ±10% annualized
 specifically so that even a spurious tilt cannot move a forecast very far; a user who runs
-`--tilt` today is, on this evidence, adding noise dressed as signal. This is stated here
-rather than left to be discovered the way the drift-policy selection issue was — see §7.
+`--tilt` today is, on this evidence, adding noise dressed as signal. **The holdout is now
+spent and must not be re-run against this universe and window** — a different result on a
+rerun would be evidence of leakage or re-fishing, not a better estimate; a genuinely new
+holdout requires a new frozen window and fresh pre-registration.
+
+---
+
+## 15. The combination ladder, and shared sector regimes for the portfolio simulation
+
+### `forecasting/combine.py`: simple average, ridge/lasso, quantile regression
+
+Every candidate on the addendum's "simple to complex" ladder — one regression per signal,
+the kitchen sink, the simple average, ridge, lasso — is reduced to a `CandidateSpec`: a
+`fit(train) -> model` and `predict(model, frame) -> array`. `evaluate_candidate` is written
+once against that pair, so every rung of the ladder is cross-validated through identical
+machinery, and the specification `semimc signals --holdout` freezes for the one-time
+holdout is chosen the same way every candidate was scored pre-holdout — by best CV OOS R²,
+never by which one "looks right."
+
+The simple average (`fit_simple_average`) fits one univariate Driscoll-Kraay regression per
+signal and predicts each row as the mean of whichever component models have a usable value
+for that row — a row missing one signal still gets scored, not dropped, which is the actual
+mechanism behind "often more robust than a regression containing every signal": the kitchen
+sink has to also estimate how the signals correlate with each other, on the same few
+hundred rows it estimates everything else from.
+
+Ridge and lasso (`fit_ridge_or_lasso`) pick their alpha by the same pre-holdout,
+date-grouped, gapped CV folds used to score the result — disclosed as an optimistic bias,
+not hidden: a true nested CV would starve the inner folds below the ≥30-row floor the fits
+themselves require, given only a few hundred pre-holdout rows split into a handful of
+folds. Lasso zeroed every coefficient at every alpha in the default grid strong enough to
+beat sampling noise on this data, which is itself informative — the addendum's signals do
+not survive an L1 penalty here.
+
+Quantile regression (`fit_quantile_regressions`, `statsmodels` `QuantReg` at
+5/25/50/75/95%, scored by cross-validated pinball loss) checks whether a signal moves the
+tails without moving the mean. On this universe it did not: pinball loss was symmetric
+across levels at both horizons, consistent with the mean-forecast candidates themselves
+being weak.
+
+### `models/factor_regime.py`: shared sector regime switching
+
+The addendum's Phase 5 "shared regimes" ask: put regime switching on the sector factor, so
+every stock turns turbulent together in a portfolio simulation, instead of each switching
+regimes on its own schedule. Applying `RegimeSwitchingModel` directly to a multi-ticker
+panel does not do this — its `_simulate_zero_mean` draws each ticker's regime chain from
+its own independent `rng` call, so which names are turbulent on a given simulated day is
+uncorrelated across tickers except through the (regime-conditional) Gaussian correlation. A
+genuine sector-wide selloff, every name entering the turbulent regime on the same simulated
+day, would only ever happen by chance.
+
+`FactorRegimeModel` gets this for free by reusing `FactorModel`'s own architecture rather
+than changing `RegimeSwitchingModel` at all: every ticker's simulated shock already
+includes the *same* simulated sector-factor draw, because that sharing (`factor_shocks @
+loadings.T`) is what a factor decomposition already is. Fitting the sector factor's
+volatility with `RegimeSwitchingModel` instead of GARCH — one path, shared across every
+ticker via the loadings — makes a sector-wide regime switch appear in every ticker's return
+on the same simulated day, with no change to how tickers are combined. The market factor
+and idiosyncratic residuals keep GJR-GARCH-t, exactly as in `FactorModel`.
+
+One disclosed simplification: `FactorModel` fits the market and sector factors jointly (one
+2-column GARCH, correlated innovations between them); `FactorRegimeModel` fits them as two
+independent single-series models, since a GARCH fit and a Markov-switching fit cannot share
+one joint likelihood. Whatever residual correlation GARCH would have found between the two
+factors is dropped — expected to be small, since the sector factor is already SOXX
+residualized on SPY by construction, but real and worth naming rather than hiding. A
+sector-shared regime chain is what the addendum specifically asked for; a `regime`-switched
+*market* factor, or an idiosyncratic-level shared regime, was not, and neither is built.

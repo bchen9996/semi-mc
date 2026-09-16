@@ -15,6 +15,7 @@ from .blend import BlendModel, optimize_crps_weights
 from .bootstrap import BlockBootstrapModel
 from .earnings_jumps import EarningsCalendarMissing, EarningsJumpModel
 from .factor import FactorModel
+from .factor_regime import FactorRegimeModel
 from .fhs import FilteredHistoricalSimulation
 from .garch_t import GarchFitError, GJRGarchTModel
 from .gbm import GBMModel
@@ -31,6 +32,7 @@ __all__ = [
     "EarningsCalendarMissing",
     "EarningsJumpModel",
     "FactorModel",
+    "FactorRegimeModel",
     "FilteredHistoricalSimulation",
     "FitContext",
     "GBMModel",
@@ -54,6 +56,7 @@ MODEL_NAMES = [
     "garch_t",
     "earnings_jumps",
     "factor",
+    "factor_regime",
     "fhs",
     "merton",
     "har",
@@ -113,6 +116,12 @@ def build_model(
             dtype=dtype,
         ),
         "factor": lambda: FactorModel(dtype=dtype),
+        "factor_regime": lambda: FactorRegimeModel(
+            search_reps=config.models.regime.search_reps,
+            switching_mean=config.models.regime.switching_mean,
+            min_expected_duration_days=config.models.regime.min_expected_duration_days,
+            dtype=dtype,
+        ),
         "fhs": lambda: FilteredHistoricalSimulation(
             p=config.models.garch_t.p,
             o=config.models.garch_t.o,

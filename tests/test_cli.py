@@ -83,6 +83,7 @@ def test_models_lists_every_model():
         "garch_t",
         "earnings_jumps",
         "factor",
+        "factor_regime",
         "fhs",
         "merton",
         "har",
@@ -191,7 +192,19 @@ def test_simulate_rejects_both_ticker_and_portfolio(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "model", ["gbm", "bootstrap", "garch_t", "fhs", "factor", "merton", "har", "regime", "blend"]
+    "model",
+    [
+        "gbm",
+        "bootstrap",
+        "garch_t",
+        "fhs",
+        "factor",
+        "factor_regime",
+        "merton",
+        "har",
+        "regime",
+        "blend",
+    ],
 )
 def test_simulate_runs_for_every_model(workspace, model):
     invoke(

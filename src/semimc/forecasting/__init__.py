@@ -46,6 +46,11 @@ from .panel import (
     training_rows,
 )
 from .sector import build_sector_regression_row, fit_sector_tilt, industry_yoy_growth, sector_factor
+from .stability import (
+    fama_macbeth_coefficient_path,
+    market_environment_split,
+    rolling_coefficient_stability,
+)
 from .tilt import (
     block_bootstrap_date_indices,
     bootstrap_panel_tilt_draws,
@@ -71,17 +76,20 @@ __all__ = [
     "date_grouped_gapped_splits",
     "evaluate_candidate",
     "fama_macbeth",
+    "fama_macbeth_coefficient_path",
     "fit_driscoll_kraay",
     "fit_quantile_regressions",
     "fit_ridge_or_lasso",
     "fit_sector_tilt",
     "fit_simple_average",
     "industry_yoy_growth",
+    "market_environment_split",
     "newey_west_mean",
     "oos_r_squared",
     "pinball_losses",
     "predict_quantiles",
     "rank_information_coefficient",
+    "rolling_coefficient_stability",
     "rows_for_dates",
     "sector_factor",
     "select_alpha_by_cv",

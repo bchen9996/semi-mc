@@ -302,6 +302,42 @@ def crps_skill_chart(summary: pd.DataFrame, baseline: str) -> plt.Figure:
     return figure
 
 
+def rolling_coefficient_chart(
+    coefficient_path: pd.DataFrame, title: str = "Rolling Fama-MacBeth coefficients"
+) -> plt.Figure:
+    """One line per signal, its per-date cross-sectional coefficient over time.
+
+    The addendum's "rolling coefficient chart": a coefficient that keeps flipping sign
+    across refits should look visibly unstable here, not just show up as a summary
+    statistic (``forecasting.evaluate.sign_flip_rate``) with no picture behind it.
+    """
+    figure, axis = plt.subplots(figsize=(10, 4.5))
+    columns = [c for c in coefficient_path.columns if c != "const"]
+    if coefficient_path.empty or not columns:
+        axis.text(0.5, 0.5, "no rolling coefficients to plot", ha="center", va="center")
+        axis.set_axis_off()
+        return figure
+
+    for column in columns:
+        axis.plot(
+            coefficient_path.index,
+            coefficient_path[column],
+            marker="o",
+            markersize=3,
+            linewidth=1.1,
+            label=column,
+        )
+    axis.axhline(0, color="#444444", linewidth=0.8)
+    axis.set_title(title)
+    axis.set_xlabel("origin date")
+    axis.set_ylabel("cross-sectional coefficient")
+    axis.grid(True, **GRID)
+    axis.legend(fontsize=8)
+    figure.autofmt_xdate()
+    figure.tight_layout()
+    return figure
+
+
 def drawdown_histogram(max_drawdowns: np.ndarray, title: str) -> plt.Figure:
     """Distribution of per-path maximum drawdown."""
     figure, axis = plt.subplots(figsize=(8, 4))

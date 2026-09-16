@@ -115,12 +115,19 @@ or a produced artifact.
       promising 63d pre-holdout `simple_average` result did not replicate. `--tilt` stays
       off by default. **Do not re-run `--holdout` against this universe/window** — see
       `research_log.md`.
-- [ ] Shared sector-level regime switching feeding the multi-asset/portfolio simulation
-      (Phase 5 addition — regime switching itself is built per-ticker; making it shared
-      across the sector factor for portfolio runs is not)
-- [ ] Rolling-coefficient stability charts and a 2022-downturn-vs-rally split report
-      (`evaluate.py:subset_by_date_range` and `sign_flip_rate` exist; not wired into a
-      report yet)
+- [x] **Shared sector-level regime switching** for the portfolio simulation
+      (`models/factor_regime.py:FactorRegimeModel`, model name `factor_regime`). Reuses
+      `FactorModel`'s own decomposition — every ticker's shock already shares the same
+      simulated sector-factor path via `loadings @ factor_shocks` — so fitting the sector
+      factor's volatility with `RegimeSwitchingModel` instead of GARCH makes a sector-wide
+      regime switch appear in every ticker's return on the same simulated day, with no
+      change to `RegimeSwitchingModel` itself (which remains per-ticker-independent, correct
+      for the single-ticker `regime` model). See MODEL_NOTES §15.
+- [x] **Rolling-coefficient stability charts and the 2022-downturn-vs-rally split**
+      (`forecasting/stability.py`: `fama_macbeth_coefficient_path`,
+      `rolling_coefficient_stability`, `market_environment_split`;
+      `reporting/charts.py:rolling_coefficient_chart`). Wired into `semimc signals`,
+      printed, and written to the run directory (`rolling_coefficients.csv` + `.png`).
 
 ## Not built (stretch — only on request)
 - [ ] Options-implied vol calibration

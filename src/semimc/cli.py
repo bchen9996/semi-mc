@@ -913,6 +913,12 @@ def signals(
         load_supply_chain_links_if_present,
     )
     from .forecasting.sector import build_sector_regression_row, fit_sector_tilt, sector_factor
+    from .forecasting.stability import (
+        fama_macbeth_coefficient_path,
+        market_environment_split,
+        rolling_coefficient_stability,
+    )
+    from .reporting.charts import rolling_coefficient_chart, save_figure
     from .runs import RunDirectory
     from .signals.external import ExternalSeriesError, load_external_series
 
@@ -1040,6 +1046,31 @@ def signals(
             f"(need >= {cfg.signals.min_regression_observations})."
         )
 
+    # Stability: rolling (per-date) coefficients, sign flips, and a market-environment
+    # split -- the addendum's own example is the 2022 downturn vs. the rally after it.
+    coefficient_path = fama_macbeth_coefficient_path(quantile_usable, available_columns)
+    stability = rolling_coefficient_stability(quantile_usable, available_columns)
+    typer.echo("\nStability, rolling (per-date) coefficients:")
+    for column, info in stability.items():
+        flip = info["sign_flip_rate"]
+        rendered = f"{flip:.2f}" if np.isfinite(flip) else "n/a"
+        typer.echo(f"  {column}: n_dates={info['n_dates']} sign_flip_rate={rendered}")
+
+    environment_split = market_environment_split(
+        quantile_usable,
+        available_columns,
+        maxlags=maxlags,
+        min_observations=cfg.signals.min_regression_observations,
+    )
+    typer.echo("\nMarket-environment split (2022 downturn vs. the rally after it):")
+    for label, info in environment_split.items():
+        if info["result"] is None:
+            typer.echo(f"  {label}: only {info['n_observations']} rows, not enough to fit")
+        else:
+            typer.echo(
+                f"  {label}: n={info['n_observations']} R^2={info['result']['r_squared']:.4f}"
+            )
+
     # Sector tilt, if the industry series has been fetched.
     industry_path = cfg.path(cfg.signals.external_dir) / f"{cfg.signals.industry_series_id}.csv"
     sector_result = None
@@ -1085,6 +1116,21 @@ def signals(
     run.record("best_pre_holdout_candidate", best_label)
     if pinball:
         run.record("quantile_pinball_loss", {str(k): float(v) for k, v in pinball.items()})
+    run.record("stability", stability)
+    run.record(
+        "market_environment_split",
+        {
+            label: {"n_observations": info["n_observations"], "result": info["result"]}
+            for label, info in environment_split.items()
+        },
+    )
+    if not coefficient_path.empty:
+        run.write_table(coefficient_path, "rolling_coefficients")
+        save_figure(
+            rolling_coefficient_chart(coefficient_path, f"Rolling coefficients, {h}d horizon"),
+            run.figure_path("rolling_coefficients"),
+            cfg.reporting.figure_dpi,
+        )
     if sector_result is not None:
         run.record(
             "sector_tilt",
@@ -1201,6 +1247,30 @@ def signals(
             )
             + "\n```",
         ]
+    text_lines += [
+        "",
+        "## Stability: rolling coefficients and sign flips",
+        "",
+        "```\n"
+        + "\n".join(
+            f"{column}: n_dates={info['n_dates']} sign_flip_rate={info['sign_flip_rate']:.2f}"
+            if np.isfinite(info["sign_flip_rate"])
+            else f"{column}: n_dates={info['n_dates']} sign_flip_rate=n/a"
+            for column, info in stability.items()
+        )
+        + "\n```",
+        "",
+        "## Market-environment split (2022 downturn vs. the rally after it)",
+        "",
+        "```\n"
+        + "\n".join(
+            f"{label}: n={info['n_observations']} R^2={info['result']['r_squared']:.4f}"
+            if info["result"] is not None
+            else f"{label}: only {info['n_observations']} rows, not enough to fit"
+            for label, info in environment_split.items()
+        )
+        + "\n```",
+    ]
     if holdout_summary:
         text_lines.append(holdout_summary)
     run.write_text("\n".join(text_lines), "summary")

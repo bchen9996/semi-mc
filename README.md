@@ -168,10 +168,12 @@ full numbers; `MODEL_NOTES.md` §13–14 has the mechanism and the reasoning.
 | `har` | volatility forecast from a Garman-Klass realized-variance proxy | §10 |
 | `regime` | two-state Markov-switching volatility (calm / turbulent) | §11 |
 | `blend` | whole simulated paths mixed from several fitted models | §12 |
+| `factor_regime` | factor model with the sector factor's volatility regime-switching, shared across every ticker | §15 |
 
 `MODEL_NOTES.md` gives the equations, the assumptions, and — for each model — where it is
 known to break. §13–14 cover the Phase 4B signal store and drift tilt, which is not a
-model but a modifier `simulate --tilt` applies on top of one.
+model but a modifier `simulate --tilt` applies on top of one; §15 covers the combination
+ladder and `factor_regime`.
 
 ## Output
 

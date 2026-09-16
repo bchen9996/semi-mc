@@ -22,12 +22,13 @@ from semimc.models.bootstrap import (
 from semimc.models.drift import annual_arithmetic_drift, historical_annual_arithmetic
 from semimc.models.earnings_jumps import EarningsCalendarMissing, EarningsJumpModel
 from semimc.models.factor import FactorModel
+from semimc.models.factor_regime import FactorRegimeModel
 from semimc.models.fhs import FilteredHistoricalSimulation
 from semimc.models.garch_t import GJRGarchTModel
 from semimc.models.gbm import GBMModel
 
 SINGLE_MODELS = ["gbm", "bootstrap", "garch_t"]
-MULTI_MODELS = ["gbm", "bootstrap", "garch_t", "factor", "fhs"]
+MULTI_MODELS = ["gbm", "bootstrap", "garch_t", "factor", "factor_regime", "fhs"]
 
 
 @pytest.fixture
@@ -278,6 +279,67 @@ def test_factor_model_reproduces_cross_sectional_correlation(panel, context, rng
     simulated_correlation = float(np.corrcoef(simulated.T)[0, 1])
     sample_correlation = float(training.corr().iloc[0, 1])
     assert simulated_correlation == pytest.approx(sample_correlation, abs=0.10)
+
+
+def test_factor_regime_reproduces_cross_sectional_correlation(panel, context, rng):
+    """Same property as the plain factor model, with the sector factor's volatility
+    coming from a regime-switching fit instead of GARCH."""
+    training = panel.loc[:, ["NVDA", "AMD"]]
+    model = FactorRegimeModel().fit(training, context)
+    simulated = model.simulate(6000, 21, rng).reshape(-1, 2)
+    simulated_correlation = float(np.corrcoef(simulated.T)[0, 1])
+    sample_correlation = float(training.corr().iloc[0, 1])
+    assert simulated_correlation == pytest.approx(sample_correlation, abs=0.12)
+
+
+def test_factor_regime_fits_a_genuine_two_state_sector_regime(panel, context):
+    """The sector factor's regime fit must be a real two-state split, not a degenerate one
+    where both states collapsed to the same variance -- otherwise this model would be no
+    different from plain GARCH wearing a regime-switching label."""
+    training = panel.loc[:, ["NVDA", "AMD"]]
+    model = FactorRegimeModel().fit(training, context)
+    from semimc.models.factor_regime import SECTOR_FACTOR
+    from semimc.models.regime import RegimeSwitchingModel
+
+    assert isinstance(model.sector_model, RegimeSwitchingModel)
+    variances = model.sector_model.fits[SECTOR_FACTOR]["variances"]
+    assert variances[1] > variances[0] * 1.1, "the two regimes must have distinct variances"
+
+
+def test_factor_regime_combines_one_shared_sector_path_via_the_documented_formula(panel, context):
+    """The addendum's actual ask -- every ticker sharing one simulated sector regime path
+    -- is what ``factor_shocks @ loadings.T`` mechanically does: broadcast one (path, day)
+    sector-shock array to every ticker, scaled only by that ticker's own loading. Checked
+    by reconstructing ``_simulate_zero_mean``'s output from its three components with an
+    independently-seeded rng and requiring an exact match, rather than trusting the
+    docstring's description of what the method does.
+    """
+    training = panel.loc[:, ["NVDA", "AMD"]]
+    model = FactorRegimeModel().fit(training, context)
+    n_paths, horizon = 400, 30
+
+    combined = model._simulate_zero_mean(n_paths, horizon, np.random.default_rng(99))
+
+    # One rng, threaded through the same three calls in the same order
+    # ``_simulate_zero_mean`` itself uses -- not three independently-seeded ones, which
+    # would draw a different sequence for each and could never match.
+    manual_rng = np.random.default_rng(99)
+    market_shocks = model.market_model._simulate_zero_mean(n_paths, horizon, manual_rng)
+    sector_shocks = model.sector_model._simulate_zero_mean(n_paths, horizon, manual_rng)
+    idio_shocks = model.idio_model._simulate_zero_mean(n_paths, horizon, manual_rng)
+    factor_shocks = np.concatenate([market_shocks, sector_shocks], axis=-1)
+    loadings = model.loadings.loc[model.tickers, model._factor_names].to_numpy(dtype=float)
+    reconstructed = factor_shocks @ loadings.T + idio_shocks
+
+    np.testing.assert_allclose(combined, reconstructed)
+
+    # And the property itself: one ticker's sector-only contribution is a pure scalar
+    # multiple of the other's, because both come from the same (path, day) shock array.
+    nvda_sector = sector_shocks[:, :, 0] * loadings[0, 1]
+    amd_sector = sector_shocks[:, :, 0] * loadings[1, 1]
+    assert abs(float(np.corrcoef(nvda_sector.ravel(), amd_sector.ravel())[0, 1])) == pytest.approx(
+        1.0, abs=1e-9
+    )
 
 
 def test_fhs_preserves_cross_sectional_dependence(panel, context, rng):

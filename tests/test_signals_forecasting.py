@@ -51,6 +51,11 @@ from semimc.forecasting.sector import (
     fit_sector_tilt,
     industry_yoy_growth,
 )
+from semimc.forecasting.stability import (
+    fama_macbeth_coefficient_path,
+    market_environment_split,
+    rolling_coefficient_stability,
+)
 from semimc.forecasting.tilt import (
     block_bootstrap_date_indices,
     bootstrap_panel_tilt_draws,
@@ -627,3 +632,101 @@ def test_candidate_spec_evaluate_raises_when_too_few_dates_for_the_requested_fol
     spec = single_or_combined_spec("combined", ["momentum", "reversal"], maxlags=1)
     with pytest.raises(ValueError):
         spec.evaluate(panel, n_folds=5, gap_periods=1)
+
+
+# ---------------------------------------------------------------------------------------
+# Stability diagnostics: rolling coefficients, sign flips, market-environment split.
+# ---------------------------------------------------------------------------------------
+
+
+def _stability_panel(rng, n_dates, n_tickers=8, flip_signs=False, start="2018-01-31"):
+    """A panel with a clean, low-noise momentum relationship -- either constant across
+    dates (``flip_signs=False``) or alternating every date (``flip_signs=True``), so
+    the per-date OLS coefficient's sign is predictable and the resulting sign-flip rate is
+    unambiguous, not a matter of statistical luck."""
+    dates = pd.bdate_range(start, periods=n_dates, freq="ME")
+    rows = []
+    for index, date in enumerate(dates):
+        sign = -1.0 if flip_signs and index % 2 == 1 else 1.0
+        for t in range(n_tickers):
+            momentum = rng.normal()
+            target = sign * 0.6 * momentum + rng.normal(scale=0.02)
+            rows.append({"date": date, "ticker": f"T{t}", "momentum": momentum, "target": target})
+    return pd.DataFrame(rows)
+
+
+def test_fama_macbeth_coefficient_path_is_date_indexed_with_one_row_per_date():
+    rng = np.random.default_rng(30)
+    panel = _stability_panel(rng, n_dates=24)
+    path = fama_macbeth_coefficient_path(panel, ["momentum"])
+    assert list(path.columns) == ["const", "momentum"]
+    assert len(path) == 24
+    assert (path["momentum"] > 0).all(), (
+        "a clean positive relationship should recover positive coefficients throughout"
+    )
+
+
+def test_fama_macbeth_coefficient_path_skips_dates_below_the_cross_section_floor():
+    rng = np.random.default_rng(31)
+    panel = _stability_panel(rng, n_dates=10, n_tickers=8)
+    sparse = panel[~((panel["date"] == panel["date"].iloc[0]) & (panel["ticker"] != "T0"))]
+    path = fama_macbeth_coefficient_path(sparse, ["momentum"], min_cross_section=5)
+    assert panel["date"].iloc[0] not in path.index
+
+
+def test_rolling_coefficient_stability_reports_low_flip_rate_for_a_stable_relationship():
+    rng = np.random.default_rng(32)
+    panel = _stability_panel(rng, n_dates=30, flip_signs=False)
+    result = rolling_coefficient_stability(panel, ["momentum"])
+    assert result["momentum"]["n_dates"] == 30
+    assert result["momentum"]["sign_flip_rate"] < 0.1
+
+
+def test_rolling_coefficient_stability_reports_high_flip_rate_for_an_alternating_relationship():
+    rng = np.random.default_rng(33)
+    panel = _stability_panel(rng, n_dates=30, flip_signs=True)
+    result = rolling_coefficient_stability(panel, ["momentum"])
+    assert result["momentum"]["sign_flip_rate"] > 0.8
+
+
+def test_rolling_coefficient_stability_returns_nan_for_a_column_with_no_usable_dates():
+    rng = np.random.default_rng(34)
+    panel = _stability_panel(rng, n_dates=10, n_tickers=2)  # below the default min_cross_section
+    result = rolling_coefficient_stability(panel, ["momentum"])
+    assert result["momentum"]["n_dates"] == 0
+    assert np.isnan(result["momentum"]["sign_flip_rate"])
+
+
+def test_market_environment_split_fits_both_halves_when_enough_data():
+    rng = np.random.default_rng(35)
+    downturn_dates = pd.bdate_range("2022-01-31", periods=9, freq="ME")
+    rally_dates = pd.bdate_range("2022-10-31", periods=15, freq="ME")
+    rows = []
+    for dates in (downturn_dates, rally_dates):
+        for date in dates:
+            for t in range(8):
+                momentum = rng.normal()
+                target = 0.5 * momentum + rng.normal(scale=0.05)
+                rows.append(
+                    {"date": date, "ticker": f"T{t}", "momentum": momentum, "target": target}
+                )
+    panel = pd.DataFrame(rows)
+    split = market_environment_split(panel, ["momentum"], min_observations=30)
+    assert split["downturn"]["result"] is not None
+    assert split["rally"]["result"] is not None
+    assert split["downturn"]["n_observations"] == 9 * 8
+    assert split["rally"]["n_observations"] == 15 * 8
+
+
+def test_market_environment_split_reports_missing_data_without_failing():
+    rng = np.random.default_rng(36)
+    dates = pd.bdate_range("2022-01-31", periods=3, freq="ME")  # too little for either half
+    rows = [
+        {"date": date, "ticker": f"T{t}", "momentum": rng.normal(), "target": rng.normal()}
+        for date in dates
+        for t in range(8)
+    ]
+    panel = pd.DataFrame(rows)
+    split = market_environment_split(panel, ["momentum"], min_observations=1000)
+    assert split["downturn"]["result"] is None
+    assert split["rally"]["result"] is None
