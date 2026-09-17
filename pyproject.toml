@@ -25,6 +25,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dashboard = [
+    # Brief stretch item: a browser front end that drives the CLI (src/semimc/dashboard).
+    # Kept optional -- nothing else in the package imports streamlit.
+    "streamlit>=1.38,<2",
+]
 dev = [
     "pytest>=8,<9",
     "ruff>=0.5,<1",

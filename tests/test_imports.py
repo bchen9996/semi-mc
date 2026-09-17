@@ -65,6 +65,7 @@ MODULES = [
     "semimc.scenarios.stress",
     "semimc.reporting.charts",
     "semimc.reporting.html",
+    "semimc.dashboard.jobs",
 ]
 
 

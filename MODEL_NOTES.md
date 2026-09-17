@@ -812,3 +812,45 @@ process — this stays a single scalar annual volatility, exactly the brief's li
 Dividend yield defaults to 0 (`options.dividend_yield`); TXN and ADI pay real dividends, a
 known, small, disclosed bias in their Black-Scholes inversion rather than a hidden one.
 Same-day (0-DTE) expiries are excluded outright, not inverted.
+
+## 17. The Streamlit dashboard
+
+The brief's last stretch item: "A Streamlit dashboard." Owner decision 2026-09-16: build
+the fuller of two scopes considered — not a viewer sitting on top of runs already made
+(the smaller option), but a front end that drives and runs `fetch`/`validate`/`simulate`/
+`backtest`/`signals`/`scenario` itself, since `backtest` in particular takes minutes and a
+dashboard that could only browse past results would leave the actual waiting still bound
+to a terminal.
+
+**Mechanism.** `dashboard/jobs.py` launches `python -m semimc.cli <command> ...` as a
+subprocess — the exact argument list a terminal user would type, built from form input —
+and streams its stdout/stderr back line by line as it runs. This is a deliberate choice
+over importing `cli.py`'s command functions directly and calling them in-process: it keeps
+`cli.py` as the single implementation every interface (terminal, dashboard) goes through,
+the same reasoning as every other choke point in this project (`training_window`,
+`build_full_panel`, the provider interface), and it means a long-running command like
+`backtest` cannot leave the dashboard process itself blocked in a way that only a page
+reload can recover from. `jobs.py` has no Streamlit import and is covered by the normal
+test suite (`tests/test_dashboard_jobs.py`) without the optional dependency installed;
+`dashboard/app.py` is the Streamlit script, one page per command, plus a Runs & Reports
+page that lists existing run folders and renders any of them by invoking `semimc report`
+and embedding the resulting `report.html` in an iframe (`st.components.v1.html`) — the
+dashboard never re-renders a run's tables or charts itself, it always asks `reporting/html.py`
+for them, so a report looks identical whether it was opened from a terminal or a browser.
+
+**What is not exposed.** `signals --holdout` has no button here. It is a one-time
+evaluation, already spent against the real universe (research_log.md, 2026-09-16), and
+CLAUDE.md forbids re-running it; a dashboard makes exactly the kind of casual, repeatable
+action that a one-time resource must never be easy to trigger. It stays reachable only by
+typing the CLI command directly, deliberately.
+
+**What is not attempted.** No job queue, no background workers, no progress bar finer than
+the command's own log output, and no persistence of a run across a page reload — the
+subprocess is a local variable in the callback that launched it, not session state.
+Navigating away mid-run does not send the child process any signal to stop, but it also
+stops anything from draining its stdout pipe; a command that produced enough output to
+fill the OS pipe buffer after that point would block on its own next write rather than run
+to completion unattended. In practice nothing here writes anywhere near that much to
+stdout, so this is a real but minor caveat, not a load-bearing one. This is a personal,
+single-user tool; building multi-job orchestration for it would be solving a problem
+nobody has.

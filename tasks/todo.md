@@ -141,7 +141,15 @@ or a produced artifact.
       per-ticker override set before `.fit()`, keeping `_fit_shape` itself network-free.
       `simulate --implied-vol`, requires `--model gbm` and a single `--ticker`. See
       MODEL_NOTES §16.
-- [ ] Streamlit dashboard
+- [x] **Streamlit dashboard.** Owner decision 2026-09-16: build the fuller of the two
+      scopes discussed -- forms that drive and run `fetch`/`validate`/`simulate`/
+      `backtest`/`signals`/`scenario` from the browser, not just a viewer for existing
+      runs. `dashboard/jobs.py` (no Streamlit import, covered by the normal test suite)
+      launches each command as a subprocess exactly as a terminal user would, so `cli.py`
+      stays the one implementation; `dashboard/app.py` is the Streamlit script itself,
+      one page per command plus a Runs & Reports browser that embeds each run's
+      `report.html`. `signals --holdout` is deliberately not exposed -- see MODEL_NOTES
+      §17. `uv run --extra dashboard streamlit run src/semimc/dashboard/app.py`.
 
 ## Known gaps (deliberate, with reasons)
 

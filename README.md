@@ -74,6 +74,20 @@ uv run semimc signals --horizon 21
 uv run semimc simulate --ticker NVDA --horizon 21 --tilt
 ```
 
+### Dashboard
+
+A Streamlit front end that drives the CLI above from a browser instead of a terminal --
+forms for `simulate`/`backtest`/`signals`/`scenario`/`fetch`/`validate`, a live log while
+each runs, and the resulting HTML report shown inline. It launches the exact same `semimc`
+commands as subprocesses rather than reimplementing them, so it can't drift out of sync
+with the CLI; see `src/semimc/dashboard/app.py`'s module docstring for how and why. The
+one thing it deliberately does not expose is `signals --holdout` -- a one-time evaluation
+that has already been spent (see below) and stays a deliberate CLI action, not a button.
+
+```bash
+uv run --extra dashboard streamlit run src/semimc/dashboard/app.py
+```
+
 Development:
 
 ```bash
@@ -267,6 +281,7 @@ src/semimc/
   backtest/                walk-forward runner and scorecard
   scenarios/               stress tests and historical replays
   reporting/               matplotlib charts, self-contained HTML
+  dashboard/               Streamlit front end, drives the CLI as subprocesses
   cli.py                   typer CLI
 tests/                     fixtures only, no network
 tasks/                     plan.md, plan_addendum.md, todo.md
