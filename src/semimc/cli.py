@@ -748,7 +748,10 @@ def scenario(
     model: Annotated[str, typer.Option("--model", "-m")] = "gbm",
     paths: Annotated[int | None, typer.Option("--paths")] = None,
     equal_weight: Annotated[
-        bool, typer.Option("--equal-weight", help="Also report an equal-weighted portfolio.")
+        bool,
+        typer.Option(
+            "--equal-weight/--no-equal-weight", help="Also report an equal-weighted portfolio."
+        ),
     ] = True,
     seed: Annotated[int | None, typer.Option("--seed")] = None,
     config: ConfigOption = None,

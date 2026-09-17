@@ -330,10 +330,7 @@ def page_scenario(cfg: Config, config_args: list[str]) -> None:
     model = c2.selectbox("Model", options=MODEL_NAMES, index=MODEL_NAMES.index("gbm"))
     paths = c3.number_input("Paths", min_value=100, value=cfg.simulation.n_paths, step=1000)
     seed = st.number_input("Seed", value=cfg.simulation.seed, step=1)
-    st.caption(
-        "Also reports an equal-weighted portfolio (the CLI's --equal-weight is on by "
-        "default with no way to turn it off; see cli.py)."
-    )
+    equal_weight = st.checkbox("Also report an equal-weighted portfolio", value=True)
 
     if st.button("Run scenario", type="primary"):
         if not tickers:
@@ -353,6 +350,7 @@ def page_scenario(cfg: Config, config_args: list[str]) -> None:
             str(int(paths)),
             "--seed",
             str(int(seed)),
+            "--equal-weight" if equal_weight else "--no-equal-weight",
         ]
         _run_and_show("scenario", args, cfg, config_args)
 

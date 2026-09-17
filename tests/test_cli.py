@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
@@ -345,6 +346,34 @@ def test_scenario_runs_and_labels_itself_conditional(workspace):
     )
     assert "conditional outcomes" in result.output.lower()
     assert (latest_run(workspace) / "scenario_impact.csv").exists()
+
+
+def test_scenario_no_equal_weight_drops_the_portfolio_row(workspace):
+    # --equal-weight had no negation for a while (typer only auto-derives --no-<flag>
+    # when the option string doesn't already look like one name; it needed the explicit
+    # "on/off" form in cli.py). With it missing, --no-equal-weight was "no such option"
+    # and equal_weight could never be False -- the PORTFOLIO row could never be dropped.
+    invoke(
+        ["scenario", "--name", "sector_shock_25", "--horizon", "21", "--paths", "300"], workspace
+    )
+    with_portfolio = pd.read_csv(latest_run(workspace) / "scenario_impact.csv", index_col=0)
+    assert "PORTFOLIO" in with_portfolio.index
+
+    invoke(
+        [
+            "scenario",
+            "--name",
+            "sector_shock_25",
+            "--horizon",
+            "21",
+            "--paths",
+            "300",
+            "--no-equal-weight",
+        ],
+        workspace,
+    )
+    without_portfolio = pd.read_csv(latest_run(workspace) / "scenario_impact.csv", index_col=0)
+    assert "PORTFOLIO" not in without_portfolio.index
 
 
 def test_scenario_rejects_an_unknown_name(workspace):
