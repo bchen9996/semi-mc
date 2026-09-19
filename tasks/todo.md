@@ -580,6 +580,25 @@ no verdict before month 12)/T5.
       procedure) are this phase's scope; item 6 (`registered_accounts` + `trading_enabled`
       for the sleeve(s) the owner names) is a separate, deliberate action taken when ready
       -- not performed automatically at the end of this phase.
+      **The first real `workflow_dispatch` run (checklist item 3) immediately found a
+      second real bug**, this time only reachable on GitHub's actual infrastructure: all
+      four `decide-and-execute` matrix entries and both `mark` entries share one ledger
+      file and one `concurrency` group specifically to serialize their git commits, but the
+      run still showed two entries' pushes interleave -- `decide-and-execute
+      (sector_shadow)`'s own commit was rejected non-fast-forward because another entry's
+      push landed on `origin/main` in between its checkout and its push. `mark (s0)`/`mark
+      (s3)` separately failed outright on the expected missing-secrets `RuntimeError`
+      (checklist item 2, confirmed, owner's to configure). Fixed the push race: `ledger/
+      paper.sqlite3` is binary, so a plain `git pull --rebase` cannot 3-way-merge two
+      independent row insertions into it -- on a rejected push, each job now re-fetches
+      `origin/main`, resets to it, and re-runs its own `decide`/`execute`/`mark` command
+      against that fresh ledger before retrying the commit and push (up to 3 attempts),
+      reconciling at the application level instead of asking git to merge binary bytes.
+      Both `decide`/`execute` were already idempotent (cadence-skip, same-decision no-op)
+      for exactly this kind of safe re-run. `set -e` keeps a genuine command failure (e.g.
+      missing credentials) failing the step immediately, not swallowed by the retry --
+      verified locally against a real two-clone git race (reproducing the exact "[rejected]
+      ... fetch first" the real run showed) before pushing this fix.
 
 ## Known gaps (deliberate, with reasons)
 

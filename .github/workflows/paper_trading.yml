@@ -20,7 +20,10 @@ name: Paper trading
 # value), so a `needs:` dependency on a job gated by a *different* schedule would make the
 # dependent job perpetually skipped except on the one trigger where both happened to
 # match. Ordering within a single rebalance (fetch -> decide -> execute) is instead
-# guaranteed by being separate *steps* of the same job, not separate jobs.
+# guaranteed by running as sequential steps of the same job, not separate jobs. Decide and
+# execute are one step together with the ledger commit (not two) so a git push race
+# between matrix entries can retry both, not just re-attempt the push -- see that step's
+# own comment.
 
 "on":
   workflow_dispatch: {}
@@ -64,28 +67,52 @@ jobs:
       - run: uv sync --locked
       - name: Refresh cached prices
         run: uv run semimc fetch --config config/paper.yaml
-      - name: Decide (all sleeves, including shadow-only ones -- for the eventual T3/T4 comparison)
-        run: uv run semimc paper decide --sleeve ${{ matrix.sleeve }} --config config/paper.yaml
-      - name: Execute (s0/s3 only -- the only sleeves with a paper.sleeves entry)
-        if: matrix.sleeve == 's0' || matrix.sleeve == 's3'
+      - name: Decide, execute, and commit the ledger
+        # Decide (all sleeves, including shadow-only ones -- for the eventual T3/T4
+        # comparison) and Execute (s0/s3 only -- the only sleeves with a paper.sleeves
+        # entry) are one step together with the commit, retried as a unit on a git push
+        # race: this job's matrix and the mark job below share one ledger file and one
+        # concurrency group specifically to prevent that race, but a real workflow_dispatch
+        # run still showed two matrix entries' pushes interleaving (Phase 8, confirmed
+        # against GitHub's actual infrastructure, not assumed). `ledger/paper.sqlite3` is
+        # binary, so a plain `git pull --rebase` can't 3-way-merge two independent row
+        # insertions into it -- on a rejected push, re-fetch the latest ledger and re-run
+        # decide/execute against it instead, reconciling at the application level (both are
+        # already idempotent: decide's own cadence-skip, execute's same-decision no-op).
+        # `set -e` still fails the step immediately on a genuine command failure (e.g.
+        # missing credentials) -- only the push race is retried, so Phase 7's "an incident
+        # fails the job" behavior is unchanged.
         env:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
-        run: uv run semimc paper execute --sleeve ${{ matrix.sleeve }} --config config/paper.yaml
-      - name: Commit the ledger if it changed
-        # Runs even if `decide` or `execute` above failed -- otherwise the exact run that
-        # hit a real problem is the one whose incident/reconciliation row never reaches the
-        # repo (Phase 7, semis_paper_trading_brief.md). This does not mask the failure: a
-        # job's conclusion is "failure" if any prior step failed, regardless of what a
-        # later `if: always()` step does, so GitHub's own failure-notification email for
-        # this scheduled workflow still fires.
-        if: always()
         run: |
+          set -e
           git config user.name "semimc-bot"
           git config user.email "semimc-bot@users.noreply.github.com"
-          git add ledger/paper.sqlite3
-          git commit -m "paper decide/execute: ${{ matrix.sleeve }} $(date -u +%F)" || echo "nothing to commit"
-          git push
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            echo "::group::decide"
+            uv run semimc paper decide --sleeve ${{ matrix.sleeve }} --config config/paper.yaml
+            echo "::endgroup::"
+            if [ "${{ matrix.sleeve }}" = "s0" ] || [ "${{ matrix.sleeve }}" = "s3" ]; then
+              echo "::group::execute"
+              uv run semimc paper execute --sleeve ${{ matrix.sleeve }} --config config/paper.yaml
+              echo "::endgroup::"
+            fi
+            git add ledger/paper.sqlite3
+            if git diff --cached --quiet; then
+              echo "nothing to commit"
+              exit 0
+            fi
+            git commit -m "paper decide/execute: ${{ matrix.sleeve }} $(date -u +%F)"
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+          done
+          echo "failed to push after 3 attempts"
+          exit 1
 
   mark:
     if: github.event.schedule == '*/30 14-20 * * 1-5' || github.event_name == 'workflow_dispatch'
@@ -107,20 +134,34 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
-      - name: Poll fills, prune stale orders, reconcile positions
+      - name: Poll fills, reconcile, and commit the ledger
+        # Retried on a git push race -- see the decide-and-execute job's identical comment.
+        # mark is already safe to re-run: each attempt re-polls fresh state from the broker
+        # rather than assuming anything about the previous attempt's local ledger state.
         env:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
-        run: uv run semimc paper mark --sleeve ${{ matrix.sleeve }} --config config/paper.yaml
-      - name: Commit the ledger if it changed
-        # See the decide-and-execute job's identical step for why this needs if: always().
-        if: always()
         run: |
+          set -e
           git config user.name "semimc-bot"
           git config user.email "semimc-bot@users.noreply.github.com"
-          git add ledger/paper.sqlite3
-          git commit -m "paper mark: ${{ matrix.sleeve }} $(date -u +%F)" || echo "nothing to commit"
-          git push
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            uv run semimc paper mark --sleeve ${{ matrix.sleeve }} --config config/paper.yaml
+            git add ledger/paper.sqlite3
+            if git diff --cached --quiet; then
+              echo "nothing to commit"
+              exit 0
+            fi
+            git commit -m "paper mark: ${{ matrix.sleeve }} $(date -u +%F)"
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+          done
+          echo "failed to push after 3 attempts"
+          exit 1
 
   report:
     if: github.event.schedule == '30 21 * * 1-5' || github.event_name == 'workflow_dispatch'

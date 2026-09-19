@@ -25,6 +25,10 @@ triggers GitHub's failure email, but it's still worth confirming ahead of time r
 learning it from the first failure. This session has no repo access to check it (`gh auth
 status` fails locally) -- owner-verified.
 
+**Confirmed missing** by the first real `workflow_dispatch` run, 2026-09-19: `mark (s0)`
+and `mark (s3)` both failed with `RuntimeError: ALPACA_API_KEY/ALPACA_SECRET_KEY not set`.
+Still open as of that run.
+
 ## 3. A `workflow_dispatch` dry run of `paper_trading.yml` completed clean
 
 Triggered manually (GitHub's Actions tab, or `gh workflow run paper_trading.yml` once `gh`
@@ -34,7 +38,11 @@ should complete successfully with every sleeve declining harmlessly at pretrade 
 infrastructure at all, not just against `FakeBroker` or the real API called directly from a
 local shell. Record the run URL and date here once done:
 
-- Run: _(pending -- owner to trigger and confirm)_
+- Run 1, 2026-09-19: failed. `decide` succeeded for every sleeve; `execute`/`mark` failed
+  on missing secrets (item 2, above); a separate git-push race between matrix entries
+  writing the shared ledger was found and fixed (`tasks/todo.md`'s Phase 8 entry). Not yet
+  re-run since the fix.
+- Run 2: _(pending -- owner to trigger and confirm, after item 2 is resolved)_
 
 ## 4. GitHub's Actions failure-notification email is enabled for this repo
 
