@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>semimc</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <h1>semimc</h1>
+
+    <div class="field">
+      <label for="cfg-path">Config file</label>
+      <input id="cfg-path" type="text" placeholder="config/default.yaml (default)">
+      <p class="muted small">Path to a YAML config, relative to the project root. Leave blank to use <code>config/default.yaml</code>. Passed as <code>--config</code> to every command below.</p>
+    </div>
+    <div class="field">
+      <label for="cfg-overrides">Overrides (one key.path=value per line)</label>
+      <textarea id="cfg-overrides" rows="3" placeholder="drift.policy=risk_free"></textarea>
+      <p class="muted small">One override per line, parsed as YAML, e.g. <code>drift.policy=risk_free</code>. Equivalent to passing <code>--set</code> once per line on the CLI; lines starting with <code>#</code> are ignored.</p>
+    </div>
+    <button id="cfg-apply" class="btn btn-secondary btn-block">Apply config</button>
+    <p id="cfg-summary" class="muted small"></p>
+    <p class="muted small">Reloads every panel below from this config -- universes, models, horizons and scenario names all come from it, so apply it before filling in the forms.</p>
+
+    <nav class="nav">
+      <button class="nav-btn active" data-panel="overview">Overview</button>
+      <button class="nav-btn" data-panel="fetch">Fetch &amp; Validate</button>
+      <button class="nav-btn" data-panel="simulate">Simulate</button>
+      <button class="nav-btn" data-panel="backtest">Backtest</button>
+      <button class="nav-btn" data-panel="signals">Signals</button>
+      <button class="nav-btn" data-panel="scenario">Scenario</button>
+      <button class="nav-btn" data-panel="runs">Runs &amp; Reports</button>
+    </nav>
+  </aside>
+
+  <main>
+    <section id="panel-overview" class="panel active">
+      <h2>Overview</h2>
+      <p class="caption">A snapshot of the currently loaded config and recent activity, not a command of its own. Drift policy is applied the same way to every model on every run (never chosen per-simulation); change it with a <code>drift.policy</code> override in the sidebar if you need something other than the configured default.</p>
+      <div class="stat-row">
+        <div class="stat"><span class="stat-value" id="ov-tickers">-</span><span class="stat-label">Universe tickers</span></div>
+        <div class="stat"><span class="stat-value" id="ov-benchmarks">-</span><span class="stat-label">Benchmarks</span></div>
+        <div class="stat"><span class="stat-value" id="ov-drift">-</span><span class="stat-label">Drift policy</span></div>
+      </div>
+      <h3>Universe groups</h3>
+      <div id="ov-groups"></div>
+      <h3>Recent runs</h3>
+      <table class="table">
+        <thead><tr><th>Run</th><th>Command</th><th>Created</th><th>Seed</th></tr></thead>
+        <tbody id="ov-runs-table"></tbody>
+      </table>
+    </section>
+
+    <section id="panel-fetch" class="panel">
+      <h2>Fetch &amp; validate</h2>
+      <p class="caption">Both hit the network (yfinance, and optionally FRED for --risk-free/--industry).</p>
+
+      <h3>Fetch</h3>
+      <p class="muted small">Downloads adjusted daily prices into the local cache (<code>data_cache/</code> by default), refetching only tickers whose cache is stale. Nothing here is used until it has been fetched at least once.</p>
+      <div class="field">
+        <label>Tickers (none selected = configured universe)</label>
+        <div id="fetch-tickers" class="chips"></div>
+        <p class="muted small">Which symbols to fetch. Selecting none fetches the full configured universe plus benchmarks (<code>--tickers</code> is only sent when at least one chip is selected).</p>
+      </div>
+      <div class="checkbox-row">
+        <label><input type="checkbox" id="fetch-force"> --force</label>
+        <label><input type="checkbox" id="fetch-riskfree"> --risk-free</label>
+        <label><input type="checkbox" id="fetch-earnings"> --earnings</label>
+        <label><input type="checkbox" id="fetch-industry"> --industry</label>
+      </div>
+      <ul class="muted small">
+        <li><strong>--force</strong>: refetch even if the cache is already fresh (normally an up-to-date ticker is skipped).</li>
+        <li><strong>--risk-free</strong>: also download the 3-month T-bill series (FRED DTB3) that keeps backtest drift point-in-time; without it, backtests fall back to a non-point-in-time rate and the CLI warns about it.</li>
+        <li><strong>--earnings</strong>: also seed the earnings-date calendar from the provider. Coverage is only a few recent quarters and timing is often missing, so review the resulting file by hand before trusting the earnings-jump model.</li>
+        <li><strong>--industry</strong>: also download the semiconductor industrial-production series (FRED IPG3344S) used by the Phase 4B industry-cycle signal; its release dates are approximated, not exact.</li>
+      </ul>
+      <button id="fetch-run" class="btn btn-primary">Run fetch</button>
+
+      <hr>
+      <h3>Validate</h3>
+      <p class="muted small">Checks the cached data for gaps, stale runs, unadjusted splits and outliers, and writes a validation report plus a correlation heatmap. It only ever reports issues -- nothing is filled, dropped or corrected automatically.</p>
+      <button id="validate-run" class="btn btn-primary">Run validate</button>
+    </section>
+
+    <section id="panel-simulate" class="panel">
+      <h2>Simulate</h2>
+      <p class="caption">Fits the chosen model to cached history up to the most recent cached date and simulates a distribution of future price paths forward from there -- a fan of outcomes with probabilities attached, never a single predicted price. Produces a risk table (VaR/CVaR, probability of a loss, optionally probability of finishing above a target), a fan chart and a terminal-price histogram.</p>
+      <div class="radio-row">
+        <label><input type="radio" name="sim-mode" value="single" checked> Single ticker</label>
+        <label><input type="radio" name="sim-mode" value="portfolio"> Portfolio</label>
+      </div>
+      <p class="muted small">Single ticker simulates one name's own price distribution. Portfolio simulates several tickers jointly (so cross-ticker correlation, portfolio drawdown and each ticker's contribution to portfolio CVaR are computed correctly) rather than combining separate single-ticker runs.</p>
+
+      <div class="field" id="sim-ticker-field">
+        <label for="sim-ticker">Ticker</label>
+        <input id="sim-ticker" type="text">
+        <p class="muted small">Symbol to simulate; must have cached price history (see Fetch &amp; Validate).</p>
+        <p class="muted small" id="sim-universe-hint"></p>
+      </div>
+      <div class="field hidden" id="sim-portfolio-field">
+        <label for="sim-portfolio">Weights (TICKER=weight,...)</label>
+        <input id="sim-portfolio" type="text" placeholder="empty = equal-weight full universe">
+        <p class="muted small">Comma-separated <code>TICKER=weight</code> pairs, e.g. <code>NVDA=0.5,AMD=0.5</code>. Weights are normalized automatically, so they don't need to add up to 1. Leave blank to equal-weight the full configured universe instead.</p>
+      </div>
+
+      <div class="grid-3">
+        <div class="field">
+          <label for="sim-horizon">Horizon (trading days)</label>
+          <input id="sim-horizon" type="number" min="1" value="126">
+          <p class="muted small">How many trading days forward to simulate from the last cached price (~252 per year, so 126 is roughly 6 months).</p>
+        </div>
+        <div class="field">
+          <label for="sim-model">Model</label>
+          <select id="sim-model"></select>
+          <p class="muted small"><code>gbm</code>: constant-volatility lognormal baseline. <code>bootstrap</code>: resamples blocks of real historical days. <code>garch_t</code>: GJR-GARCH with Student-t shocks -- volatility clustering and fat tails (one of the three models in the default backtest comparison, alongside gbm and bootstrap). <code>earnings_jumps</code>: a base model plus each ticker's own historical earnings-day reaction. <code>factor</code>: market + sector factor decomposition. <code>factor_regime</code>: factor model with a shared sector-wide regime switch. <code>fhs</code>: filtered historical simulation (resampled GARCH residuals). <code>merton</code>: jump-diffusion for sudden headline moves. <code>har</code>: range-based (Garman-Klass) volatility regression. <code>regime</code>: two-state Markov volatility switching. <code>blend</code>: mixes whole paths from several of the above. Full derivations in <code>MODEL_NOTES.md</code>.</p>
+        </div>
+        <div class="field">
+          <label for="sim-paths">Paths</label>
+          <input id="sim-paths" type="number" min="100" step="1000">
+          <p class="muted small">Number of simulated price paths. More paths tighten the Monte Carlo error on tail statistics (see the convergence table in the results) at the cost of runtime and memory; defaults to the configured <code>simulation.n_paths</code>.</p>
+        </div>
+      </div>
+
+      <div class="grid-3">
+        <div class="field">
+          <label for="sim-seed">Seed</label>
+          <input id="sim-seed" type="number">
+          <p class="muted small">Random seed for the path generator. The same config and seed reproduce a run exactly; defaults to the configured <code>simulation.seed</code>.</p>
+        </div>
+        <div class="field">
+          <label for="sim-above">Report P(above) this price (0 = skip)</label>
+          <input id="sim-above" type="number" step="1" value="0">
+          <p class="muted small">Adds the simulated probability of finishing above this price to the risk table. This is one more probability alongside VaR/CVaR, not a price target; leave at 0 to skip it.</p>
+        </div>
+        <div class="field checkbox-field">
+          <label><input type="checkbox" id="sim-tilt"> --tilt (Phase 4B drift tilt)</label>
+          <p class="muted small">Fits the pooled regression tilt live, on top of the configured drift policy.</p>
+        </div>
+      </div>
+
+      <div class="field checkbox-field">
+        <label><input type="checkbox" id="sim-implied-vol"> --implied-vol (live options-implied volatility)</label>
+        <p class="muted small">Requires --model gbm and a single ticker. Fetches today's option chain over the network; cannot be backtested (MODEL_NOTES §16).</p>
+      </div>
+
+      <button id="sim-run" class="btn btn-primary">Run simulation</button>
+    </section>
+
+    <section id="panel-backtest" class="panel">
+      <h2>Backtest</h2>
+      <p class="caption">Walk-forward scoreboard. The full default universe/model/horizon set takes about 3.5 minutes (CLAUDE.md) -- this blocks until it finishes, same as the CLI.</p>
+
+      <div class="field">
+        <label>Models</label>
+        <div id="bt-models" class="chips"></div>
+        <p class="muted small">Which models to score side by side. Each is re-fit and re-forecast at every origin below using only data available up to that origin, then judged on the same coverage/CRPS/PIT metrics -- see the Simulate panel's model list for what each name does.</p>
+      </div>
+      <div class="field">
+        <label>Horizons</label>
+        <div id="bt-horizons" class="chips"></div>
+        <p class="muted small">Forecast horizons, in trading days, evaluated at every origin. Longer horizons compound more forecast error, so coverage is naturally looser at 252 days than at 21.</p>
+      </div>
+      <div class="field">
+        <label>Tickers</label>
+        <div id="bt-tickers" class="chips"></div>
+        <p class="muted small">Which tickers to include in the walk-forward scoreboard.</p>
+      </div>
+
+      <div class="grid-4">
+        <div class="field">
+          <label for="bt-start">Start</label>
+          <input id="bt-start" type="date">
+          <p class="muted small">First forecast origin. The walk-forward loop re-fits and forecasts at each origin (month-end, by default) from here to the end date, strictly using only data up to that origin.</p>
+        </div>
+        <div class="field">
+          <label for="bt-end">End (empty = no limit)</label>
+          <input id="bt-end" type="date">
+          <p class="muted small">Last forecast origin; leave blank to walk forward through the most recent cached data.</p>
+        </div>
+        <div class="field">
+          <label for="bt-paths">Paths per origin</label>
+          <input id="bt-paths" type="number" min="100" step="500">
+          <p class="muted small">Simulated paths drawn at each origin, for each model and ticker. Kept far lower than a single Simulate run by default, since this repeats at every origin.</p>
+        </div>
+        <div class="field">
+          <label for="bt-seed">Seed</label>
+          <input id="bt-seed" type="number">
+          <p class="muted small">Random seed shared across every origin's simulations; reproducible from the same seed.</p>
+        </div>
+      </div>
+
+      <button id="bt-run" class="btn btn-primary">Run backtest</button>
+    </section>
+
+    <section id="panel-signals" class="panel">
+      <h2>Signals</h2>
+      <p class="caption">Cross-validated, pre-holdout evaluation of the Phase 4B signals. The one-time <code>--holdout</code> evaluation is deliberately not offered here -- it is already spent (research_log.md) and CLAUDE.md forbids re-running it. Use the CLI directly, deliberately, if that ever needs to change.</p>
+
+      <div class="field">
+        <label>Tickers</label>
+        <div id="sig-tickers" class="chips"></div>
+        <p class="muted small">Tickers pooled into the single cross-sectional signal panel used for the regressions below.</p>
+      </div>
+      <div class="field">
+        <label for="sig-horizon">Horizon</label>
+        <select id="sig-horizon"></select>
+        <p class="muted small">Trading-day horizon the signals are evaluated at (from the configured <code>signals.horizons</code>). Reported here: single-signal and combined regressions, quantile-regression pinball loss, and coefficient stability -- all walk-forward cross-validated with a gap at least as long as the horizon, never a plain random split.</p>
+      </div>
+
+      <button id="sig-run" class="btn btn-primary">Run signals</button>
+    </section>
+
+    <section id="panel-scenario" class="panel">
+      <h2>Scenario</h2>
+      <p class="caption">Runs a fixed, hypothetical stress -- a sector-wide shock, a volatility spike, a specific set of ticker shocks, or a replay of a past crisis window -- through a fitted model and reports the conditional impact on price, drawdown and loss probabilities. These are "what if this happens" outcomes, not forecasts: no probability attaches to the scenario itself occurring.</p>
+      <div class="field">
+        <label for="scn-name">Scenario</label>
+        <select id="scn-name"></select>
+        <p class="muted small">Which configured stress scenario to apply (config <code>scenarios</code>). Kinds in the default config: <code>sector_shock</code> (an instantaneous sector-wide move, propagated to each ticker through its beta), <code>vol_multiplier</code> (a temporary volatility spike over a number of days), <code>custom_shock</code> (a specific per-ticker shock schedule, e.g. an export-control scenario), and <code>historical_replay</code> (replays a named past window's realized returns, e.g. the 2020 COVID crash). See <code>config/default.yaml</code> for each one's exact parameters.</p>
+      </div>
+      <div class="field">
+        <label>Tickers</label>
+        <div id="scn-tickers" class="chips"></div>
+        <p class="muted small">Tickers the scenario is applied to; defaults to the full configured universe when none are selected.</p>
+      </div>
+
+      <div class="grid-3">
+        <div class="field">
+          <label for="scn-horizon">Horizon (trading days)</label>
+          <input id="scn-horizon" type="number" min="1" value="63">
+          <p class="muted small">Trading days simulated forward before the scenario's impact is measured.</p>
+        </div>
+        <div class="field">
+          <label for="scn-model">Model</label>
+          <select id="scn-model"></select>
+          <p class="muted small">The fitted return model the scenario's shock is applied on top of -- see the Simulate panel's model list for what each name does.</p>
+        </div>
+        <div class="field">
+          <label for="scn-paths">Paths</label>
+          <input id="scn-paths" type="number" min="100" step="1000">
+          <p class="muted small">Number of simulated paths used to estimate the scenario's impact distribution.</p>
+        </div>
+      </div>
+      <div class="grid-3">
+        <div class="field">
+          <label for="scn-seed">Seed</label>
+          <input id="scn-seed" type="number">
+          <p class="muted small">Random seed for the scenario's simulation; reproducible from the same seed.</p>
+        </div>
+        <div class="field checkbox-field">
+          <label><input type="checkbox" id="scn-equal-weight" checked> Also report an equal-weighted portfolio</label>
+          <p class="muted small">In addition to each ticker's own impact, also report the impact on an equal-weighted portfolio across the selected tickers. On by default; unchecking sends <code>--no-equal-weight</code> instead of omitting the flag.</p>
+        </div>
+      </div>
+
+      <button id="scn-run" class="btn btn-primary">Run scenario</button>
+    </section>
+
+    <section id="panel-runs" class="panel">
+      <h2>Runs &amp; reports</h2>
+      <p class="caption">Every command above writes a timestamped <code>runs/&lt;name&gt;/</code> folder holding its config snapshot, seed and output tables/figures, so any run can be reproduced or re-inspected later. This panel lists those folders and lets you view -- or build, if it hasn't been built yet -- each one's self-contained HTML report (the same one <code>semimc report</code> produces on the command line).</p>
+      <button id="runs-refresh" class="btn btn-secondary">Refresh</button>
+      <table class="table">
+        <thead><tr><th>Run</th><th>Command</th><th>Created</th><th>Seed</th></tr></thead>
+        <tbody id="runs-table"></tbody>
+      </table>
+      <p class="muted small">Click a run to view (and, if needed, build) its report below.</p>
+    </section>
+
+    <section id="run-console" class="run-console hidden">
+      <div class="run-console-header">
+        <span id="run-title">Idle</span>
+        <span id="run-status" class="badge"></span>
+        <button id="run-console-close" class="btn-icon" title="Close">&times;</button>
+      </div>
+      <pre id="run-log"></pre>
+      <div id="run-report-wrap" class="hidden">
+        <div class="run-report-actions">
+          <button id="run-report-regenerate" class="btn btn-secondary">Regenerate report</button>
+        </div>
+        <iframe id="run-report" title="report" sandbox="allow-same-origin"></iframe>
+      </div>
+    </section>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

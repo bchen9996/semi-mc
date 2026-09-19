@@ -813,40 +813,56 @@ Dividend yield defaults to 0 (`options.dividend_yield`); TXN and ADI pay real di
 known, small, disclosed bias in their Black-Scholes inversion rather than a hidden one.
 Same-day (0-DTE) expiries are excluded outright, not inverted.
 
-## 17. The Streamlit dashboard
+## 17. The HTML dashboard
 
 The brief's last stretch item: "A Streamlit dashboard." Owner decision 2026-09-16: build
 the fuller of two scopes considered — not a viewer sitting on top of runs already made
 (the smaller option), but a front end that drives and runs `fetch`/`validate`/`simulate`/
 `backtest`/`signals`/`scenario` itself, since `backtest` in particular takes minutes and a
 dashboard that could only browse past results would leave the actual waiting still bound
-to a terminal.
+to a terminal. Superseding decision 2026-09-17: rebuild the same scope as a custom
+HTML/CSS/JS frontend over a stdlib `http.server` backend, replacing Streamlit outright,
+for a purpose-built UI and to drop the only optional dependency the project had — the
+owner's stated reason was wanting a better-looking interface, and eventually to read a
+run's output into a paper-trading workflow (Alpaca; not yet built, see CLAUDE.md's
+"Ask first" list — new dependency, API keys, and a still-open design question about
+translating a distribution into a trade decision given the Phase 4B tilt's null holdout).
 
-**Mechanism.** `dashboard/jobs.py` launches `python -m semimc.cli <command> ...` as a
-subprocess — the exact argument list a terminal user would type, built from form input —
-and streams its stdout/stderr back line by line as it runs. This is a deliberate choice
-over importing `cli.py`'s command functions directly and calling them in-process: it keeps
+**Mechanism.** `dashboard/jobs.py` is unchanged: it launches `python -m semimc.cli
+<command> ...` as a subprocess — the exact argument list a terminal user would type — and
+streams its stdout/stderr back line by line as it runs. This is a deliberate choice over
+importing `cli.py`'s command functions directly and calling them in-process: it keeps
 `cli.py` as the single implementation every interface (terminal, dashboard) goes through,
 the same reasoning as every other choke point in this project (`training_window`,
 `build_full_panel`, the provider interface), and it means a long-running command like
 `backtest` cannot leave the dashboard process itself blocked in a way that only a page
-reload can recover from. `jobs.py` has no Streamlit import and is covered by the normal
-test suite (`tests/test_dashboard_jobs.py`) without the optional dependency installed;
-`dashboard/app.py` is the Streamlit script, one page per command, plus a Runs & Reports
-page that lists existing run folders and renders any of them by invoking `semimc report`
-and embedding the resulting `report.html` in an iframe (`st.components.v1.html`) — the
-dashboard never re-renders a run's tables or charts itself, it always asks `reporting/html.py`
-for them, so a report looks identical whether it was opened from a terminal or a browser.
+reload can recover from. `dashboard/server.py` is the new seam above it: a small JSON API
+(`POST /api/jobs` launches a command in a background thread and returns a job id; `GET
+/api/jobs/<id>?since=N` polls it) plus static file serving for `dashboard/web/` (`index.html`,
+`app.js`, `style.css`). `dashboard/web/app.js` is where the Streamlit pages' argument-building
+logic moved to — one function per command, each reading its own form fields and POSTing the
+resulting args, mirroring `page_simulate`/`page_backtest`/etc. one for one. The Runs &
+Reports panel lists existing run folders and renders any of them by requesting
+`GET /api/runs/<name>/report`, which (re)builds `report.html` via the same `report` CLI
+command on first request and then just serves the file, embedded in an `<iframe srcdoc=...>`
+— the dashboard never re-renders a run's tables or charts itself, it always asks
+`reporting/html.py` for them, so a report looks identical whether it was opened from a
+terminal or a browser. `jobs.py` has no web-framework import and is covered by the normal
+test suite (`tests/test_dashboard_jobs.py`); `server.py` is stdlib-only and is covered
+too (`tests/test_dashboard_server.py`), so there is no more optional dependency to skip
+tests over.
 
-**What is not exposed.** `signals --holdout` has no button here. It is a one-time
+**What is not exposed.** `signals --holdout` has no button here — `server.py` rejects it
+outright (`start_job` raises before a subprocess is ever launched). It is a one-time
 evaluation, already spent against the real universe (research_log.md, 2026-09-16), and
 CLAUDE.md forbids re-running it; a dashboard makes exactly the kind of casual, repeatable
 action that a one-time resource must never be easy to trigger. It stays reachable only by
 typing the CLI command directly, deliberately.
 
-**What is not attempted.** No job queue, no background workers, no progress bar finer than
-the command's own log output, and no persistence of a run across a page reload — the
-subprocess is a local variable in the callback that launched it, not session state.
+**What is not attempted.** No job queue beyond an in-memory dict keyed by job id, no
+persistence of a run's log across a server restart, and no auth or TLS — the server binds
+to `127.0.0.1` only and is meant for one local user, the same trust boundary as the CLI
+itself.
 Navigating away mid-run does not send the child process any signal to stop, but it also
 stops anything from draining its stdout pipe; a command that produced enough output to
 fill the OS pipe buffer after that point would block on its own next write rather than run

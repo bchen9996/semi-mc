@@ -13,7 +13,8 @@ numpy · pandas · scipy · arch (GARCH, block-length estimator) · statsmodels 
 quantile regression, Markov switching — **never `import statsmodels.api`**, see Gotchas) ·
 scikit-learn (pinball loss) · matplotlib · pyarrow · pydantic v2 (config validation) ·
 typer (CLI) · pyyaml · yfinance · lxml (earnings-date scraping via `pandas.read_html`).
-Dev: pytest, ruff. Optional `dashboard` extra: streamlit (nothing else imports it).
+Dev: pytest, ruff. The dashboard (`src/semimc/dashboard`) is stdlib `http.server` plus a
+static HTML/CSS/JS frontend — no extra dependency, no install step.
 
 ## Commands
 
@@ -30,7 +31,7 @@ uv run semimc signals --horizon 21 [--holdout]      # evaluate the Phase 4B sign
 uv run semimc scenario --name sector_shock_25
 uv run semimc report --run latest
 uv run semimc models                                # list available models
-uv run --extra dashboard streamlit run src/semimc/dashboard/app.py  # browser front end
+uv run semimc dashboard [--port 8765] [--no-open]   # HTML dashboard, browser front end
 ```
 
 Every command takes `--config PATH` and repeatable `--set key.path=value` overrides
@@ -83,12 +84,13 @@ Regenerate test fixtures with `uv run python tests/fixtures/make_fixtures.py`.
   (`forecasting/pipeline.py`) is the only place a Phase 4B panel is assembled in a loop; it
   calls `build_regression_row`, which calls `signal_panel`, which is the only caller of the
   four ticker-level signal builders. One choke point per data path, same as `training_window`.
-- **The dashboard drives the CLI; it does not reimplement it.** `dashboard/app.py` builds a
-  `semimc <command> ...` argument list from form input and runs it as a subprocess
-  (`dashboard/jobs.py`), the same way a terminal user would. `simulate`/`backtest`/
-  `signals`/`scenario`'s actual logic lives in exactly one place, `cli.py`, same reasoning
-  as every other choke point above. `jobs.py` has no Streamlit import so it stays covered
-  by the normal test suite without the optional `dashboard` dependency installed.
+- **The dashboard drives the CLI; it does not reimplement it.** `dashboard/web/app.js`
+  builds a `semimc <command> ...` argument list from form input, the same way a terminal
+  user would, and POSTs it to `dashboard/server.py` (stdlib `http.server`), which hands it
+  to `dashboard/jobs.py` to run as a subprocess. `simulate`/`backtest`/`signals`/`scenario`'s
+  actual logic lives in exactly one place, `cli.py`, same reasoning as every other choke
+  point above. `jobs.py` has no web-framework import so it stays covered by the normal test
+  suite with no extra install step — there is no optional `dashboard` dependency any more.
 
 ## Boundaries
 
