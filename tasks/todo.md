@@ -623,6 +623,77 @@ no verdict before month 12)/T5.
       `broker.get_account().account_number` already surfaced earlier this session, not the
       API key). `s0` stays `trading_enabled: false`.
 
+## Addendum: intraday agent sleeve S4 (`BRIEF_INTRADAY.md`)
+
+Brief filed 2026-09-19 and committed to the repo as `BRIEF_INTRADAY.md` (deliberately, so
+it does not repeat `semis_paper_trading_brief.md`'s fate -- that one is cited by every
+`paper`/`execution`/`live`/`strategy` docstring and was never committed at all). **Nothing
+below is started.** A scheduled research-and-trade loop where Python owns the loop, clock,
+state and limits, and a language model decides inside it; measured against a random-entry
+placebo on a shadow ledger, pre-registered as `THESES.md`'s T6.
+
+**Already built and directly reusable** (verified by reading the code, not assumed):
+
+- `execution/broker.py::Broker.get_calendar` and `AlpacaPaperBroker.get_calendar` already
+  return `CalendarDay`s, so the brief's "derive every schedule time from Alpaca's market
+  calendar, never hard-code dates" needs no new plumbing.
+- `execution/market_data.py::AlpacaMarketDataClient` already wraps `alpaca.data`'s
+  `StockHistoricalDataClient` and returns real bid/ask quotes on the free IEX feed (built
+  for T5's arrival-price cost analysis). The brief's spread gate and quote-staleness gate
+  need a *latest*-quote method added to that class, not a new client -- and its docstring
+  already records the finding the brief's own data gate turns on (IEX has usable coverage;
+  SIP/DELAYED_SIP unconfirmed, deliberately untested until IEX proves insufficient).
+- `execution/pretrade.py`'s kill switch and pretrade gates, the ledger and reconciliation,
+  `execution/fake_broker.py`'s fault injection, the `live/` job shape, and Phase 8's
+  per-order fault isolation all transfer as-is.
+- `data/options.py` exists for the brief's IV-vs-forecast-vol check, but is live-only by
+  design (CLAUDE.md) and must stay out of any point-in-time path.
+- `THESES.md`'s T6 slot is free (T2/T3/T5 active, T1/T4 out of scope), so the brief's
+  "pre-register as T6" needs no renumbering.
+
+**Hard prerequisites, in dependency order** -- these are decisions and builds, not details:
+
+1. **A second paper account plus per-sleeve credential routing, which does not exist.** The
+   brief requires S4 in its own account and forbids sharing one with the monthly thesis
+   sleeves, but `AlpacaPaperBroker.from_env()` and `AlpacaMarketDataClient.from_env()` both
+   read one global `ALPACA_API_KEY`/`ALPACA_SECRET_KEY` pair and are called identically
+   regardless of sleeve. This is the same gap that made enabling `s0` and `s3` together
+   unsafe (2026-09-19, Phase 8 entry above). Blocking for any stage that submits an order;
+   rollout stage 1 (shadow, submits nothing) could precede it.
+2. **Where the loop runs -- GitHub Actions cannot host it.** Today's infrastructure is GH
+   Actions cron committing a binary `ledger/paper.sqlite3` and serializing ~6 jobs/day
+   behind one concurrency group, which already produced a real push race (Phase 8). The
+   brief needs roughly nineteen 20-minute cycles, event-triggered cycles, and a
+   *minute-level* monitor process watching open positions between cycles. GH Actions has
+   5-minute minimum cron granularity, no persistent process, a fresh checkout per job, and
+   queue delays of many minutes under load. A per-minute writer cannot use the
+   ledger-in-git pattern at all. This is the brief's own first open question and it decides
+   the shape of everything else, including what happens to an in-flight position if the
+   host dies mid-session.
+3. **A per-day model-call spend cap** -- the brief's second open question; needs a number
+   before the loop can have a hard stop to enforce.
+4. **Alpaca's news API is not wired anywhere** (no `NewsClient` under `src/`), and the
+   brief's third open question -- whether the Researcher reads anything beyond it and this
+   project's own data -- is unanswered. Any new source is an "ask first" item by the
+   brief's own boundaries.
+5. **`.claude/agents/` does not exist** (`.claude/` holds only `scheduled_tasks.lock`), so
+   the three role prompts are new files.
+6. **The headless flag set is unverified.** The brief names `--bare`, `--allowedTools`,
+   `--output-format json`, `--max-turns`, `--append-system-prompt` and says explicitly to
+   check them against the headless docs before relying on them. Deliberately left until
+   implementation starts rather than verified now -- flags can change, and a check done
+   months early is a check that has to be redone.
+
+**Rollout stages from the brief** (none started; each gated on the owner, never automatic):
+
+- [ ] Stage 1 -- shadow, 2 weeks. Full schedule, no orders submitted, proposals filled
+      against the cost model, playbook frozen for a clean baseline.
+- [ ] Stage 2 -- equities, half budget, 2 weeks.
+- [ ] Stage 3 -- equities, full budget.
+- [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded).
+- [ ] Stage 5 -- options enabled, only if the shadow results and both options gates pass,
+      and only with the owner's explicit approval. Never live at any stage.
+
 ## Known gaps (deliberate, with reasons)
 
 - [ ] **Cross-run fit caching.** Fitted parameters are cached in memory within a run (one
