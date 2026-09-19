@@ -27,7 +27,8 @@ status` fails locally) -- owner-verified.
 
 **Confirmed missing** by the first real `workflow_dispatch` run, 2026-09-19: `mark (s0)`
 and `mark (s3)` both failed with `RuntimeError: ALPACA_API_KEY/ALPACA_SECRET_KEY not set`.
-Still open as of that run.
+**Resolved** the same day -- owner added both as repo secrets; a second `workflow_dispatch`
+run confirmed clean (see item 3).
 
 ## 3. A `workflow_dispatch` dry run of `paper_trading.yml` completed clean
 
@@ -40,9 +41,11 @@ local shell. Record the run URL and date here once done:
 
 - Run 1, 2026-09-19: failed. `decide` succeeded for every sleeve; `execute`/`mark` failed
   on missing secrets (item 2, above); a separate git-push race between matrix entries
-  writing the shared ledger was found and fixed (`tasks/todo.md`'s Phase 8 entry). Not yet
-  re-run since the fix.
-- Run 2: _(pending -- owner to trigger and confirm, after item 2 is resolved)_
+  writing the shared ledger was found and fixed (`tasks/todo.md`'s Phase 8 entry).
+- Run 2, 2026-09-19 (after the secrets were added and the race fix pushed): **all jobs
+  green** -- `decide-and-execute`, `mark`, and `report` all completed cleanly for every
+  sleeve, owner-confirmed. First clean end-to-end proof the workflow runs correctly on
+  GitHub's own infrastructure.
 
 ## 4. GitHub's Actions failure-notification email is enabled for this repo
 

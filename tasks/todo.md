@@ -536,7 +536,7 @@ no verdict before month 12)/T5.
       Verified against the real (still all-disabled) paper account: `paper decide` then
       `paper execute` still exits 0 on the routine pretrade decline (not trading_enabled,
       unregistered account, market closed) -- no regression on the common case.
-- [ ] **Phase 8 -- rollout.** Dry run -> sandbox failure injection -> go-live checklist ->
+- [x] **Phase 8 -- rollout.** Dry run -> sandbox failure injection -> go-live checklist ->
       enable S0/S3 first.
       **Blocking discovery before any of this could be verified**: local `main` was 4
       commits ahead of `origin/main` -- nothing from Phases 4-7 had ever been pushed, so
@@ -599,6 +599,13 @@ no verdict before month 12)/T5.
       missing credentials) failing the step immediately, not swallowed by the retry --
       verified locally against a real two-clone git race (reproducing the exact "[rejected]
       ... fetch first" the real run showed) before pushing this fix.
+      **Owner added the two GitHub repo secrets and re-triggered `workflow_dispatch`,
+      2026-09-19: all jobs green** -- `decide-and-execute`, `mark`, and `report` all
+      completed cleanly for every sleeve, confirming both fixes above and closing
+      `go_live_checklist.md`'s items 1-3 and 5 (item 4, GitHub's own failure-email setting,
+      is owner-account state this repo's code can't inspect either way). Item 6 -- actually
+      enabling `s0`/`s3` -- stays the owner's separate, explicit action; nothing in the
+      paper-trading plan (Phases 0-8) is left to build before that point.
 
 ## Known gaps (deliberate, with reasons)
 
