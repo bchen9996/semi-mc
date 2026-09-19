@@ -538,6 +538,48 @@ no verdict before month 12)/T5.
       unregistered account, market closed) -- no regression on the common case.
 - [ ] **Phase 8 -- rollout.** Dry run -> sandbox failure injection -> go-live checklist ->
       enable S0/S3 first.
+      **Blocking discovery before any of this could be verified**: local `main` was 4
+      commits ahead of `origin/main` -- nothing from Phases 4-7 had ever been pushed, so
+      `.github/workflows/paper_trading.yml` had never once run on GitHub's own
+      infrastructure. Owner decision 2026-09-19: push now (every sleeve stays
+      `trading_enabled: false`, so the cron starting to fire for real declines harmlessly
+      at pretrade either way).
+      **Sandbox failure injection** found two real gaps by reading `execution/
+      fake_broker.py`'s own docstrings against what `live/execute.py`/`live/mark.py`
+      actually did with the broker calls that can raise these -- not assumed, read
+      directly. `FakeBroker.submit_order`'s own docstring for a timeout is explicit ("the
+      order was recorded -- look it up by client_order_id, don't resubmit"), but
+      `run_execute`'s order loop had no `try/except` at all: a real timeout after a
+      successful submit crashed the run before `ledger.record_order` ever ran for that
+      order, and skipped every later order in the batch plus the final snapshot. Same gap
+      for `RateLimitError`/`WashTradeError`/`AccountBlockedError`/`MarketClosedError`
+      raised by `submit_order` itself. Fixed: each is now caught per-order (timeout
+      recovers via `get_order_by_client_id` per the docstring's own instruction; the rest
+      log an `"error"` incident, add to `order_failures`, and move on to the next order --
+      one bad order no longer takes down the batch or skips the snapshot).
+      `live/mark.py`'s reprice-cancel call (`broker.cancel_order`) had the identical gap: a
+      real, narrow race (the order fills between mark's poll and its own cancel-for-
+      staleness call) would raise `ValueError`/`KeyError` and crash the whole sleeve's
+      `mark` run, skipping reconciliation and the snapshot. Fixed the same way -- log and
+      continue.
+      New tests exercise every `FakeBroker` fault mode through the `live/` layer itself
+      (`tests/test_live_execute.py`, `tests/test_live_mark.py`), not just the `execution/`
+      layer `tests/test_execution_integration.py` already covered.
+      **Also found while running the full suite for this phase (unrelated to the fault-
+      injection work itself)**: two `test_cli.py` tests that invoke `paper execute` through
+      the real Typer CLI use `cli.py::_paper_now`'s real wall-clock time, with no override
+      -- outside `paper.execution`'s default 10:00-15:30 window they fail on "outside the
+      execution window" regardless of what they're actually testing. Fixed by widening the
+      window in `_tradeable_paper_overrides` to the full day; also hit (and fixed) the YAML
+      sexagesimal trap on the override values themselves (`23:59` unquoted parses to the
+      int `1439`, the same reason `config/paper.yaml` quotes its own `start_time`/
+      `cutoff_time`).
+      `docs/go_live_checklist.md` (new): the last gate before flipping `trading_enabled`,
+      pre-registration-style like `THESES.md`. Items 1-5 (paper keys, GitHub secrets set,
+      a clean `workflow_dispatch` run, GitHub's failure-email setting, the kill-switch
+      procedure) are this phase's scope; item 6 (`registered_accounts` + `trading_enabled`
+      for the sleeve(s) the owner names) is a separate, deliberate action taken when ready
+      -- not performed automatically at the end of this phase.
 
 ## Known gaps (deliberate, with reasons)
 

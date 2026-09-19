@@ -19,7 +19,15 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from ..data import MarketData
-from ..execution.broker import Broker, Order, OrderRequest
+from ..execution.broker import (
+    AccountBlockedError,
+    Broker,
+    MarketClosedError,
+    Order,
+    OrderRequest,
+    RateLimitError,
+    WashTradeError,
+)
 from ..execution.orders import build_orders
 from ..execution.pretrade import PretradeContext, check_order_tradable, check_pretrade
 from ..strategy.decide import Decision
@@ -95,7 +103,26 @@ def run_execute(
             ledger.record_incident("error", tradable_failure, sleeve)
             result.order_failures.append((request, tradable_failure))
             continue
-        submitted = broker.submit_order(request)
+        try:
+            submitted = broker.submit_order(request)
+        except TimeoutError:
+            # The request may have gone through even though the response didn't arrive --
+            # client_order_id is deterministic for exactly this reason (its own docstring:
+            # "look it up by client_order_id, don't resubmit"). Recover by looking it up
+            # rather than assuming failure.
+            submitted = broker.get_order_by_client_id(request.client_order_id)
+            if submitted is None:
+                message = f"timed out and no order found for {request.client_order_id}"
+                ledger.record_incident("error", message, sleeve)
+                result.order_failures.append((request, message))
+                continue
+        except (RateLimitError, WashTradeError, AccountBlockedError, MarketClosedError) as exc:
+            # One order's broker-level fault must not take down the rest of the batch --
+            # the same reasoning check_order_tradable's failures above already follow.
+            ledger.record_incident("error", str(exc), sleeve)
+            result.order_failures.append((request, str(exc)))
+            continue
+
         ledger.record_order(sleeve, decision.snapshot_hash, request, submitted)
         if submitted.filled_qty > 0 and submitted.filled_avg_price is not None:
             ledger.record_fill(

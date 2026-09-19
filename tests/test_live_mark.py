@@ -98,6 +98,30 @@ def test_a_stale_unfilled_order_is_canceled_for_reprice(config, ledger):
     assert ledger.get_order(request.client_order_id)["status"] == "canceled"
 
 
+def test_a_cancel_race_does_not_abort_the_rest_of_the_run(config, ledger, monkeypatch):
+    """Phase 8: the order fills at the broker in the moment between mark's poll and its own
+    cancel-for-staleness call -- a real, narrow race. cancel_order raising must not abort
+    reconciliation/the snapshot, or leave the ledger thinking the order is still open."""
+    cfg = _tradeable_config(config)
+    broker = FakeBroker(partial_fill_fraction=0.0, now=SUBMITTED_AT)  # stays "accepted"
+    request = _request()
+    submitted = broker.submit_order(request)
+    ledger.record_order("s0", "hash-1", request, submitted)
+
+    def _cancel_raises(order_id: str) -> None:
+        raise ValueError(f"order {order_id} is already filled")
+
+    monkeypatch.setattr(broker, "cancel_order", _cancel_raises)
+
+    now = SUBMITTED_AT + dt.timedelta(minutes=30)
+    result = run_mark("s0", cfg, broker, ledger, pd.Timestamp("2026-01-05"), now)
+
+    assert result.orders_canceled_for_reprice == []
+    incidents = ledger.incidents("s0")
+    assert any(i["severity"] == "error" and "cancel failed" in i["message"] for i in incidents)
+    assert ledger.latest_snapshot("s0") is not None  # the run still finishes
+
+
 def test_an_order_still_within_the_reprice_window_is_left_alone(config, ledger):
     cfg = _tradeable_config(config)
     broker = FakeBroker(partial_fill_fraction=0.0, now=SUBMITTED_AT)

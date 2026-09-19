@@ -171,3 +171,92 @@ def test_a_tradability_failure_is_skipped_without_aborting_other_orders(config, 
     assert incidents[-1]["severity"] == "error"
     incidents = ledger.incidents("s0")
     assert any("not tradable" in i["message"] for i in incidents)
+
+
+def test_a_timeout_after_a_successful_submit_recovers_by_looking_up_the_order(
+    config, tmp_path, ledger
+):
+    """Phase 8: FakeBroker's own docstring is explicit that a timeout here means the order
+    was recorded anyway -- run_execute must recover it by client_order_id, not lose it."""
+    cfg = _tradeable_config(config, tmp_path)
+    market = _market_with_spot({"NVDA": 100.0, "AMD": 50.0})
+    decision = decide_s0(["NVDA", "AMD"], pd.Timestamp("2026-01-05"))
+    ledger.record_decision(decision)
+
+    # Discover the deterministic client_order_id for NVDA's order without duplicating
+    # execution/orders.py's own id logic -- dry_run makes no ledger writes (see
+    # test_dry_run_makes_no_broker_or_ledger_writes), so reusing `ledger` here is safe.
+    probe = run_execute(
+        "s0",
+        cfg,
+        FakeBroker(),
+        ledger,
+        market,
+        ["NVDA", "AMD"],
+        pd.Timestamp("2026-01-05"),
+        NOW,
+        dry_run=True,
+    )
+    nvda_id = next(o.client_order_id for o in probe.orders if o.symbol == "NVDA")
+
+    broker = FakeBroker(timeout_after_success_ids={nvda_id})
+    result = run_execute(
+        "s0", cfg, broker, ledger, market, ["NVDA", "AMD"], pd.Timestamp("2026-01-05"), NOW
+    )
+    assert result.order_failures == []
+    assert {o.symbol for o in result.submitted} == {"NVDA", "AMD"}
+    assert ledger.get_order(nvda_id)["status"] == "filled"
+    assert ledger.latest_snapshot("s0") is not None
+
+
+def test_a_rate_limit_on_one_order_does_not_abort_the_rest_of_the_batch(config, tmp_path, ledger):
+    cfg = _tradeable_config(config, tmp_path)
+    broker = FakeBroker(rate_limit_calls_remaining=1)  # AMD (processed first) is rejected once
+    market = _market_with_spot({"NVDA": 100.0, "AMD": 50.0})
+    decision = decide_s0(["NVDA", "AMD"], pd.Timestamp("2026-01-05"))
+    ledger.record_decision(decision)
+
+    result = run_execute(
+        "s0", cfg, broker, ledger, market, ["NVDA", "AMD"], pd.Timestamp("2026-01-05"), NOW
+    )
+    assert len(result.order_failures) == 1
+    assert result.order_failures[0][0].symbol == "AMD"
+    assert len(result.submitted) == 1
+    assert result.submitted[0].symbol == "NVDA"
+    assert ledger.latest_snapshot("s0") is not None  # the batch still finishes
+    incidents = ledger.incidents("s0")
+    assert any(i["severity"] == "error" and "rate limited" in i["message"] for i in incidents)
+
+
+def test_a_wash_trade_rejection_is_skipped_without_aborting_other_orders(config, tmp_path, ledger):
+    from semimc.execution.broker import OrderRequest
+
+    cfg = _tradeable_config(config, tmp_path)
+    broker = FakeBroker(wash_trade_symbols={"NVDA"}, partial_fill_fraction=0.0)
+    # Seed an already-open opposite-side order in NVDA so the coming buy collides with it.
+    broker.submit_order(
+        OrderRequest(
+            symbol="NVDA",
+            side="sell",
+            type="limit",
+            time_in_force="day",
+            client_order_id="seed-nvda-sell",
+            qty=1.0,
+            limit_price=100.0,
+        )
+    )
+    market = _market_with_spot({"NVDA": 100.0, "AMD": 50.0})
+    decision = decide_s0(["NVDA", "AMD"], pd.Timestamp("2026-01-05"))
+    ledger.record_decision(decision)
+
+    result = run_execute(
+        "s0", cfg, broker, ledger, market, ["NVDA", "AMD"], pd.Timestamp("2026-01-05"), NOW
+    )
+    assert len(result.order_failures) == 1
+    assert result.order_failures[0][0].symbol == "NVDA"
+    assert [o.symbol for o in result.submitted] == ["AMD"]
+    incidents = ledger.incidents("s0")
+    assert any(
+        i["severity"] == "error" and "could interact with one already open" in i["message"]
+        for i in incidents
+    )

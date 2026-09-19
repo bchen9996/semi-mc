@@ -75,7 +75,17 @@ def run_mark(
             and order.submitted_at is not None
             and now - order.submitted_at > reprice_after
         ):
-            broker.cancel_order(order.id)
+            try:
+                broker.cancel_order(order.id)
+            except (ValueError, KeyError) as exc:
+                # A race between this poll and the cancel attempt -- the order filled (or
+                # otherwise left a cancelable state) in between. Not fatal: the fill branch
+                # above already recorded whatever happened this poll, and the next poll
+                # will see the corrected status either way.
+                ledger.record_incident(
+                    "error", f"cancel failed for {client_order_id}: {exc}", sleeve
+                )
+                continue
             refreshed = broker.get_order_by_client_id(client_order_id)
             if refreshed is not None:
                 ledger.update_order_status(client_order_id, refreshed)

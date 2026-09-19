@@ -518,6 +518,15 @@ def _tradeable_paper_overrides(
         "paper.sleeves.s0.trading_enabled=true",
         "--set",
         f"paper.registered_accounts=[{account_number}]",
+        # paper_execute's `now` is the real wall clock (cli.py::_paper_now) -- widen the
+        # execution window to the full day so these tests don't flake depending on what
+        # time of day they happen to run. Quoted: a bare `23:59` parses as YAML's legacy
+        # sexagesimal int (1439), the same reason config/paper.yaml quotes its own
+        # start_time/cutoff_time values.
+        "--set",
+        'paper.execution.start_time="00:00"',
+        "--set",
+        'paper.execution.cutoff_time="23:59"',
     ]
 
 
