@@ -22,9 +22,11 @@ import pytest
 from semimc.data.earnings import load_calendar
 from semimc.data.returns import log_returns
 from semimc.forecasting import (
+    approx_trading_days_per_period,
     build_regression_row,
     date_grouped_gapped_splits,
     fit_driscoll_kraay,
+    min_gap_periods,
     standardize_cross_sectionally,
     trailing_betas,
     training_rows,
@@ -46,6 +48,7 @@ from semimc.forecasting.evaluate import (
     rank_information_coefficient,
     sign_flip_rate,
 )
+from semimc.forecasting.pipeline import build_full_panel, monthly_origins
 from semimc.forecasting.sector import (
     build_sector_regression_row,
     fit_sector_tilt,
@@ -730,3 +733,52 @@ def test_market_environment_split_reports_missing_data_without_failing():
     split = market_environment_split(panel, ["momentum"], min_observations=1000)
     assert split["downturn"]["result"] is None
     assert split["rally"]["result"] is None
+
+
+# ---------------------------------------------------------------------------------------
+# Origin frequency: a higher-frequency, shorter-horizon signal search over the same
+# already-approved signals, never touching the spent 21d/63d holdout.
+# ---------------------------------------------------------------------------------------
+
+
+def test_monthly_origins_default_is_unchanged():
+    trading_days = pd.bdate_range("2020-01-01", "2020-12-31")
+    default = monthly_origins(trading_days, trading_days[0], trading_days[-1])
+    explicit = monthly_origins(trading_days, trading_days[0], trading_days[-1], freq="ME")
+    assert list(default) == list(explicit)
+    assert len(default) == 12
+
+
+def test_monthly_origins_accepts_a_higher_frequency():
+    trading_days = pd.bdate_range("2020-01-01", "2020-03-31")
+    weekly = monthly_origins(trading_days, trading_days[0], trading_days[-1], freq="W-FRI")
+    monthly = monthly_origins(trading_days, trading_days[0], trading_days[-1], freq="ME")
+    assert len(weekly) > len(monthly)
+    # Every returned origin is a real trading day, never a synthetic period end.
+    assert set(weekly).issubset(set(trading_days))
+
+
+def test_build_full_panel_weekly_origins_produce_more_dates_than_monthly(market):
+    tickers = ["NVDA", "AMD"]
+    start, end = market.prices.index[0], market.prices.index[-1]
+    monthly_panel = build_full_panel(market, tickers, horizon_days=21, start=start, end=end)
+    weekly_panel = build_full_panel(
+        market, tickers, horizon_days=21, start=start, end=end, origin_freq="W-FRI"
+    )
+    assert weekly_panel["date"].nunique() > monthly_panel["date"].nunique()
+
+
+def test_approx_trading_days_per_period_matches_known_conventions():
+    assert approx_trading_days_per_period("ME") == pytest.approx(21.39, abs=0.05)
+    assert approx_trading_days_per_period("QE") == pytest.approx(62.78, abs=0.05)
+    assert approx_trading_days_per_period("W-FRI") == pytest.approx(4.83, abs=0.05)
+
+
+def test_min_gap_periods_flags_the_pre_existing_63d_monthly_gap():
+    """The addendum's own already-spent 63d/monthly evaluation used cv_gap_periods=1, but
+    a 63-day forward window at ~21 trading days/month needs a 3-period gap -- this is what
+    exposes that, not a new requirement invented for the higher-frequency search."""
+    assert min_gap_periods(21, "ME") == 1
+    assert min_gap_periods(63, "ME") == 3
+    assert min_gap_periods(5, "W-FRI") == 2
+    assert min_gap_periods(10, "W-FRI") == 3

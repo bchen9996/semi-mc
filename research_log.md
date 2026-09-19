@@ -224,3 +224,73 @@ picture.
 against this universe and holdout window again. A new holdout would require a new frozen
 window (e.g. as more data accrues past 2026-09-15) and a fresh pre-registration, not a
 retry of this one.
+
+## 2026-09-18 -- pre-holdout signal evaluation, higher-frequency origins (5d, 10d horizons)
+
+Owner question: the 21d/63d, monthly-origin search above has ~127 non-overlapping dates
+and would need ~23 years at that cadence to clear the addendum's own "~3" skepticism bar
+even if `relative_strength`'s observed effect (rank-IC t=2.03, 63d) were real. Before
+concluding that only waiting can help, this checks whether a shorter horizon sampled more
+often (more genuinely non-overlapping observations per year) reveals a stronger version of
+the same effect. **Pre-holdout cross-validation only -- `--holdout` was never passed.** The
+existing 24-month holdout (2024-09-15 onward) is untouched by this entry; nothing here
+looks at, or could be confused with, that spent window.
+
+**Methodology changes from the 21d/63d entries above**, both needed once origins stop
+being monthly (`forecasting.cv.approx_trading_days_per_period`/`min_gap_periods`, added
+alongside this search): the Driscoll-Kraay `maxlags` no longer hardcodes "21 trading
+days/period" (`cli.py`'s `maxlags` calculation now divides by the actual trading days in
+one `origin_frequency` period, ~4.83 for weekly); and `signals.cv_gap_periods` is set
+explicitly per horizon (`2` for the 5d run, `3` for the 10d run) rather than left at the
+default `1`, which is too small once the sampling period is a week instead of a month.
+
+- **Universe:** same 14 tickers as the 21d/63d entries above (NVDA, AMD, AVGO, QCOM, MRVL,
+  TSM, INTC, MU, ASML, AMAT, LRCX, KLAC, TXN, ADI). Benchmarks SPY, SOXX.
+- **Sample:** weekly origins (`origin_frequency=W-FRI`), `backtest.start` (2012-01-01)
+  through 2026-09-18. 553 dates survived the point-in-time filter for momentum/reversal/
+  relative_strength (vs. 127 monthly dates in the 21d/63d entries -- confirms the ~4.4x
+  higher-frequency claim); 443 for earnings_drift/ridge/lasso/combined.
+- **Command (5d):** `semimc signals --horizon 5 --set signals.origin_frequency=W-FRI --set signals.cv_gap_periods=2`
+  -- **Run:** `runs/20260918-222103-signals`
+- **Command (10d):** `semimc signals --horizon 10 --set signals.origin_frequency=W-FRI --set signals.cv_gap_periods=3`
+  -- **Run:** `runs/20260918-222240-signals`
+
+| horizon | signal | n_obs | cv_oos_r2 | clark_west_t | clark_west_p | rank_ic_mean | rank_ic_t | rank_ic_n_dates |
+|---|---|---|---|---|---|---|---|---|
+| 5d | relative_strength | 9282 | 0.0004 | 1.836 | 0.033 | 0.0209 | 1.600 | 553 |
+| 5d | simple_average | 9282 | 0.0004 | 1.538 | 0.062 | 0.0200 | 1.568 | 553 |
+| 5d | earnings_drift | 6167 | -0.0009 | 0.651 | 0.258 | 0.0271 | 1.727 | 443 |
+| 5d | combined | 6167 | -0.0057 | 0.921 | 0.179 | 0.0323 | 1.841 | 443 |
+| 5d | ridge(alpha=30) | 6167 | -0.0049 | 0.937 | 0.174 | 0.0329 | 1.880 | 443 |
+| 10d | relative_strength | 9282 | 0.0004 | 2.272 | 0.012 | 0.0250 | 1.475 | 553 |
+| 10d | simple_average | 9282 | 0.0004 | 1.794 | 0.036 | 0.0269 | 1.678 | 553 |
+| 10d | earnings_drift | 6167 | -0.0010 | 1.265 | 0.103 | 0.0398 | 2.160 | 443 |
+| 10d | combined | 6167 | -0.0082 | 1.195 | 0.116 | 0.0293 | 1.371 | 443 |
+
+Power diagnostic (`analytics.power.required_sample_size`, target rank-IC t=3.0), the
+closest candidates: 10d `earnings_drift` needs ~7.9 more years at this cadence; 5d
+`ridge(alpha=30)`/`combined` need ~13-14; 5d/10d `relative_strength` need ~27-33 -- all
+still worse than or comparable to the ~23 years the *original* 63d/monthly evaluation
+implied, not meaningfully better.
+
+**Read:** the shorter-horizon, higher-frequency redesign does not reveal a stronger
+version of the effect -- if anything, `relative_strength`'s rank-IC t is *weaker* here
+(1.60 at 5d, 1.48 at 10d) than the 63d/monthly result (2.03) despite ~4.4x more
+independent dates, confirming that the `t ~ sqrt(n)` extrapolation used to motivate this
+search assumes a fixed effect size that does not actually hold across horizons -- exactly
+the caveat `analytics.power.required_sample_size`'s own docstring states. Every OOS R² is
+at or below zero except a rounding-level +0.0004 for `relative_strength`/`simple_average`
+at both new horizons. Rolling coefficient sign-flip rates are 0.32-0.52 across signals --
+close to a coin flip, consistent with noise rather than a stable relationship. The one
+mild standout, `earnings_drift` at 10d (rank-IC t=2.16, still short of "~3"), is a single
+cell out of many tried and should be read with the same skepticism the addendum applies to
+any one result surfacing from a multi-cell search.
+
+**Decision:** more independent observations per unit time, on its own, does not rescue
+this search -- the bottleneck is effect size, not sample size. No candidate here clears
+the pre-holdout bar that would justify spending a (separate, freshly pre-registered)
+holdout at these settings, so none is. The higher-frequency evaluation machinery
+(`SignalsConfig.origin_frequency`, `forecasting.cv.approx_trading_days_per_period`/
+`min_gap_periods`, the automatic power diagnostic in `semimc signals`) stays in the
+codebase as a reusable tool for the next signal idea, not spent or discredited by this
+null result -- it did its job by answering the question honestly.

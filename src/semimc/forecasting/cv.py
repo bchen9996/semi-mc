@@ -21,6 +21,8 @@ first test date.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -75,3 +77,25 @@ def rows_for_dates(panel: pd.DataFrame, date_column: str, dates: np.ndarray) -> 
     """Rows of ``panel`` whose ``date_column`` is in ``dates``. A small, named helper so
     callers don't repeat the same boolean mask everywhere."""
     return panel[panel[date_column].isin(dates)]
+
+
+def approx_trading_days_per_period(freq: str, sample_periods: int = 13) -> float:
+    """Median calendar gap between consecutive ``freq`` periods, in trading days.
+
+    Converts via the same 252/365.25 calendar-to-trading-day idiom
+    ``backtest.walkforward.select_non_overlapping`` already uses for the same kind of
+    approximation. This only needs to be right enough to size a CV gap or a HAC lag, not to
+    schedule a real calendar -- it under-counts for sub-weekly offsets (``"B"``, ``"D"``),
+    which already skip weekends themselves, but this project's realistic choices are
+    weekly-through-quarterly, so that case is documented rather than special-cased.
+    """
+    dates = pd.date_range(pd.Timestamp("2000-01-01"), periods=sample_periods + 1, freq=freq)
+    gaps = np.diff(dates).astype("timedelta64[D]").astype(float)
+    return float(np.median(gaps)) * 252.0 / 365.25
+
+
+def min_gap_periods(horizon_days: int, freq: str = "ME") -> int:
+    """The smallest ``gap_periods`` that keeps a ``horizon_days``-long forward-return
+    window from spanning a train/test fold boundary, per :func:`date_grouped_gapped_splits`
+    's own rule (``gap_periods >= ceil(horizon_days / days_per_sampling_period)``)."""
+    return max(1, math.ceil(horizon_days / approx_trading_days_per_period(freq)))

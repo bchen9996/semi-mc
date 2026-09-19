@@ -41,17 +41,22 @@ RELATIVE_SIGNAL_COLUMNS = ["momentum", "reversal", "relative_strength", "earning
 
 
 def monthly_origins(
-    trading_days: pd.DatetimeIndex, start: pd.Timestamp, end: pd.Timestamp | None = None
+    trading_days: pd.DatetimeIndex,
+    start: pd.Timestamp,
+    end: pd.Timestamp | None = None,
+    freq: str = "ME",
 ) -> pd.DatetimeIndex:
-    """Month-end trading days between ``start`` and ``end`` -- the addendum's monthly
-    sampling grid, reusing the same "actual trading day, not a synthetic period end" rule
-    the backtester's own origin generator uses."""
+    """Real trading days, one per ``freq`` period, between ``start`` and ``end`` -- reusing
+    the same "actual trading day, not a synthetic period end" rule the backtester's own
+    origin generator (``backtest.walkforward.generate_origins``) uses. Monthly (``"ME"``)
+    by default, matching the addendum's own sampling grid; any pandas offset alias works
+    (e.g. ``"W-FRI"`` for weekly), for a higher-frequency search over the same signals."""
     index = pd.DatetimeIndex(trading_days).sort_values()
     lower, upper = pd.Timestamp(start).normalize(), pd.Timestamp(end or index.max()).normalize()
     window = index[(index >= lower) & (index <= upper)]
     if len(window) == 0:
         return pd.DatetimeIndex([], name="origin")
-    grouped = pd.Series(window, index=window).groupby(pd.Grouper(freq="ME")).last()
+    grouped = pd.Series(window, index=window).groupby(pd.Grouper(freq=freq)).last()
     return pd.DatetimeIndex(grouped.dropna().to_numpy(), name="origin")
 
 
@@ -67,15 +72,17 @@ def build_full_panel(
     momentum_skip_days: int = 21,
     relative_strength_lookback_days: int = 126,
     earnings_drift_active_days: int = 60,
+    origin_freq: str = "ME",
 ) -> pd.DataFrame:
-    """One row per (origin, ticker) across every monthly origin in range, cross-sectionally
-    standardized.
+    """One row per (origin, ticker) across every origin in range, cross-sectionally
+    standardized. Origins are sampled monthly by default (``origin_freq="ME"``); any
+    pandas offset alias works.
 
     This is deliberately the *only* place ``build_regression_row`` is called in a loop --
     both the evaluation command and the live tilt fit call this, so they can never drift
     out of sync on how a row is built.
     """
-    origins = monthly_origins(market.prices.index, start, end)
+    origins = monthly_origins(market.prices.index, start, end, freq=origin_freq)
     market_ticker = market.config.benchmarks.market
     sector_ticker = market.config.benchmarks.sector
     rows = []

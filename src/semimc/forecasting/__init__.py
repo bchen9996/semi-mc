@@ -26,7 +26,12 @@ from .combine import (
     simple_average_spec,
     single_or_combined_spec,
 )
-from .cv import date_grouped_gapped_splits, rows_for_dates
+from .cv import (
+    approx_trading_days_per_period,
+    date_grouped_gapped_splits,
+    min_gap_periods,
+    rows_for_dates,
+)
 from .evaluate import (
     clark_west_statistic,
     oos_r_squared,
@@ -65,6 +70,7 @@ __all__ = [
     "QuantileRegressionModel",
     "ShrunkLinearModel",
     "SimpleAverageModel",
+    "approx_trading_days_per_period",
     "block_bootstrap_date_indices",
     "bootstrap_panel_tilt_draws",
     "bootstrap_sector_tilt_draws",
@@ -84,6 +90,7 @@ __all__ = [
     "fit_simple_average",
     "industry_yoy_growth",
     "market_environment_split",
+    "min_gap_periods",
     "newey_west_mean",
     "oos_r_squared",
     "pinball_losses",

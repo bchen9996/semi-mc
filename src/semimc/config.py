@@ -231,6 +231,11 @@ class SignalsConfig(_Base):
     min_regression_observations: int = Field(60, gt=0)
     cv_n_folds: int = Field(5, ge=2)
     cv_gap_periods: int = Field(1, ge=1)
+    # Pandas offset alias for panel origins ("ME", "W-FRI", ...). Mirrors
+    # BacktestConfig.origin_frequency exactly -- same untyped str, same reliance on pandas
+    # itself to reject a bad alias. Monthly by default; a shorter/higher-frequency
+    # evaluation is opt-in via --set, never a changed default.
+    origin_frequency: str = "ME"
     ridge_lasso_alphas: list[float] = Field(
         default_factory=lambda: [0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0]
     )
