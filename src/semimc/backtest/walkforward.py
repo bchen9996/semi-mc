@@ -28,33 +28,22 @@ import pandas as pd
 
 from ..analytics.risk import conditional_value_at_risk, value_at_risk
 from ..analytics.scoring import coverage, crps_from_samples, pit_value
-from ..data import MarketData
-from ..models import build_model
-from ..models.base import BaseReturnModel
+from ..data import LookAheadError, MarketData, assert_point_in_time
+from ..engine.runner import fit_at_origin
 
 LOGGER = logging.getLogger(__name__)
 
-
-class LookAheadError(AssertionError):
-    """Raised when data dated after the forecast origin reaches a fit."""
-
-
-def assert_point_in_time(frame: pd.DataFrame | pd.Series, as_of: pd.Timestamp, label: str) -> None:
-    """Fail loudly if ``frame`` contains any observation after ``as_of``.
-
-    The backtester's central guarantee. Called on the training panel, on the benchmark
-    returns inside the fit context, and on the earnings calendar, immediately before every
-    fit -- so a leak has to get past an explicit assertion rather than merely past a
-    convention.
-    """
-    if len(frame) == 0:
-        return
-    latest = pd.Timestamp(np.max(frame.index.to_numpy())).normalize()
-    stamp = pd.Timestamp(as_of).normalize()
-    if latest > stamp:
-        raise LookAheadError(
-            f"{label} contains data dated {latest.date()}, after the forecast origin {stamp.date()}"
-        )
+# LookAheadError/assert_point_in_time now live in data/__init__.py (next to the
+# training_window/context cuts they guard) and are re-exported here so existing imports
+# from this module -- e.g. tests/test_backtest.py -- keep working unchanged.
+__all__ = [
+    "BacktestResult",
+    "LookAheadError",
+    "assert_point_in_time",
+    "generate_origins",
+    "run_walk_forward",
+    "select_non_overlapping",
+]
 
 
 def generate_origins(
@@ -240,21 +229,6 @@ def run_walk_forward(
             if not outcomes:
                 continue
 
-            try:
-                training = market.training_window([ticker], origin)
-            except (ValueError, KeyError) as exc:
-                failures.append(
-                    {
-                        "origin": origin,
-                        "ticker": ticker,
-                        "model": "-",
-                        "stage": "training_window",
-                        "error": str(exc),
-                    }
-                )
-                continue
-            assert_point_in_time(training, origin, f"training data for {ticker}")
-
             for model_index, model_name in enumerate(model_names):
                 stream = np.random.SeedSequence(
                     entropy=seed_sequence.entropy,
@@ -263,8 +237,9 @@ def run_walk_forward(
                 rng = np.random.default_rng(stream)
 
                 try:
-                    model: BaseReturnModel = build_model(model_name, config, market=market)
-                    model.fit(training, context)
+                    model, _training = fit_at_origin(
+                        market, config, model_name, [ticker], origin, context
+                    )
                     fit_counts[model_name] += 1
                 except Exception as exc:  # noqa: BLE001 - one bad cell must not end the run
                     failures.append(

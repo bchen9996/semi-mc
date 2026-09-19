@@ -10,12 +10,15 @@ fan-charted keep their full price paths, in float32.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 
-from ..models.base import ReturnModel
+from ..data import MarketData, assert_point_in_time
+from ..models import build_model
+from ..models.base import BaseReturnModel, FitContext, ReturnModel
 
 LOGGER = logging.getLogger(__name__)
 
@@ -74,6 +77,44 @@ class SimulationResult:
     def terminal_for(self, ticker: str) -> np.ndarray:
         """Terminal log returns for one ticker."""
         return self.terminal_log_returns[:, self.tickers.index(ticker)]
+
+
+def fit_at_origin(
+    market: MarketData,
+    config,  # noqa: ANN001
+    model_name: str,
+    tickers: list[str],
+    as_of: pd.Timestamp,
+    context: FitContext,
+    pre_fit: Callable[[BaseReturnModel], None] | None = None,
+) -> tuple[BaseReturnModel, pd.DataFrame]:
+    """Cut the training window and fit one model at one origin.
+
+    The shared step between the backtester, live decisions, and the paper-trading
+    strategy module: given an already-built ``context`` (built separately, since backtest
+    vs. live differ in ``for_backtest`` and tilt attachment), cut ``tickers``' training
+    history ending at ``as_of`` and fit ``model_name`` on it. Includes the point-in-time
+    guard so every caller gets it, not just the backtester.
+
+    Parameters
+    ----------
+    pre_fit
+        Optional hook called on the unfitted model before ``.fit()`` -- e.g.
+        ``simulate --implied-vol`` overriding GBM's volatility ahead of fitting.
+
+    Returns
+    -------
+    tuple[BaseReturnModel, pd.DataFrame]
+        The fitted model and the training panel used, so a caller that also needs the
+        panel (e.g. to record its date range in a run manifest) doesn't cut it twice.
+    """
+    training = market.training_window(tickers, as_of)
+    assert_point_in_time(training, as_of, f"training data for {tickers}")
+    model = build_model(model_name, config, market=market)
+    if pre_fit is not None:
+        pre_fit(model)
+    fitted = model.fit(training, context)
+    return fitted, training
 
 
 def portfolio_value_paths(

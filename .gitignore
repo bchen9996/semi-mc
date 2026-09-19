@@ -2,6 +2,10 @@
 runs/
 data_cache/
 data_csv/
+# ledger/ (paper.ledger_path) is deliberately NOT listed here -- it is the paper-trading
+# audit trail and must be git-tracked so it survives a stateless CI runner between
+# scheduled jobs (live/ledger.py, Phase 5). Unlike runs/, this is real state, not
+# regenerable output.
 # The earnings calendar and supply_chain_links.csv are user-edited input worth keeping in
 # history; the risk-free series and the industry-cycle series are reproducible downloads,
 # so they are not.
@@ -16,6 +20,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .ipynb_checkpoints/
+
+# Secrets (semis_paper_trading_brief.md). .env.example is the checked-in placeholder;
+# .env itself must never be committed. Rotate any key that ever gets committed anyway.
+.env
 
 # OS
 .DS_Store

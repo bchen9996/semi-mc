@@ -174,6 +174,15 @@ compared to a closed form, the closed form is written out in the test.
   `stats.sandwich_covariance`) imports fine on its own — import those directly.
   `tests/test_imports.py` runs every module in a fresh subprocess and would catch a
   regression here.
+- **`uv run semimc ...` can fail with `Failed to spawn: semimc ... An Application Control
+  policy has blocked this file. (os error 4551)`** on this machine -- the same Windows
+  Application Control mechanism as the `statsmodels.api` gotcha above, this time blocking
+  the compiled console-script entry point (`.venv/Scripts/semimc.exe`) itself rather than
+  a compiled extension. Confirmed persistent (not a one-off transient flag), first seen
+  2026-09-19. Workaround: `uv run python -m semimc.cli ...` instead of `uv run semimc
+  ...` -- runs the identical `typer` app without going through the blocked `.exe`.
+  Unaffected: the GitHub Actions workflow (`.github/workflows/paper_trading.yml`), which
+  runs on Linux (`ubuntu-latest`), where this Windows-only policy doesn't exist.
 - **A demeaned series divided by a time-varying scale is not zero-mean.** HAR's
   standardized residuals looked demeaned (numerator was `x - x.mean()`) but dividing by a
   scale that correlates with return sign reintroduces a small mean, and bootstrapping that

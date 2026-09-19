@@ -145,6 +145,7 @@ signals:
   min_regression_observations: 60
   cv_n_folds: 5
   cv_gap_periods: 1   # fold gap, in sampling periods, at least the forecast horizon needs
+  origin_frequency: ME   # pandas offset alias; a shorter/higher-frequency search is --set-only
   ridge_lasso_alphas: [0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0]   # selected by pre-holdout CV
   quantile_levels: [0.05, 0.25, 0.5, 0.75, 0.95]
 
@@ -184,3 +185,32 @@ reporting:
   fan_percentiles: [5, 25, 50, 75, 95]
   figure_dpi: 120
   runs_dir: runs
+
+# semis_paper_trading_brief.md. Scoped for now to S0 (equal-weight control) and S3
+# (vol-targeted control) -- S1/S2 have no code path yet, since the addendum's Phase 4B
+# holdout came back null (research_log.md, 2026-09-16) and the brief's own rule is that
+# paper trading can't rescue a signal that failed its holdout.
+paper:
+  sleeves:
+    s0: {trading_enabled: false, rebalance_frequency: ME}   # every sleeve starts disabled, always, on purpose
+    s3: {trading_enabled: false, rebalance_frequency: ME}
+  execution:
+    start_time: "10:00"
+    cutoff_time: "15:30"
+    timezone: America/New_York
+    collar_bps: 20            # marketable limit orders collared this far beyond the quote
+    reprice_interval_minutes: 15
+  reconciliation:
+    position_tolerance_shares: 0.000001
+    cash_tolerance_usd: 1.0
+  evaluation:
+    n_bootstrap: 2000
+    block_length_days: 21
+  minimum_trade_pct: 0.005    # 0.5% of sleeve equity
+  s3_target_vol: 0.25         # 25% annualized, no leverage
+  s3_max_leverage: 1.0
+  sector_tilt_strength: 0.15  # T4 shadow overlay: max gross-exposure tilt, capped by s3_max_leverage
+  review_months: [3, 6, 12]
+  registered_accounts: []     # paper-only guard: empty until an account is deliberately added
+  kill_switch_path: runs/paper/KILL_SWITCH   # its mere existence halts all trading
+  ledger_path: ledger/paper.sqlite3   # git-tracked, not under runs/ -- must survive a stateless CI runner

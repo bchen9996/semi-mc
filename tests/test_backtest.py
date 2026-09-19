@@ -375,6 +375,50 @@ def test_failed_cells_are_recorded_not_swallowed(market, config):
         assert {"origin", "ticker", "model", "stage", "error"}.issubset(result.failures.columns)
 
 
+def test_fit_at_origin_extraction_did_not_change_scored_output(market, config):
+    """Golden-output pin for the ``engine.runner.fit_at_origin`` extraction.
+
+    Paper-trading Phase 0 pulled ``context -> training_window -> build_model -> fit`` out
+    of this loop into ``fit_at_origin`` (shared with ``cli.py`` and, later,
+    ``strategy/decide.py`` -- the brief's "one strategy module shared by the backtest, the
+    shadow book, and the live jobs" requirement). Before writing this test, the pre- and
+    post-refactor code were run on identical fixtures with a fixed seed and diffed cell by
+    cell: ``rows`` came back byte-for-byte identical; only ``failures`` bookkeeping changed
+    (a whole-ticker ``training_window`` failure is now attributed per model instead of once
+    with ``model="-"``, which no test asserted on). This test pins the verified-identical
+    values down so a future change to this pipeline gets caught the same way.
+    """
+    result = run_walk_forward(
+        market=market,
+        config=config,
+        models=["gbm", "bootstrap"],
+        tickers=["NVDA"],
+        horizons=[21],
+        start=pd.Timestamp("2020-01-01"),
+        end=pd.Timestamp("2020-06-01"),
+        n_paths=200,
+        seed=7,
+        progress=False,
+    )
+    assert len(result.rows) == 12
+
+    first = result.rows[
+        (result.rows["origin"] == pd.Timestamp("2020-01-31")) & (result.rows["model"] == "gbm")
+    ].iloc[0]
+    assert first["median_forecast"] == pytest.approx(-0.000049, abs=1e-6)
+    assert first["crps"] == pytest.approx(0.055244, abs=1e-6)
+    assert first["pit"] == pytest.approx(0.040, abs=1e-6)
+
+    crash = result.rows[
+        (result.rows["origin"] == pd.Timestamp("2020-04-30"))
+        & (result.rows["model"] == "bootstrap")
+    ].iloc[0]
+    assert crash["realized_log_return"] == pytest.approx(-0.351245, abs=1e-6)
+    assert crash["median_forecast"] == pytest.approx(0.000005, abs=1e-6)
+    assert crash["crps"] == pytest.approx(0.263964, abs=1e-6)
+    assert bool(crash["exception_99"]) is True
+
+
 def test_pit_diagnosis_separates_centre_from_width(backtest_result):
     """The diagnosis must name *how* a forecast misses, not just that it does."""
     from semimc.backtest.scorecard import diagnose_pit

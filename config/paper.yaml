@@ -1,0 +1,185 @@
+# Paper-trading configuration (semis_paper_trading_brief.md). Load with
+# `--config config/paper.yaml`. Identical to config/default.yaml except
+# `reporting.runs_dir`, which keeps paper-trading run folders (decisions, shadow-book
+# runs, reports) out of the research runs/ directory. Every sleeve starts disabled
+# (`paper.sleeves.*.trading_enabled: false`) -- turning one on is a deliberate `--set`
+# override or an edit here, never a default.
+
+universe:
+  groups:
+    compute_fabless: [NVDA, AMD, AVGO, QCOM, MRVL]
+    foundry_idm: [TSM, INTC]
+    memory: [MU]
+    equipment: [ASML, AMAT, LRCX, KLAC]
+    analog: [TXN, ADI]
+
+benchmarks:
+  market: SPY
+  sector: SOXX
+
+horizons: [21, 63, 126, 252]
+
+simulation:
+  n_paths: 10000
+  seed: 42
+  chunk_size: 2000
+  dtype: float32
+  trading_days_per_year: 252
+
+fit:
+  window_years: 5
+  min_observations: 750
+  vol_estimator: realized
+  vol_window_days: 252
+  ewma_lambda: 0.94
+
+drift:
+  policy: shrunk_historical
+  equity_risk_premium: 0.05
+  risk_free_rate: 0.042
+  shrinkage_weight: 0.25
+  manual_annual_return: {}
+  beta_benchmark: market
+
+risk:
+  var_levels: [0.95, 0.99]
+  loss_threshold: 0.20
+
+data:
+  provider: yfinance
+  cache_dir: data_cache
+  csv_dir: data_csv
+  start: 2000-01-01
+  max_staleness_days: 1
+  price_field: adj_close
+  outlier_sigma: 8.0
+  max_gap_days: 5
+  earnings_calendar: config/earnings_calendar.csv
+
+backtest:
+  origin_frequency: ME
+  n_paths: 2000
+  start: 2012-01-01
+  models: [gbm, bootstrap, garch_t]
+  baseline: gbm
+  coverage_levels: [0.50, 0.90]
+  pit_bins: 10
+  cache_fits: true
+  risk_free_series: config/risk_free_3m.csv
+  n_dependence_bootstraps: 2000
+
+models:
+  bootstrap:
+    block_length: auto
+  garch_t:
+    p: 1
+    o: 1
+    q: 1
+    rescale_factor: 100.0
+  earnings_jumps:
+    base_model: garch_t
+    min_earnings_observations: 8
+    strip_from_training: true
+  factor:
+    idio_model: garch_t
+  fhs:
+    block_length: 1
+  merton:
+    max_jumps_per_day: 3
+    exclude_earnings_days: true
+  har:
+    horizons: [1, 21, 63, 126, 252]
+    estimator: garman_klass
+    innovations: bootstrap
+    exclude_earnings_variance: true
+  regime:
+    search_reps: 20
+    switching_mean: false
+    min_expected_duration_days: 15.0
+  blend:
+    components: [gbm, garch_t]   # S3's vol-target forecast comes from this model
+    weights: {}
+
+signals:
+  horizons: [21, 63]
+  holdout_months: 24
+  holdout_headline_horizon: 21
+  shrinkage_lambda: 0.5
+  tilt_cap_annual: 0.10
+  n_coefficient_bootstraps: 500
+  momentum_lookback_days: 252
+  momentum_skip_days: 21
+  relative_strength_lookback_days: 126
+  earnings_drift_active_days: 60
+  industry_series_id: IPG3344S
+  industry_publication_lag_days: 45
+  customer_tickers: [AAPL, MSFT, GOOGL, AMZN, META, TSLA, DELL, HPQ, CSCO]
+  supply_chain_links: data/external/supply_chain_links.csv
+  external_dir: data/external
+  driscoll_kraay_lag_per_horizon: 1.0
+  min_regression_observations: 60
+  cv_n_folds: 5
+  cv_gap_periods: 1
+  origin_frequency: ME
+  ridge_lasso_alphas: [0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0]
+  quantile_levels: [0.05, 0.25, 0.5, 0.75, 0.95]
+
+portfolio:
+  weights: {}
+  rebalance: none
+
+options:
+  moneyness_band: 0.10
+  max_expiries: 6
+  min_quotes_per_expiry: 2
+  dividend_yield: 0.0
+
+scenarios:
+  sector_shock_25:
+    kind: sector_shock
+    shock: -0.25
+  vol_spike_2x_21d:
+    kind: vol_multiplier
+    multiplier: 2.0
+    days: 21
+  export_control_china:
+    kind: custom_shock
+    shocks: {NVDA: -0.15, AMD: -0.12, AMAT: -0.18, LRCX: -0.18, KLAC: -0.15, ASML: -0.10}
+  replay_covid_2020:
+    kind: historical_replay
+    start: 2020-02-19
+    end: 2020-03-23
+  replay_2022_derating:
+    kind: historical_replay
+    start: 2022-01-03
+    end: 2022-10-14
+
+reporting:
+  fan_percentiles: [5, 25, 50, 75, 95]
+  figure_dpi: 120
+  runs_dir: runs/paper   # kept separate from research runs/
+
+paper:
+  sleeves:
+    s0: {trading_enabled: false, rebalance_frequency: ME}
+    s3: {trading_enabled: false, rebalance_frequency: ME}
+  execution:
+    start_time: "10:00"
+    cutoff_time: "15:30"
+    timezone: America/New_York
+    collar_bps: 20
+    reprice_interval_minutes: 15
+  reconciliation:
+    position_tolerance_shares: 0.000001
+    cash_tolerance_usd: 1.0
+  evaluation:
+    n_bootstrap: 2000
+    block_length_days: 21
+  minimum_trade_pct: 0.005
+  s3_target_vol: 0.25
+  s3_max_leverage: 1.0
+  sector_tilt_strength: 0.15   # T4 shadow overlay: max gross-exposure tilt
+  review_months: [3, 6, 12]
+  registered_accounts: []   # paper-only guard: add a paper account number here to enable it
+  kill_switch_path: runs/paper/KILL_SWITCH
+  ledger_path: ledger/paper.sqlite3

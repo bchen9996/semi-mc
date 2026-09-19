@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+import numpy as np
 import pandas as pd
 
 from ..context import FitContext
@@ -25,12 +26,36 @@ LOGGER = logging.getLogger(__name__)
 
 __all__ = [
     "EarningsCalendar",
+    "LookAheadError",
     "MarketData",
     "PriceCache",
     "RiskFreeCurve",
+    "assert_point_in_time",
     "load_market_data",
     "refresh_cache",
 ]
+
+
+class LookAheadError(AssertionError):
+    """Raised when data dated after the forecast origin reaches a fit."""
+
+
+def assert_point_in_time(frame: pd.DataFrame | pd.Series, as_of: pd.Timestamp, label: str) -> None:
+    """Fail loudly if ``frame`` contains any observation after ``as_of``.
+
+    The point-in-time guarantee's central check. Lives next to :meth:`MarketData.
+    training_window` and :meth:`MarketData.context` -- the two places a fit window is cut
+    -- so every caller of either one, not just the backtester, can guard against a leak
+    with the same assertion rather than a convention.
+    """
+    if len(frame) == 0:
+        return
+    latest = pd.Timestamp(np.max(frame.index.to_numpy())).normalize()
+    stamp = pd.Timestamp(as_of).normalize()
+    if latest > stamp:
+        raise LookAheadError(
+            f"{label} contains data dated {latest.date()}, after the forecast origin {stamp.date()}"
+        )
 
 
 @dataclass

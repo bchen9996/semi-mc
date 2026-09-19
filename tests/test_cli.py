@@ -314,6 +314,76 @@ def test_signals_holdout_appends_to_the_research_log(workspace):
         assert "holdout evaluation" in log_path.read_text(encoding="utf-8").lower()
 
 
+def test_signals_flags_a_gap_period_too_small_for_the_horizon_and_frequency(workspace):
+    result = invoke(
+        [
+            "signals",
+            "--horizon",
+            "5",
+            "--set",
+            "signals.origin_frequency=W-FRI",
+            "--set",
+            "signals.min_regression_observations=10",
+            "--set",
+            "signals.cv_n_folds=2",
+            "--set",
+            "backtest.start=2016-01-01",
+        ],
+        workspace,
+    )
+    assert "cv_gap_periods=1 is smaller than the 2 needed" in result.output
+
+
+def _holdout_args(log_path: Path, holdout_months: int, confirm: bool = False) -> list[str]:
+    args = [
+        "signals",
+        "--horizon",
+        "21",
+        "--holdout",
+        "--set",
+        "signals.min_regression_observations=10",
+        "--set",
+        "signals.cv_n_folds=2",
+        "--set",
+        f"signals.holdout_months={holdout_months}",
+        "--set",
+        "backtest.start=2016-01-01",
+        "--set",
+        f"signals.research_log={log_path.as_posix()}",
+    ]
+    if confirm:
+        args.append("--confirm-new-holdout-window")
+    return args
+
+
+def test_signals_holdout_refuses_an_identical_rerun(workspace):
+    log_path = workspace / "research_log.md"
+    first = runner.invoke(app, _holdout_args(log_path, 12) + base_overrides(workspace))
+    assert first.exit_code == 0
+    assert "one-time holdout result" in first.output.lower(), first.output
+
+    second = runner.invoke(app, _holdout_args(log_path, 12) + base_overrides(workspace))
+    assert second.exit_code != 0
+    assert "already records a holdout window" in second.output
+    assert "refusing to re-spend it" in second.output.lower()
+
+
+def test_signals_holdout_requires_confirmation_for_a_later_but_overlapping_window(workspace):
+    log_path = workspace / "research_log.md"
+    first = runner.invoke(app, _holdout_args(log_path, 12) + base_overrides(workspace))
+    assert first.exit_code == 0
+
+    unconfirmed = runner.invoke(app, _holdout_args(log_path, 6) + base_overrides(workspace))
+    assert unconfirmed.exit_code != 0
+    assert "--confirm-new-holdout-window" in unconfirmed.output
+
+    confirmed = runner.invoke(
+        app, _holdout_args(log_path, 6, confirm=True) + base_overrides(workspace)
+    )
+    assert confirmed.exit_code == 0
+    assert "one-time holdout result" in confirmed.output.lower()
+
+
 def test_simulate_with_tilt_applies_or_gracefully_skips(workspace):
     """--tilt must never crash a run, whether or not enough data exists to fit one."""
     result = invoke(
@@ -426,3 +496,172 @@ def test_report_on_a_backtest_run(workspace):
     html = (latest_run(workspace) / "report.html").read_text(encoding="utf-8")
     assert "Findings" in html
     assert "scorecard" in html.lower()
+
+
+# ---------------------------------------------------------------------------------------
+# paper decide / execute / mark / report (Phase 5)
+# ---------------------------------------------------------------------------------------
+
+
+def _paper_overrides(tmp_path: Path) -> list[str]:
+    return base_overrides(tmp_path) + [
+        "--set",
+        f"paper.ledger_path={(tmp_path / 'ledger.sqlite3').as_posix()}",
+    ]
+
+
+def _tradeable_paper_overrides(
+    tmp_path: Path, account_number: str = "FAKE-PAPER-0001"
+) -> list[str]:
+    return _paper_overrides(tmp_path) + [
+        "--set",
+        "paper.sleeves.s0.trading_enabled=true",
+        "--set",
+        f"paper.registered_accounts=[{account_number}]",
+    ]
+
+
+@pytest.fixture
+def fake_alpaca_broker(monkeypatch):
+    """``paper execute``/``paper mark`` construct ``AlpacaPaperBroker.from_env()`` --
+    patched here to a ``FakeBroker`` instance so the CLI wiring is exercised end to end
+    with no network and no credentials, the same boundary-mocking approach
+    ``tests/test_alpaca_broker.py`` uses for the SDK itself."""
+    from semimc.execution.fake_broker import FakeBroker
+
+    broker = FakeBroker(account_number="FAKE-PAPER-0001")
+    monkeypatch.setattr(
+        "semimc.execution.alpaca_broker.AlpacaPaperBroker.from_env",
+        classmethod(lambda cls: broker),
+    )
+    return broker
+
+
+def test_paper_decide_freezes_a_decision(workspace):
+    result = runner.invoke(
+        app,
+        ["paper", "decide", "--sleeve", "s0", "--as-of", "2021-06-01"]
+        + _paper_overrides(workspace),
+    )
+    assert result.exit_code == 0, result.output
+    assert "Decided 's0'" in result.output
+
+
+def test_paper_decide_rejects_an_unknown_sleeve(workspace):
+    result = runner.invoke(
+        app, ["paper", "decide", "--sleeve", "bogus"] + _paper_overrides(workspace)
+    )
+    assert result.exit_code != 0
+
+
+def test_paper_decide_skips_a_second_call_in_the_same_period(workspace):
+    overrides = _paper_overrides(workspace)
+    first = runner.invoke(
+        app, ["paper", "decide", "--sleeve", "s0", "--as-of", "2021-06-01"] + overrides
+    )
+    assert first.exit_code == 0, first.output
+    second = runner.invoke(
+        app, ["paper", "decide", "--sleeve", "s0", "--as-of", "2021-06-15"] + overrides
+    )
+    assert second.exit_code == 0, second.output
+    assert "Skipped" in second.output
+
+
+def test_paper_execute_declines_cleanly_when_trading_is_disabled(workspace, fake_alpaca_broker):
+    overrides = _paper_overrides(workspace)
+    decide = runner.invoke(
+        app, ["paper", "decide", "--sleeve", "s0", "--as-of", "2021-06-01"] + overrides
+    )
+    assert decide.exit_code == 0, decide.output
+
+    result = runner.invoke(
+        app, ["paper", "execute", "--sleeve", "s0", "--as-of", "2021-06-01"] + overrides
+    )
+    assert result.exit_code == 0, result.output
+    assert "Declined at pretrade" in result.output
+
+
+def test_paper_execute_dry_run_reports_intended_orders(workspace, fake_alpaca_broker):
+    overrides = _tradeable_paper_overrides(workspace)
+    decide = runner.invoke(
+        app, ["paper", "decide", "--sleeve", "s0", "--as-of", "2021-06-01"] + overrides
+    )
+    assert decide.exit_code == 0, decide.output
+
+    result = runner.invoke(
+        app,
+        ["paper", "execute", "--sleeve", "s0", "--as-of", "2021-06-01", "--dry-run"] + overrides,
+    )
+    assert result.exit_code == 0, result.output
+    assert "Would submit" in result.output
+    assert fake_alpaca_broker.list_positions() == []  # dry-run never touches the broker
+
+
+def test_paper_mark_runs_cleanly_with_no_open_orders(tmp_path, fake_alpaca_broker):
+    result = runner.invoke(app, ["paper", "mark", "--sleeve", "s0"] + _paper_overrides(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "Reconciliation: ok" in result.output
+
+
+def test_paper_report_runs_with_no_history(tmp_path):
+    result = runner.invoke(app, ["paper", "report", "--sleeve", "s0"] + _paper_overrides(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "No snapshot recorded yet." in result.output
+
+
+def _seed_snapshots(ledger_path: Path, sleeve: str, dates, equities) -> None:
+    from semimc.live.ledger import Ledger
+
+    ledger = Ledger(ledger_path)
+    for date, equity in zip(dates, equities, strict=True):
+        ledger.record_snapshot(sleeve, date, equity=equity, cash=equity * 0.1, positions={})
+    ledger.close()
+
+
+def test_paper_evaluate_t2_caveats_a_short_overlapping_history(workspace):
+    overrides = _paper_overrides(workspace)
+    ledger_path = workspace / "ledger.sqlite3"
+    dates = pd.date_range("2026-01-05", periods=10, freq="B")
+    _seed_snapshots(ledger_path, "s0", dates, [100_000.0 * 1.001**i for i in range(10)])
+    _seed_snapshots(ledger_path, "s3", dates, [100_000.0 * 1.0005**i for i in range(10)])
+
+    result = runner.invoke(app, ["paper", "evaluate", "--thesis", "t2"] + overrides)
+    assert result.exit_code == 0, result.output
+    assert "CAVEAT" in result.output
+    assert "overlapping days: 9" in result.output  # one lost to pct_change()
+
+
+def test_paper_evaluate_t3_replays_the_shadow_sleeve(workspace):
+    from semimc.live.ledger import Ledger
+    from semimc.strategy.decide import Decision
+
+    overrides = _paper_overrides(workspace)
+    ledger_path = workspace / "ledger.sqlite3"
+    dates = pd.date_range("2021-06-01", periods=5, freq="B")
+    _seed_snapshots(ledger_path, "s3", dates, [100_000.0 * 1.0005**i for i in range(5)])
+
+    ledger = Ledger(ledger_path)
+    decision = Decision(
+        as_of=dates[0], sleeve="vol_twin_shadow", weights=pd.Series({"NVDA": 0.5, "AMD": 0.5})
+    )
+    ledger.record_decision(decision)
+    ledger.close()
+
+    result = runner.invoke(app, ["paper", "evaluate", "--thesis", "t3"] + overrides)
+    assert result.exit_code == 0, result.output
+    assert "vol_twin_shadow" in result.output
+
+
+def test_paper_evaluate_t5_reports_no_fills_cleanly(tmp_path):
+    result = runner.invoke(
+        app, ["paper", "evaluate", "--thesis", "t5"] + _paper_overrides(tmp_path)
+    )
+    assert result.exit_code == 0, result.output
+    assert "No fills recorded yet" in result.output
+
+
+def test_paper_evaluate_rejects_an_unknown_thesis(tmp_path):
+    result = runner.invoke(
+        app, ["paper", "evaluate", "--thesis", "t99"] + _paper_overrides(tmp_path)
+    )
+    assert result.exit_code != 0

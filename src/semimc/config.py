@@ -260,6 +260,87 @@ class OptionsConfig(_Base):
     dividend_yield: float = Field(0.0, ge=0, le=1)  # continuous yield used in Black-Scholes
 
 
+class PaperSleeveConfig(_Base):
+    """One sleeve's live-trading switch. Defaults off, per the paper-trading brief's own
+    rule: every sleeve starts disabled and is turned on deliberately, never by default."""
+
+    trading_enabled: bool = False
+    # Pandas offset alias, same convention as BacktestConfig.origin_frequency/
+    # SignalsConfig.origin_frequency. live/decide.py::run_decide uses this to no-op a
+    # decide call that lands inside a period this sleeve has already decided, so a daily
+    # schedule can safely drive a monthly-rebalance sleeve without cron needing to land on
+    # exactly the right trading day.
+    rebalance_frequency: str = "ME"
+
+
+class PaperExecutionConfig(_Base):
+    start_time: dt.time = dt.time(10, 0)
+    cutoff_time: dt.time = dt.time(15, 30)
+    timezone: str = "America/New_York"
+    collar_bps: float = Field(20.0, ge=0)
+    reprice_interval_minutes: int = Field(15, gt=0)
+
+
+class PaperReconciliationConfig(_Base):
+    position_tolerance_shares: float = Field(1e-6, ge=0)
+    cash_tolerance_usd: float = Field(1.0, ge=0)
+
+
+class PaperEvaluationConfig(_Base):
+    """`analytics/paper_evaluation.py` (Phase 6, T2/T3): the paired block-bootstrap this
+    project uses everywhere daily observations are serially dependent -- same reasoning as
+    `signals.n_coefficient_bootstraps`/`backtest.n_dependence_bootstraps`, a separate
+    section since it resamples calendar-day blocks of a single equity curve, not
+    cross-sectional origins."""
+
+    n_bootstrap: int = Field(2000, gt=0)
+    # ~1 trading month -- the same cadence this project already treats as a natural unit
+    # elsewhere (origin_frequency's monthly default), long enough to catch a few days of
+    # serial correlation in daily returns without shrinking the effective sample size too
+    # far for the history paper trading will realistically have in its first year.
+    block_length_days: int = Field(21, gt=0)
+
+
+class PaperConfig(_Base):
+    """Paper-trading defaults (`semis_paper_trading_brief.md`).
+
+    Scoped for now to what S0 (equal-weight control) and S3 (vol-targeted control) need --
+    the brief's S1/S2 sleeves have no code path yet: the addendum's Phase 4B holdout came
+    back null (research_log.md, 2026-09-16), and "paper trading can't rescue a signal that
+    failed it" is the brief's own rule. Extending this schema for S1/S2 is future work, not
+    a gap in this one.
+    """
+
+    sleeves: dict[str, PaperSleeveConfig] = Field(
+        default_factory=lambda: {"s0": PaperSleeveConfig(), "s3": PaperSleeveConfig()}
+    )
+    execution: PaperExecutionConfig = Field(default_factory=PaperExecutionConfig)
+    reconciliation: PaperReconciliationConfig = Field(default_factory=PaperReconciliationConfig)
+    evaluation: PaperEvaluationConfig = Field(default_factory=PaperEvaluationConfig)
+    minimum_trade_pct: float = Field(0.005, ge=0, lt=1)
+    s3_target_vol: float = Field(0.25, gt=0)
+    s3_max_leverage: float = Field(1.0, gt=0)
+    # T4 (shadow sector-timing, strategy/decide.py::decide_sector_shadow): fraction of
+    # gross exposure the sector-tilt regression's forecast can add or remove at its most
+    # extreme (a one-residual-standard-deviation forecast), capped by s3_max_leverage the
+    # same way S3 is. Shadow-only -- no sleeve config exists to make this tradeable.
+    sector_tilt_strength: float = Field(0.15, ge=0, le=1)
+    review_months: list[int] = Field(default_factory=lambda: [3, 6, 12])
+    # Paper-only guard: at startup, the account number in use must be in this list. Empty
+    # by default -- nothing is a registered trading account until deliberately added.
+    registered_accounts: list[str] = Field(default_factory=list)
+    # execution/pretrade.py::check_kill_switch. The file's mere existence halts all
+    # trading; resolved like every other config-relative path (Config.path()) rather than
+    # hand-rolled off project_root -- see CLAUDE.md's research_log gotcha for why.
+    kill_switch_path: str = "runs/paper/KILL_SWITCH"
+    # live/ledger.py::Ledger. Deliberately NOT under runs/ (reporting.runs_dir) -- runs/ is
+    # entirely gitignored and git cannot re-include a file inside an excluded parent
+    # directory, but the ledger is the one piece of state that must survive a stateless
+    # CI runner between scheduled jobs. Resolved via Config.path() like every other
+    # config-relative path.
+    ledger_path: str = "ledger/paper.sqlite3"
+
+
 class ReportingConfig(_Base):
     fan_percentiles: list[int] = Field(default_factory=lambda: [5, 25, 50, 75, 95])
     figure_dpi: int = Field(120, gt=0)
@@ -282,6 +363,7 @@ class Config(_Base):
     options: OptionsConfig = Field(default_factory=OptionsConfig)
     scenarios: dict[str, dict[str, Any]] = Field(default_factory=dict)
     reporting: ReportingConfig = Field(default_factory=ReportingConfig)
+    paper: PaperConfig = Field(default_factory=PaperConfig)
 
     project_root: Path = Field(default=PROJECT_ROOT, exclude=True)
 

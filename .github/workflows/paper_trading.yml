@@ -1,0 +1,133 @@
+name: Paper trading
+
+# Scheduled jobs driving live/decide.py, live/execute.py, live/mark.py, live/report.py
+# (Phase 5, semis_paper_trading_brief.md). Every cron time below is UTC and only
+# approximates US market hours -- it is not DST-aware, the same kind of documented
+# approximation as everything else in this project that can't be pinned exactly (see
+# CLAUDE.md's "Gotchas"). The real gate is in code, not in these cron expressions:
+# execution/pretrade.py::check_pretrade refuses outside the configured execution window
+# and closed-market hours regardless of exactly when this workflow happens to fire, and a
+# non-rebalance day's `decide` is a fast no-op via its own cadence guard
+# (live/decide.py::run_decide) -- cron does not need to land on exactly the right day.
+#
+# Trading stays off by default even once this runs on a schedule: config/paper.yaml ships
+# with paper.registered_accounts empty and every sleeve's trading_enabled false. Both must
+# be deliberately edited before `paper execute` can do anything but decline at pretrade.
+#
+# Each job below is entirely self-contained (its own checkout, its own steps in
+# sequence) rather than chained with `needs:` across jobs -- the three schedules below are
+# mutually exclusive (each workflow run matches exactly one `github.event.schedule`
+# value), so a `needs:` dependency on a job gated by a *different* schedule would make the
+# dependent job perpetually skipped except on the one trigger where both happened to
+# match. Ordering within a single rebalance (fetch -> decide -> execute) is instead
+# guaranteed by being separate *steps* of the same job, not separate jobs.
+
+"on":
+  workflow_dispatch: {}
+  schedule:
+    # decide + execute: every weekday, ~9-10am ET depending on DST.
+    - cron: "0 14 * * 1-5"
+    # mark: every 30 minutes through the US trading session, ~10am-4pm ET depending on DST.
+    - cron: "*/30 14-20 * * 1-5"
+    # report: once daily after the close, ~5:30pm ET depending on DST.
+    - cron: "30 21 * * 1-5"
+
+permissions:
+  contents: write
+
+jobs:
+  decide-and-execute:
+    if: github.event.schedule == '0 14 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      # Shared with the mark job below -- both write ledger/paper.sqlite3 and commit it,
+      # and this cron and the mark cron both match minute :00 of every hour they overlap,
+      # so without a shared group two workflow runs could race on the same git push.
+      group: paper-trading-ledger-write
+      cancel-in-progress: false
+    strategy:
+      matrix:
+        sleeve: [s0, s3, vol_twin_shadow, sector_shadow]
+      # Matrix entries run in parallel by default, which would have the same commit-race
+      # problem the concurrency group above solves across jobs -- serialize within the job
+      # too, since every entry here writes the same ledger file.
+      max-parallel: 1
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Refresh cached prices
+        run: uv run semimc fetch --config config/paper.yaml
+      - name: Decide (all sleeves, including shadow-only ones -- for the eventual T3/T4 comparison)
+        run: uv run semimc paper decide --sleeve ${{ matrix.sleeve }} --config config/paper.yaml
+      - name: Execute (s0/s3 only -- the only sleeves with a paper.sleeves entry)
+        if: matrix.sleeve == 's0' || matrix.sleeve == 's3'
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+        run: uv run semimc paper execute --sleeve ${{ matrix.sleeve }} --config config/paper.yaml
+      - name: Commit the ledger if it changed
+        run: |
+          git config user.name "semimc-bot"
+          git config user.email "semimc-bot@users.noreply.github.com"
+          git add ledger/paper.sqlite3
+          git commit -m "paper decide/execute: ${{ matrix.sleeve }} $(date -u +%F)" || echo "nothing to commit"
+          git push
+
+  mark:
+    if: github.event.schedule == '*/30 14-20 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: paper-trading-ledger-write
+      cancel-in-progress: false
+    strategy:
+      matrix:
+        sleeve: [s0, s3]
+      max-parallel: 1
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Poll fills, prune stale orders, reconcile positions
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+        run: uv run semimc paper mark --sleeve ${{ matrix.sleeve }} --config config/paper.yaml
+      - name: Commit the ledger if it changed
+        run: |
+          git config user.name "semimc-bot"
+          git config user.email "semimc-bot@users.noreply.github.com"
+          git add ledger/paper.sqlite3
+          git commit -m "paper mark: ${{ matrix.sleeve }} $(date -u +%F)" || echo "nothing to commit"
+          git push
+
+  report:
+    if: github.event.schedule == '30 21 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        sleeve: [s0, s3]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      # Read-only -- no broker, no secrets, no ledger write, no commit needed.
+      - run: uv run semimc paper report --sleeve ${{ matrix.sleeve }} --config config/paper.yaml

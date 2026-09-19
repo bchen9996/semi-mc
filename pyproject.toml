@@ -22,6 +22,10 @@ dependencies = [
     "statsmodels>=0.14,<1",
     # Addendum section 4: ridge/lasso, date-grouped cross-validation, pinball loss.
     "scikit-learn>=1.4,<2",
+    # semis_paper_trading_brief.md: the Alpaca SDK (paper trading only -- see execution/)
+    # and .env loading for its API keys, the project's first credentialed dependency.
+    "alpaca-py>=0.44,<1",
+    "python-dotenv>=1.2,<2",
 ]
 
 [project.optional-dependencies]
@@ -54,6 +58,10 @@ ignore = ["B008", "E741"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+# "not network" actually enforces what the network marker below claims -- it was
+# registered but never wired into addopts, so `uv run pytest` would have attempted (and
+# failed) to run the first @pytest.mark.network test added. Run those with
+# `uv run pytest -m network` instead.
+addopts = "-q --strict-markers -m \"not network\""
 markers = ["network: tests that require network access (deselected by default)"]
 filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning"]

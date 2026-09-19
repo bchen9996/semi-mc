@@ -11,6 +11,7 @@ point prediction.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Annotated
 
@@ -25,6 +26,13 @@ app = typer.Typer(
     no_args_is_help=True,
     help="Monte Carlo forecasting for semiconductor stocks. Distributions, not predictions.",
 )
+
+paper_app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    help="Live paper-trading jobs: decide, execute, mark, report (semis_paper_trading_brief.md).",
+)
+app.add_typer(paper_app, name="paper")
 
 LOGGER = logging.getLogger("semimc")
 
@@ -335,8 +343,7 @@ def simulate(
     from .analytics.convergence import convergence_table, summarize_convergence
     from .analytics.risk import contribution_to_cvar, risk_table
     from .data import load_market_data
-    from .engine.runner import run_simulation
-    from .models import build_model
+    from .engine.runner import fit_at_origin, run_simulation
     from .reporting.charts import (
         convergence_chart,
         drawdown_histogram,
@@ -456,10 +463,14 @@ def simulate(
         f"Fitting {model} on {len(training):,} days to {as_of.date()} "
         f"({training.index.min().date()} onward), drift policy {cfg.drift.policy}."
     )
-    unfitted = build_model(model, cfg, market=market)
-    if implied_vol_override:
-        unfitted.implied_annual_vol = implied_vol_override
-    fitted = unfitted.fit(training, context)
+
+    def _apply_implied_vol(unfitted) -> None:  # noqa: ANN001
+        if implied_vol_override:
+            unfitted.implied_annual_vol = implied_vol_override
+
+    fitted, training = fit_at_origin(
+        market, cfg, model, symbols, as_of, context, pre_fit=_apply_implied_vol
+    )
 
     run = RunDirectory.create(
         cfg.runs_path,
@@ -944,6 +955,24 @@ def models() -> None:
         typer.echo(f"  {name}")
 
 
+@app.command()
+def dashboard(
+    port: Annotated[int, typer.Option("--port", help="Local port to serve on.")] = 8765,
+    open_: Annotated[
+        bool, typer.Option("--open/--no-open", help="Open the dashboard in a browser tab.")
+    ] = True,
+) -> None:
+    """Launch the HTML dashboard: a local web server that drives this same CLI.
+
+    Every action it offers runs the same ``semimc <command> ...`` a terminal user would
+    type, as a subprocess (``dashboard/jobs.py``) -- see ``dashboard/server.py``'s module
+    docstring. Stdlib ``http.server`` only, so nothing extra needs installing.
+    """
+    from .dashboard.server import run_server
+
+    run_server(port=port, open_browser=open_)
+
+
 # ---------------------------------------------------------------------------------------
 # signals (addendum Phase 4B)
 # ---------------------------------------------------------------------------------------
@@ -961,8 +990,19 @@ def signals(
         typer.Option(
             "--holdout",
             help="Also evaluate the frozen holdout window. Reported once, whatever it "
-            "shows -- refuses to run twice against the same config so the holdout cannot "
-            "quietly be re-tried until it looks good.",
+            "shows -- refuses to run if research_log.md already records a holdout window "
+            "at or after this one, so the holdout cannot quietly be re-tried until it "
+            "looks good.",
+        ),
+    ] = False,
+    confirm_new_holdout_window: Annotated[
+        bool,
+        typer.Option(
+            "--confirm-new-holdout-window",
+            help="Required in addition to --holdout when research_log.md already records "
+            "an earlier holdout window, even if this run's window is genuinely later "
+            "(more calendar time has passed). Pre-register the new window's specification "
+            "in research_log.md before passing this.",
         ),
     ] = False,
     config: ConfigOption = None,
@@ -975,11 +1015,13 @@ def signals(
     a gap at least as long as the horizon (``forecasting.cv``) -- never a plain random
     split, which would let two halves of one overlapping return window land on opposite
     sides of a fold. Pass ``--holdout`` only when you are ready to see the one-time result;
-    it is written to ``research_log.md`` and cannot be silently re-run.
+    it is written to ``research_log.md``, and a second ``--holdout`` run whose window
+    overlaps one already recorded there is refused (see ``--confirm-new-holdout-window``).
     """
     cfg = _setup(config, set_, verbose)
+    from .analytics.power import required_sample_size
     from .data import load_market_data
-    from .forecasting import training_rows
+    from .forecasting import approx_trading_days_per_period, min_gap_periods, training_rows
     from .forecasting.combine import (
         cross_validated_pinball_losses,
         select_alpha_by_cv,
@@ -1015,6 +1057,39 @@ def signals(
     last_date = market.last_date
     holdout_start = last_date - pd.DateOffset(months=cfg.signals.holdout_months)
 
+    if holdout:
+        log_path = cfg.path(cfg.signals.research_log)
+        prior_holdout_starts = []
+        if log_path.exists():
+            prior_holdout_starts = [
+                pd.Timestamp(match)
+                for match in re.findall(
+                    r"-\s*Holdout window:\s*(\d{4}-\d{2}-\d{2})\s+onward",
+                    log_path.read_text(encoding="utf-8"),
+                )
+            ]
+        if prior_holdout_starts:
+            latest_prior = max(prior_holdout_starts)
+            if latest_prior >= holdout_start:
+                typer.secho(
+                    f"\n{log_path} already records a holdout window starting "
+                    f"{latest_prior.date()}, at or after this run's {holdout_start.date()}. "
+                    "Refusing to re-spend it -- there is no legitimate reason to re-run an "
+                    "identical-or-earlier holdout window.",
+                    fg=typer.colors.RED,
+                )
+                raise typer.Exit(code=1)
+            if not confirm_new_holdout_window:
+                typer.secho(
+                    f"\n{log_path} already records a holdout window starting "
+                    f"{latest_prior.date()}. This run's window ({holdout_start.date()}) is "
+                    "genuinely later, but still overlaps most of the same calendar range. "
+                    "Pre-register the new window's specification in research_log.md, then "
+                    "pass --confirm-new-holdout-window to proceed.",
+                    fg=typer.colors.RED,
+                )
+                raise typer.Exit(code=1)
+
     typer.echo(f"Building the signal panel for {len(symbols)} tickers at {h}-day horizon ...")
     panel = build_full_panel(
         market,
@@ -1028,6 +1103,7 @@ def signals(
         momentum_skip_days=cfg.signals.momentum_skip_days,
         relative_strength_lookback_days=cfg.signals.relative_strength_lookback_days,
         earnings_drift_active_days=cfg.signals.earnings_drift_active_days,
+        origin_freq=cfg.signals.origin_frequency,
     )
     if panel.empty:
         typer.secho("No origins produced a panel row.", fg=typer.colors.RED)
@@ -1042,7 +1118,17 @@ def signals(
         typer.secho("No signal has enough coverage to evaluate.", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
-    maxlags = max(1, round(cfg.signals.driscoll_kraay_lag_per_horizon * h / 21))
+    period_trading_days = approx_trading_days_per_period(cfg.signals.origin_frequency)
+    maxlags = max(1, round(cfg.signals.driscoll_kraay_lag_per_horizon * h / period_trading_days))
+    required_gap = min_gap_periods(h, cfg.signals.origin_frequency)
+    if cfg.signals.cv_gap_periods < required_gap:
+        typer.secho(
+            f"\nWARNING: signals.cv_gap_periods={cfg.signals.cv_gap_periods} is smaller "
+            f"than the {required_gap} needed to keep a {h}-day forward window from "
+            f"spanning a fold boundary at origin_frequency={cfg.signals.origin_frequency!r} "
+            f"(~{period_trading_days:.1f} trading days/period). CV folds may leak.",
+            fg=typer.colors.YELLOW,
+        )
 
     def _usable(columns: list[str]) -> pd.DataFrame:
         return pre_holdout.dropna(subset=[*columns, "target"])
@@ -1106,6 +1192,27 @@ def signals(
         typer.echo("(no candidate had enough data)")
     else:
         _echo_table(report.set_index("signal"))
+        # Power diagnostic, not a new scoring metric: how much more data, at this same
+        # cadence and assuming the same effect size, would be needed to clear the
+        # addendum's own "~3" skepticism bar (see MODEL_NOTES/plan_addendum.md). A rough
+        # planning heuristic (analytics.power.required_sample_size), not a promise.
+        target_t = 3.0
+        dates_per_year = 252.0 / period_trading_days
+        typer.echo(f"\nPower: data needed to reach a rank-IC t-stat of {target_t:.1f}:")
+        for _, row in report.iterrows():
+            observed_t, observed_n = row["rank_ic_t"], row["rank_ic_n_dates"]
+            if not np.isfinite(observed_t) or not np.isfinite(observed_n) or observed_n <= 0:
+                typer.echo(f"  {row['signal']}: n/a")
+                continue
+            needed_n = required_sample_size(observed_t, int(observed_n), target_t)
+            if not np.isfinite(needed_n):
+                typer.echo(f"  {row['signal']}: n/a (observed effect is non-positive)")
+                continue
+            extra_years = max(needed_n - observed_n, 0.0) / dates_per_year
+            typer.echo(
+                f"  {row['signal']}: t={observed_t:.2f} on n={int(observed_n)} -> "
+                f"~{extra_years:.1f} more years at this cadence"
+            )
 
     quantile_usable = _usable(available_columns)
     if len(quantile_usable) >= cfg.signals.min_regression_observations:
@@ -1356,6 +1463,304 @@ def signals(
         text_lines.append(holdout_summary)
     run.write_text("\n".join(text_lines), "summary")
     typer.echo(f"\nWritten to {run.close()}")
+
+
+# ---------------------------------------------------------------------------------------
+# paper decide / execute / mark / report
+# ---------------------------------------------------------------------------------------
+
+
+def _paper_as_of(value: str | None) -> pd.Timestamp:
+    return pd.Timestamp(value) if value else pd.Timestamp.now().normalize()
+
+
+def _paper_now(cfg: Config):  # noqa: ANN001 -- returns dt.datetime
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    return dt.datetime.now(ZoneInfo(cfg.paper.execution.timezone)).replace(tzinfo=None)
+
+
+def _validate_sleeve(sleeve: str) -> None:
+    from .strategy.decide import SLEEVES
+
+    if sleeve not in SLEEVES:
+        raise typer.BadParameter(f"sleeve must be one of {SLEEVES}, got {sleeve!r}")
+
+
+SleeveOption = Annotated[
+    str, typer.Option("--sleeve", help="s0, s3, vol_twin_shadow, or sector_shadow.")
+]
+PaperAsOfOption = Annotated[
+    str | None, typer.Option("--as-of", help="Trading day, YYYY-MM-DD. Defaults to today.")
+]
+
+
+@paper_app.command("decide")
+def paper_decide(
+    sleeve: SleeveOption,
+    as_of: PaperAsOfOption = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Record even if this sleeve already decided this rebalance period, or a "
+            "different decision already exists for this exact day.",
+        ),
+    ] = False,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Freeze one sleeve's target weights for today (or --as-of) into the ledger.
+
+    A no-op, not an error, if this sleeve already decided this rebalance period -- a
+    schedule can safely call this daily without landing on exactly the right day.
+    """
+    cfg = _setup(config, set_, verbose)
+    _validate_sleeve(sleeve)
+    from .data import load_market_data
+    from .live.decide import run_decide
+    from .live.ledger import Ledger
+
+    as_of_ts = _paper_as_of(as_of)
+    symbols = cfg.universe.tickers
+    market = load_market_data(cfg, tickers=list(dict.fromkeys(symbols + cfg.benchmarks.tickers)))
+    ledger = Ledger(cfg.path(cfg.paper.ledger_path))
+    try:
+        try:
+            result = run_decide(sleeve, market, cfg, symbols, as_of_ts, ledger, force=force)
+        except ValueError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+    finally:
+        ledger.close()
+
+    if result.skipped_reason is not None:
+        typer.echo(f"Skipped: {result.skipped_reason}")
+        return
+    decision = result.decision
+    typer.echo(
+        f"Decided {sleeve!r} for {as_of_ts.date()}: snapshot_hash={decision.snapshot_hash[:16]}"
+    )
+    _echo_table(decision.weights.rename("weight"))
+
+
+@paper_app.command("execute")
+def paper_execute(
+    sleeve: SleeveOption,
+    as_of: PaperAsOfOption = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Build and print intended orders without submitting or writing to the ledger.",
+        ),
+    ] = False,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Execute the sleeve's most recently frozen decision against the real paper account.
+
+    Refuses (a clean skip, not an error) if this sleeve has never been decided, and again
+    if any pretrade gate declines (kill switch, trading disabled, unregistered account,
+    closed market, outside the execution window) -- these are the gates working as
+    designed, not failures.
+    """
+    cfg = _setup(config, set_, verbose)
+    _validate_sleeve(sleeve)
+    from .data import load_market_data
+    from .execution.alpaca_broker import AlpacaPaperBroker
+    from .live.execute import run_execute
+    from .live.ledger import Ledger
+
+    as_of_ts = _paper_as_of(as_of)
+    symbols = cfg.universe.tickers
+    market = load_market_data(cfg, tickers=list(dict.fromkeys(symbols + cfg.benchmarks.tickers)))
+    now = _paper_now(cfg)
+    ledger = Ledger(cfg.path(cfg.paper.ledger_path))
+    broker = AlpacaPaperBroker.from_env()
+    try:
+        result = run_execute(
+            sleeve, cfg, broker, ledger, market, symbols, as_of_ts, now, dry_run=dry_run
+        )
+    finally:
+        ledger.close()
+
+    if result.skipped_reason is not None:
+        typer.echo(f"Skipped: {result.skipped_reason}")
+        return
+    if result.pretrade_failures:
+        typer.secho("Declined at pretrade:", fg=typer.colors.YELLOW)
+        for failure in result.pretrade_failures:
+            typer.echo(f"  - {failure}")
+        return
+    if not result.orders:
+        typer.echo("Nothing to trade -- already at target.")
+        return
+
+    verb = "Would submit" if dry_run else "Submitted"
+    typer.echo(f"{verb} {len(result.orders)} order(s):")
+    for order in result.orders:
+        typer.echo(f"  {order.side} {order.qty:.4f} {order.symbol} @ {order.limit_price:.2f}")
+    if result.order_failures:
+        typer.secho(
+            f"{len(result.order_failures)} order(s) failed the tradability check:",
+            fg=typer.colors.YELLOW,
+        )
+        for request, reason in result.order_failures:
+            typer.echo(f"  {request.symbol}: {reason}")
+
+
+@paper_app.command("mark")
+def paper_mark(
+    sleeve: SleeveOption,
+    as_of: PaperAsOfOption = None,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Poll fill status, prune stale unfilled orders past the reprice interval, and
+    reconcile the ledger's own view of positions against the broker's actual ones."""
+    cfg = _setup(config, set_, verbose)
+    _validate_sleeve(sleeve)
+    from .execution.alpaca_broker import AlpacaPaperBroker
+    from .live.ledger import Ledger
+    from .live.mark import run_mark
+
+    as_of_ts = _paper_as_of(as_of)
+    now = _paper_now(cfg)
+    ledger = Ledger(cfg.path(cfg.paper.ledger_path))
+    broker = AlpacaPaperBroker.from_env()
+    try:
+        result = run_mark(sleeve, cfg, broker, ledger, as_of_ts, now)
+    finally:
+        ledger.close()
+
+    typer.echo(f"Fills recorded: {result.fills_recorded}")
+    if result.orders_canceled_for_reprice:
+        typer.echo(f"Canceled for reprice: {', '.join(result.orders_canceled_for_reprice)}")
+    if result.reconciliation_status == "ok":
+        typer.echo("Reconciliation: ok")
+    else:
+        typer.secho(f"Reconciliation: {result.reconciliation_status}", fg=typer.colors.RED)
+        for d in result.discrepancies:
+            typer.echo(f"  {d['symbol']}: expected {d['expected']:.4f}, actual {d['actual']:.4f}")
+        raise typer.Exit(code=1)
+
+
+@paper_app.command("report")
+def paper_report(
+    sleeve: SleeveOption,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Summarize a sleeve's ledger: equity, positions, open incidents, reconciliation
+    status. Never touches the network or the broker -- a plain read of the ledger."""
+    cfg = _setup(config, set_, verbose)
+    _validate_sleeve(sleeve)
+    from .live.ledger import Ledger
+    from .live.report import build_report, render_markdown
+
+    ledger = Ledger(cfg.path(cfg.paper.ledger_path))
+    try:
+        report = build_report(sleeve, ledger)
+    finally:
+        ledger.close()
+
+    markdown = render_markdown(report)
+    typer.echo(markdown)
+
+    out_dir = cfg.runs_path / sleeve
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"report_{pd.Timestamp.now():%Y%m%d}.md"
+    out_path.write_text(markdown, encoding="utf-8")
+    typer.echo(f"Written to {out_path}")
+
+
+def _echo_comparison(result) -> None:  # noqa: ANN001 -- ComparisonResult
+    frame = pd.DataFrame([vars(result.control), vars(result.candidate)]).set_index("label")
+    _echo_table(frame.drop(columns=["start", "end", "n_days"]))
+    typer.echo(f"n_days: {dict(frame['n_days'])}")
+    typer.echo(f"overlapping days: {result.n_overlapping_days}")
+    rd, vd = result.annualized_return_difference, result.annualized_vol_difference
+    typer.echo(
+        f"annualized return difference (candidate - control): {rd.point_estimate:.4f} "
+        f"[{rd.ci_low:.4f}, {rd.ci_high:.4f}] (95% CI, n_bootstrap={rd.n_bootstrap})"
+    )
+    typer.echo(
+        f"annualized vol difference (candidate - control): {vd.point_estimate:.4f} "
+        f"[{vd.ci_low:.4f}, {vd.ci_high:.4f}] (95% CI, n_bootstrap={vd.n_bootstrap})"
+    )
+    min_months = 3
+    if result.overlap_calendar_days < min_months * 30:
+        typer.secho(
+            f"\nCAVEAT: only {result.overlap_calendar_days} overlapping calendar days -- "
+            f"below the {min_months}-month minimum THESES.md sets before a verdict here "
+            "means anything beyond descriptive. Numbers above are real, not a conclusion.",
+            fg=typer.colors.YELLOW,
+        )
+
+
+@paper_app.command("evaluate")
+def paper_evaluate(
+    thesis: Annotated[str, typer.Option("--thesis", help="t2, t3, or t5.")],
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """T2/T3/T5 (`THESES.md`): compare sleeves' realized paper-trading performance, or
+    report execution cost. Always prints whatever the ledger currently supports -- never
+    refuses for lack of history, only caveats a comparison shorter than THESES.md's
+    stated minimum."""
+    cfg = _setup(config, set_, verbose)
+    if thesis not in ("t2", "t3", "t5"):
+        raise typer.BadParameter(f"thesis must be one of t2, t3, t5, got {thesis!r}")
+    from .data import load_market_data
+    from .live.ledger import Ledger
+
+    ledger = Ledger(cfg.path(cfg.paper.ledger_path))
+    try:
+        if thesis in ("t2", "t3"):
+            from .analytics.paper_evaluation import evaluate_t2, evaluate_t3
+
+            symbols = cfg.universe.tickers
+            market = load_market_data(
+                cfg, tickers=list(dict.fromkeys(symbols + cfg.benchmarks.tickers))
+            )
+            result = (
+                evaluate_t2(ledger, market, cfg)
+                if thesis == "t2"
+                else evaluate_t3(ledger, market, cfg, symbols)
+            )
+            _echo_comparison(result)
+        else:
+            from .analytics.execution_cost import execution_cost_report
+            from .execution.market_data import AlpacaMarketDataClient
+
+            data_client = AlpacaMarketDataClient.from_env()
+            frames = []
+            for sleeve in ("s0", "s3"):
+                report = execution_cost_report(ledger, sleeve, data_client)
+                if not report.empty:
+                    report.insert(0, "sleeve", sleeve)
+                    frames.append(report)
+            if not frames:
+                typer.echo("No fills recorded yet for s0/s3 -- nothing to report.")
+                return
+            combined = pd.concat(frames, ignore_index=True)
+            _echo_table(combined.set_index(["sleeve", "client_order_id"]))
+            typer.echo(f"\nmean slippage (bps): {combined['slippage_bps'].mean():.2f}")
+            if len(combined) < 20:
+                typer.secho(
+                    f"\nCAVEAT: only {len(combined)} fills -- THESES.md treats fewer "
+                    "than ~20 as anecdotal, not a pattern.",
+                    fg=typer.colors.YELLOW,
+                )
+    finally:
+        ledger.close()
 
 
 if __name__ == "__main__":  # pragma: no cover
