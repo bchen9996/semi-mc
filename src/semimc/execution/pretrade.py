@@ -68,9 +68,14 @@ def check_pretrade(context: PretradeContext) -> list[str]:
 
     account = context.broker.get_account()
     if account.account_number not in context.config.paper.registered_accounts:
+        # Never interpolate the account number itself into this message -- it is recorded
+        # verbatim as a ledger incident (live/execute.py) that this project deliberately
+        # git-tracks, and this exact decline recurs on every scheduled run until the
+        # account is registered. Found the hard way: a real workflow_dispatch run
+        # committed the real account number to git history this way (2026-09-19).
         failures.append(
-            f"account {account.account_number!r} is not in paper.registered_accounts -- "
-            "refusing to trade against an unregistered account"
+            "account is not in paper.registered_accounts -- refusing to trade against an "
+            "unregistered account"
         )
     if account.status != "ACTIVE":
         failures.append(f"account status is {account.status}")
