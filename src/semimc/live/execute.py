@@ -92,7 +92,7 @@ def run_execute(
     for request in orders:
         tradable_failure = check_order_tradable(request, broker)
         if tradable_failure is not None:
-            ledger.record_incident("warning", tradable_failure, sleeve)
+            ledger.record_incident("error", tradable_failure, sleeve)
             result.order_failures.append((request, tradable_failure))
             continue
         submitted = broker.submit_order(request)

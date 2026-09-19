@@ -73,6 +73,13 @@ jobs:
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
         run: uv run semimc paper execute --sleeve ${{ matrix.sleeve }} --config config/paper.yaml
       - name: Commit the ledger if it changed
+        # Runs even if `decide` or `execute` above failed -- otherwise the exact run that
+        # hit a real problem is the one whose incident/reconciliation row never reaches the
+        # repo (Phase 7, semis_paper_trading_brief.md). This does not mask the failure: a
+        # job's conclusion is "failure" if any prior step failed, regardless of what a
+        # later `if: always()` step does, so GitHub's own failure-notification email for
+        # this scheduled workflow still fires.
+        if: always()
         run: |
           git config user.name "semimc-bot"
           git config user.email "semimc-bot@users.noreply.github.com"
@@ -106,6 +113,8 @@ jobs:
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
         run: uv run semimc paper mark --sleeve ${{ matrix.sleeve }} --config config/paper.yaml
       - name: Commit the ledger if it changed
+        # See the decide-and-execute job's identical step for why this needs if: always().
+        if: always()
         run: |
           git config user.name "semimc-bot"
           git config user.email "semimc-bot@users.noreply.github.com"

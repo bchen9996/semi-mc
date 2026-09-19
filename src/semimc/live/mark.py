@@ -27,6 +27,7 @@ _OPEN_STATUSES = ("new", "accepted", "partially_filled")
 class MarkResult:
     fills_recorded: int = 0
     orders_canceled_for_reprice: list[str] = field(default_factory=list)
+    orders_not_found: list[str] = field(default_factory=list)
     reconciliation_status: str = "ok"
     discrepancies: list[dict] = field(default_factory=list)
 
@@ -50,6 +51,7 @@ def run_mark(
             ledger.record_incident(
                 "error", f"open order {client_order_id} not found at broker", sleeve
             )
+            result.orders_not_found.append(client_order_id)
             continue
 
         already = sum(f["qty"] for f in ledger.fills_for_order(client_order_id))

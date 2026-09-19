@@ -1607,10 +1607,11 @@ def paper_execute(
     if result.order_failures:
         typer.secho(
             f"{len(result.order_failures)} order(s) failed the tradability check:",
-            fg=typer.colors.YELLOW,
+            fg=typer.colors.RED,
         )
         for request, reason in result.order_failures:
             typer.echo(f"  {request.symbol}: {reason}")
+        raise typer.Exit(code=1)
 
 
 @paper_app.command("mark")
@@ -1641,12 +1642,26 @@ def paper_mark(
     typer.echo(f"Fills recorded: {result.fills_recorded}")
     if result.orders_canceled_for_reprice:
         typer.echo(f"Canceled for reprice: {', '.join(result.orders_canceled_for_reprice)}")
+
+    failed = False
+    if result.orders_not_found:
+        typer.secho(
+            f"{len(result.orders_not_found)} open order(s) not found at the broker:",
+            fg=typer.colors.RED,
+        )
+        for client_order_id in result.orders_not_found:
+            typer.echo(f"  {client_order_id}")
+        failed = True
+
     if result.reconciliation_status == "ok":
         typer.echo("Reconciliation: ok")
     else:
         typer.secho(f"Reconciliation: {result.reconciliation_status}", fg=typer.colors.RED)
         for d in result.discrepancies:
             typer.echo(f"  {d['symbol']}: expected {d['expected']:.4f}, actual {d['actual']:.4f}")
+        failed = True
+
+    if failed:
         raise typer.Exit(code=1)
 
 

@@ -505,7 +505,37 @@ no verdict before month 12)/T5.
       Manually run against the real (still largely empty) ledger for all three theses:
       each reported cleanly (NaN/zero-overlap with a caveat for t2/t3, "no fills yet" for
       t5) rather than crashing or dividing by zero.
-- [ ] **Phase 7 -- monitoring/alerting.** Alert channel still open (owner deferred).
+- [x] **Phase 7 -- monitoring/alerting.** Owner decision 2026-09-19: no new dependency or
+      credential -- GitHub's own email-on-failed-scheduled-workflow notification is the
+      alert channel. The work was making sure a real problem actually fails the job so that
+      fires, and that the job's ledger writes survive even when it does.
+      Found two incidents that could occur but couldn't reach a non-zero exit: `execute`'s
+      per-order tradability failure (`execution/pretrade.py::check_order_tradable`, e.g. a
+      halted/delisted symbol) was recorded at `"warning"` severity and `paper_execute`
+      always returned exit 0 regardless; `mark`'s "open order not found at broker" was
+      already recorded at `"error"` severity but `MarkResult` had no field carrying it, so
+      `paper_mark` had no way to see it. Fixed: the tradability incident is now `"error"`;
+      `MarkResult.orders_not_found` surfaces the missing-order case; both `paper_execute`
+      and `paper_mark` now `raise typer.Exit(code=1)` on these, alongside the pre-existing
+      reconciliation-mismatch exit. Left `check_pretrade`'s failures (kill switch, sleeve
+      not `trading_enabled`, unregistered account, closed market, outside the execution
+      window) at `"warning"` with exit 0 -- these are routine, by-design, expected
+      conditions until Phase 8's rollout, not incidents worth an email.
+      Also found, while tracing what happens when a step actually fails: both ledger-
+      writing jobs' "Commit the ledger if it changed" step ran only on success, so the one
+      run that hit a real problem was the one whose incident/reconciliation row never
+      reached the repo, even though the job's own failure still correctly emailed. Fixed
+      with `if: always()` on both commit steps -- doesn't mask the failure (a job's
+      conclusion is "failure" if any step failed, regardless of what a later
+      `if: always()` step does).
+      Deliberately excluded: auto-engaging the kill switch on repeated incidents (a
+      rollout/safety policy call for Phase 8, not alerting plumbing) and a heartbeat/dead-
+      man's-switch for the workflow never running at all (needs an external always-on
+      watcher -- exactly the new-dependency cost the owner chose to avoid; recorded below
+      under Known gaps).
+      Verified against the real (still all-disabled) paper account: `paper decide` then
+      `paper execute` still exits 0 on the routine pretrade decline (not trading_enabled,
+      unregistered account, market closed) -- no regression on the common case.
 - [ ] **Phase 8 -- rollout.** Dry run -> sandbox failure injection -> go-live checklist ->
       enable S0/S3 first.
 
@@ -517,6 +547,14 @@ no verdict before month 12)/T5.
       parameters risks a silent mismatch between the stored and rebuilt model, which is a
       worse failure than a slow rerun. The full 15-ticker, 3-model, 4-horizon backtest
       takes about 3.5 minutes, so the payoff is small.
+- [ ] **No heartbeat / dead-man's-switch for the paper-trading workflow itself.** Phase 7's
+      alerting (GitHub's own failure-notification email, triggered by a `paper` CLI command
+      exiting non-zero) only fires for a run that actually executed and hit a problem. It
+      cannot detect the workflow being disabled, a GitHub Actions outage, or the cron simply
+      never firing -- catching an *absent* run needs an external always-on watcher, exactly
+      the new-dependency cost the owner chose to avoid when picking the alert channel
+      (2026-09-19: GitHub's built-in email, no new secret or service). Revisit if this
+      project ever adopts a paid alerting channel.
 - [x] **Cross-sectional dependence in significance tests.** Owner decision 2026-09-16:
       build the block-bootstrap-over-origins fix rather than continue only disclosing it.
       `analytics/scoring.py`: `block_bootstrap_origins`, `diebold_mariano_bootstrap`,

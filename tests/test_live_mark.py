@@ -146,6 +146,42 @@ def test_a_position_mismatch_is_caught_by_reconciliation(config, ledger):
     assert any(i["severity"] == "error" for i in incidents)
 
 
+def test_an_open_order_missing_at_the_broker_is_surfaced_and_logged(config, ledger):
+    """Phase 7: distinct from a *position* reconciliation mismatch -- this is the ledger
+    believing an order is still open when the broker has never heard of it at all (e.g. a
+    ledger restored from an older commit). Must be visible on the result, not just logged,
+    so the CLI can fail the job on it."""
+    cfg = _tradeable_config(config)
+    broker = FakeBroker(now=SUBMITTED_AT)  # never told about this order
+
+    request = _request()
+    phantom_order = Order(
+        id="phantom-broker-order-1",
+        client_order_id=request.client_order_id,
+        symbol="NVDA",
+        side="buy",
+        type="limit",
+        time_in_force="day",
+        status="accepted",
+        qty=10.0,
+        notional=None,
+        filled_qty=0.0,
+        filled_avg_price=None,
+        submitted_at=SUBMITTED_AT,
+        filled_at=None,
+    )
+    ledger.record_order("s0", "hash-1", request, phantom_order)
+
+    now = SUBMITTED_AT + dt.timedelta(minutes=1)
+    result = run_mark("s0", cfg, broker, ledger, pd.Timestamp("2026-01-05"), now)
+
+    assert result.orders_not_found == [request.client_order_id]
+    incidents = ledger.incidents("s0")
+    assert any(
+        i["severity"] == "error" and "not found at broker" in i["message"] for i in incidents
+    )
+
+
 def test_mark_always_records_a_fresh_snapshot(config, ledger):
     cfg = _tradeable_config(config)
     broker = FakeBroker(now=SUBMITTED_AT)

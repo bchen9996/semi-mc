@@ -597,10 +597,79 @@ def test_paper_execute_dry_run_reports_intended_orders(workspace, fake_alpaca_br
     assert fake_alpaca_broker.list_positions() == []  # dry-run never touches the broker
 
 
+def test_paper_execute_fails_the_job_on_a_tradability_failure(workspace, monkeypatch):
+    """Phase 7: a real problem (a halted/delisted symbol) must fail the job, not just print
+    a warning and exit 0 -- that's what lets GitHub's own failure-notification email fire."""
+    from semimc.execution.broker import Asset
+    from semimc.execution.fake_broker import FakeBroker
+
+    broker = FakeBroker(
+        account_number="FAKE-PAPER-0001", assets={"NVDA": Asset(symbol="NVDA", tradable=False)}
+    )
+    monkeypatch.setattr(
+        "semimc.execution.alpaca_broker.AlpacaPaperBroker.from_env",
+        classmethod(lambda cls: broker),
+    )
+
+    overrides = _tradeable_paper_overrides(workspace)
+    decide = runner.invoke(
+        app, ["paper", "decide", "--sleeve", "s0", "--as-of", "2021-06-01"] + overrides
+    )
+    assert decide.exit_code == 0, decide.output
+
+    result = runner.invoke(
+        app, ["paper", "execute", "--sleeve", "s0", "--as-of", "2021-06-01"] + overrides
+    )
+    assert result.exit_code != 0
+    assert "failed the tradability check" in result.output
+
+
 def test_paper_mark_runs_cleanly_with_no_open_orders(tmp_path, fake_alpaca_broker):
     result = runner.invoke(app, ["paper", "mark", "--sleeve", "s0"] + _paper_overrides(tmp_path))
     assert result.exit_code == 0, result.output
     assert "Reconciliation: ok" in result.output
+
+
+def test_paper_mark_fails_the_job_when_an_open_order_is_missing_at_the_broker(
+    tmp_path, fake_alpaca_broker
+):
+    """Phase 7: the ledger believing an order is still open when the broker has never heard
+    of it at all must fail the job, the same as a position reconciliation mismatch does."""
+    from semimc.execution.broker import Order, OrderRequest
+    from semimc.live.ledger import Ledger
+
+    ledger_path = tmp_path / "ledger.sqlite3"
+    ledger = Ledger(ledger_path)
+    request = OrderRequest(
+        symbol="NVDA",
+        side="buy",
+        type="limit",
+        time_in_force="day",
+        client_order_id="s0-nvda-phantom",
+        qty=10.0,
+        limit_price=100.0,
+    )
+    phantom_order = Order(
+        id="phantom-broker-order-1",
+        client_order_id=request.client_order_id,
+        symbol="NVDA",
+        side="buy",
+        type="limit",
+        time_in_force="day",
+        status="accepted",
+        qty=10.0,
+        notional=None,
+        filled_qty=0.0,
+        filled_avg_price=None,
+        submitted_at=pd.Timestamp("2026-01-05T10:00:00").to_pydatetime(),
+        filled_at=None,
+    )
+    ledger.record_order("s0", "hash-1", request, phantom_order)
+    ledger.close()
+
+    result = runner.invoke(app, ["paper", "mark", "--sleeve", "s0"] + _paper_overrides(tmp_path))
+    assert result.exit_code != 0
+    assert "not found at the broker" in result.output
 
 
 def test_paper_report_runs_with_no_history(tmp_path):

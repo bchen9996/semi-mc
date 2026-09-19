@@ -163,5 +163,11 @@ def test_a_tradability_failure_is_skipped_without_aborting_other_orders(config, 
     assert result.order_failures[0][0].symbol == "NVDA"
     assert len(result.submitted) == 1
     assert result.submitted[0].symbol == "AMD"
+
+    # Phase 7: a tradability failure is a real problem (a halted/delisted symbol), not a
+    # routine skip like a pretrade decline -- it must be recorded at "error" severity so the
+    # CLI can fail the job on it.
+    incidents = ledger.incidents("s0")
+    assert incidents[-1]["severity"] == "error"
     incidents = ledger.incidents("s0")
     assert any("not tradable" in i["message"] for i in incidents)
