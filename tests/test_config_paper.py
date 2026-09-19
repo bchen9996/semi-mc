@@ -73,6 +73,8 @@ def test_paper_yaml_loads_and_keeps_runs_separate_from_research_runs():
     module docstring and CLAUDE.md's 'one place defaults live' rule."""
     cfg = load_config(PROJECT_ROOT / "config" / "paper.yaml")
     assert cfg.reporting.runs_dir == "runs/paper"
+    # s0 stays off; s3 was deliberately enabled at go-live (docs/go_live_checklist.md
+    # item 6) -- see tasks/todo.md's Phase 8 entry for why not both.
     assert cfg.paper.sleeves["s0"].trading_enabled is False
-    assert cfg.paper.sleeves["s3"].trading_enabled is False
+    assert cfg.paper.sleeves["s3"].trading_enabled is True
     assert set(cfg.universe.tickers) == set(load_config().universe.tickers)

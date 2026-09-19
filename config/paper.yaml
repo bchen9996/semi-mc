@@ -162,7 +162,7 @@ reporting:
 paper:
   sleeves:
     s0: {trading_enabled: false, rebalance_frequency: ME}
-    s3: {trading_enabled: false, rebalance_frequency: ME}
+    s3: {trading_enabled: true, rebalance_frequency: ME}
   execution:
     start_time: "10:00"
     cutoff_time: "15:30"
@@ -180,6 +180,6 @@ paper:
   s3_max_leverage: 1.0
   sector_tilt_strength: 0.15   # T4 shadow overlay: max gross-exposure tilt
   review_months: [3, 6, 12]
-  registered_accounts: []   # paper-only guard: add a paper account number here to enable it
+  registered_accounts: [PA3P3XIM4N7V]   # paper-only guard: add a paper account number here to enable it
   kill_switch_path: runs/paper/KILL_SWITCH
   ledger_path: ledger/paper.sqlite3

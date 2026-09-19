@@ -606,6 +606,22 @@ no verdict before month 12)/T5.
       is owner-account state this repo's code can't inspect either way). Item 6 -- actually
       enabling `s0`/`s3` -- stays the owner's separate, explicit action; nothing in the
       paper-trading plan (Phases 0-8) is left to build before that point.
+      **Owner decision 2026-09-19: enable `s3` only, not `s0`.** Investigated on request
+      ("why can't both be done") before the switch was flipped: `execution/
+      orders.py::target_notional` and `live/execute.py::run_execute` both size a sleeve's
+      target positions off the account's *whole* equity and *whole* current positions --
+      there is no per-sleeve partitioning anywhere, and `AlpacaPaperBroker.from_env()` is
+      called identically regardless of `sleeve`, so every sleeve trades the same single
+      paper account. Running `s0` and `s3` together would have each sizing against 100% of
+      the same capital and the same overlapping 14-ticker universe, each seeing the other's
+      resulting fills as "current state" to rebalance away from -- corrupting the very s0-
+      vs-s3 comparison T2 exists to make. Enabling both validly and concurrently would need
+      a second Alpaca paper account with per-sleeve credential routing, which does not
+      exist and is out of scope here. Completed checklist item 6 for `s3` alone:
+      `config/paper.yaml`'s `paper.sleeves.s3.trading_enabled` set `true` and the real
+      paper account number added to `paper.registered_accounts` (the account
+      `broker.get_account().account_number` already surfaced earlier this session, not the
+      API key). `s0` stays `trading_enabled: false`.
 
 ## Known gaps (deliberate, with reasons)
 

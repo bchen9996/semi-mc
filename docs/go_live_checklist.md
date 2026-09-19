@@ -82,3 +82,13 @@ Two edits to `config/paper.yaml`, committed together as one deliberate, reviewab
 Before doing this, re-read `THESES.md`'s `review_months: [3, 6, 12]` cadence: no verdict
 from `semimc paper evaluate` should be read as final before the first (3-month) checkpoint,
 however the numbers look in week one.
+
+**Done, 2026-09-19: `s3` enabled, `s0` left off.** `s0` and `s3` share one Alpaca paper
+account with no per-sleeve equity/position partitioning anywhere in the code (`execution/
+orders.py::target_notional`, `live/execute.py::run_execute` both size off the whole
+account) -- enabling both at once would have them size against the same 100% of capital
+and fight over the same overlapping tickers, corrupting the s0-vs-s3 comparison T2 exists
+to make. `config/paper.yaml`: `paper.sleeves.s3.trading_enabled: true`,
+`paper.registered_accounts` holds the real paper account number. `s0` stays
+`trading_enabled: false` until a second account (with per-sleeve credential routing) makes
+running both concurrently valid -- not built, out of scope unless requested.
