@@ -627,10 +627,71 @@ no verdict before month 12)/T5.
 
 Brief filed 2026-09-19 and committed to the repo as `BRIEF_INTRADAY.md` (deliberately, so
 it does not repeat `semis_paper_trading_brief.md`'s fate -- that one is cited by every
-`paper`/`execution`/`live`/`strategy` docstring and was never committed at all). **Nothing
-below is started.** A scheduled research-and-trade loop where Python owns the loop, clock,
-state and limits, and a language model decides inside it; measured against a random-entry
-placebo on a shadow ledger, pre-registered as `THESES.md`'s T6.
+`paper`/`execution`/`live`/`strategy` docstring and was never committed at all). A
+scheduled research-and-trade loop where Python owns the loop, clock, state and limits, and
+a language model decides inside it; measured against a random-entry placebo on a shadow
+ledger, pre-registered as `THESES.md`'s T6.
+
+**Phase 0 -- foundations, built 2026-09-20.** No LLM call, no order, no job yet -- pure
+plumbing, same shape as paper trading's own Phase 0. Full plan: the Claude Code plan file
+(overwrote `starry-drifting-parasol.md`, Phase 8's old plan). Built:
+
+- [x] `config.py::IntradayConfig` (+ `IntradayBudgetConfig`/`IntradayRiskConfig`/
+      `IntradayScheduleConfig`/`IntradayOptionsConfig`), registered as `Config.intraday`
+      top-level and sibling to `paper` -- not nested inside `PaperConfig`, since an LLM's
+      trade proposals don't fit `Decision.weights`'s closed-form target-weight shape
+      (confirmed by reading `strategy/decide.py` directly: dispatch is a flat `if/elif`
+      over sleeves that each return a `pd.Series` of weights, with no notion of discrete
+      proposals, thesis text, or confidence anywhere in that layer). `config/paper.yaml`
+      gets a matching `intraday:` block at conservative defaults
+      (`trading_enabled: false`).
+- [x] `intraday/ledger.py::IntradayLedger` -- a sibling to `live/ledger.py::Ledger`, not
+      new tables bolted onto it, and its own SQLite file (`ledger/intraday.sqlite3`, not
+      `ledger/paper.sqlite3`): S4 writes roughly every 20 minutes all day versus s0/s3's
+      monthly-decide-plus-half-hourly-mark cadence, and sharing a file would reintroduce
+      the git push race Phase 8 already fixed once, at a much lower write frequency.
+      Tables: `briefs`, `watchlist`, `proposals` (every proposal, accepted or rejected,
+      per the brief's "blotter: every proposal including rejected ones"), `orders`/
+      `fills`/`snapshots`/`reconciliations`, `reflections`, `model_calls` (what
+      `budget.py` sums), `headlines_seen` (dedup), and `incidents` -- reused as its own
+      copy of `live/ledger.py`'s exact shape rather than composing a second `Ledger`
+      instance into the same file. Unlike `live/ledger.py`, no table carries a `sleeve`
+      column: this ledger only ever holds one sleeve's data, so it would be a column
+      whose value is always the same literal string.
+- [x] `execution/alpaca_broker.py::AlpacaPaperBroker.from_env` and `execution/
+      market_data.py::AlpacaMarketDataClient.from_env` both take `key_env`/`secret_env`
+      parameters (defaulting to s0/s3's existing names, no regression) so S4 can point at
+      its own `ALPACA_S4_API_KEY`/`ALPACA_S4_SECRET_KEY` pair without a second broker
+      class -- resolves prerequisite 1 below for S4 specifically. Creating the second
+      Alpaca paper account and adding the GitHub secrets remains the owner's action.
+- [x] `intraday/budget.py` -- `check_budget`/`record_call_cost`/`spent_today` against
+      `model_calls`, mirroring `check_pretrade`'s "return a reason, let the caller decide"
+      shape. `max_cost_usd_per_day` ships as a $10 placeholder, explicitly not a
+      researched figure -- recalibrate from real shadow-mode logging once Stage 1 runs.
+- [x] `THESES.md` T6, pre-registered ahead of S4's first order, same Claim/Comparison/
+      Decided-by/Minimum-history/Status template as T2/T3/T5.
+- [x] `docs/alpaca_notes.md`: both options gates (account level, data feed) recorded as
+      still unresolved -- moot until rollout Stage 4.
+
+**Three corrections found by exploring the actual codebase and Anthropic's docs before
+writing Phase 0's plan** (not assumed from the brief alone):
+
+1. `.claude/agents/*.md` role files won't work under `--bare` -- confirmed in
+   `code.claude.com/docs/en/headless` that bare mode never reads `.claude/agents/`. Role
+   prompts will instead be plain markdown files loaded per call via
+   `--append-system-prompt-file` (Phase 2).
+2. An LLM's trade proposals don't fit `strategy/decide.py`'s `Decision` shape (see Phase 0
+   bullet above) -- S4 gets its own parallel data model (Phase 1's `proposals.py`), while
+   still reusing `execution/orders.py`'s low-level helpers (deterministic
+   `client_order_id`, the collared limit price, `sequence_orders`) rather than
+   reimplementing them.
+3. **Where the loop runs is now decided: GitHub Actions, not a dedicated VM** (owner
+   decision, 2026-09-20). This resolves prerequisite 2 below by changing the design
+   instead of building around it: the actual stop-loss becomes a real bracket/stop order
+   resting at Alpaca, not a polling process, so GH Actions' 5-minute cron granularity and
+   stateless-between-runs nature stop being a problem -- the 20-minute `cycle` cadence
+   (same shape as the existing `mark` job's proven 30-minute cron) is only for *soft*
+   logic (time stops, thesis re-checks), not the safety-critical part.
 
 **Already built and directly reusable** (verified by reading the code, not assumed):
 
@@ -651,38 +712,29 @@ placebo on a shadow ledger, pre-registered as `THESES.md`'s T6.
 - `THESES.md`'s T6 slot is free (T2/T3/T5 active, T1/T4 out of scope), so the brief's
   "pre-register as T6" needs no renumbering.
 
-**Hard prerequisites, in dependency order** -- these are decisions and builds, not details:
+**Remaining prerequisites** -- what Phase 0 didn't (and couldn't) resolve:
 
-1. **A second paper account plus per-sleeve credential routing, which does not exist.** The
-   brief requires S4 in its own account and forbids sharing one with the monthly thesis
-   sleeves, but `AlpacaPaperBroker.from_env()` and `AlpacaMarketDataClient.from_env()` both
-   read one global `ALPACA_API_KEY`/`ALPACA_SECRET_KEY` pair and are called identically
-   regardless of sleeve. This is the same gap that made enabling `s0` and `s3` together
-   unsafe (2026-09-19, Phase 8 entry above). Blocking for any stage that submits an order;
-   rollout stage 1 (shadow, submits nothing) could precede it.
-2. **Where the loop runs -- GitHub Actions cannot host it.** Today's infrastructure is GH
-   Actions cron committing a binary `ledger/paper.sqlite3` and serializing ~6 jobs/day
-   behind one concurrency group, which already produced a real push race (Phase 8). The
-   brief needs roughly nineteen 20-minute cycles, event-triggered cycles, and a
-   *minute-level* monitor process watching open positions between cycles. GH Actions has
-   5-minute minimum cron granularity, no persistent process, a fresh checkout per job, and
-   queue delays of many minutes under load. A per-minute writer cannot use the
-   ledger-in-git pattern at all. This is the brief's own first open question and it decides
-   the shape of everything else, including what happens to an in-flight position if the
-   host dies mid-session.
-3. **A per-day model-call spend cap** -- the brief's second open question; needs a number
-   before the loop can have a hard stop to enforce.
-4. **Alpaca's news API is not wired anywhere** (no `NewsClient` under `src/`), and the
-   brief's third open question -- whether the Researcher reads anything beyond it and this
-   project's own data -- is unanswered. Any new source is an "ask first" item by the
-   brief's own boundaries.
-5. **`.claude/agents/` does not exist** (`.claude/` holds only `scheduled_tasks.lock`), so
-   the three role prompts are new files.
-6. **The headless flag set is unverified.** The brief names `--bare`, `--allowedTools`,
-   `--output-format json`, `--max-turns`, `--append-system-prompt` and says explicitly to
-   check them against the headless docs before relying on them. Deliberately left until
-   implementation starts rather than verified now -- flags can change, and a check done
-   months early is a check that has to be redone.
+1. **The owner still needs to actually create the second Alpaca paper account** and add
+   `ALPACA_S4_API_KEY`/`ALPACA_S4_SECRET_KEY` as GitHub repo secrets, and a new
+   `ANTHROPIC_API_KEY` (Console/metered, per the `--bare` decision below) scoped *only* to
+   the CI environment -- confirmed in `code.claude.com/docs/en/authentication` that
+   setting it locally would silently flip the owner's own interactive Claude Code usage to
+   metered billing too. The code side (parameterized `from_env`) is done; these are
+   real-world owner actions, not code.
+2. ~~Where the loop runs~~ -- **resolved**, see the correction above.
+3. **A per-day model-call spend cap** -- the mechanism is built (`intraday/budget.py`), but
+   the $10 default is a placeholder. Recalibrate from real Stage-1 shadow-mode logging.
+4. **Alpaca's news API is not wired anywhere** (no `NewsClient` under `src/`), and whether
+   the Researcher reads anything beyond it and this project's own data is still
+   unanswered -- still recommending "nothing beyond Alpaca news + existing data" as the
+   Stage-1 default, expand later only with evidence.
+5. ~~`.claude/agents/`~~ -- **resolved**, see the correction above (`--append-system-
+   prompt-file`, a Phase 2 concern).
+6. **The headless flag set beyond `--bare` is still unverified against real usage**
+   (`--allowedTools`, `--output-format json`, `--max-turns`, `--append-system-prompt-file`
+   exist and are documented, confirmed this session, but haven't been exercised against a
+   real Claude Code call from this project yet) -- Phase 2's job, deliberately not done
+   early.
 
 **Rollout stages from the brief** (none started; each gated on the owner, never automatic):
 

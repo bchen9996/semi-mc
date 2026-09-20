@@ -331,3 +331,23 @@ def test_from_env_never_constructs_a_live_client(monkeypatch):
     ]
     assert len(body_lines) == 1
     assert "paper=True" in body_lines[0]
+
+
+def test_from_env_reads_a_named_key_pair_for_a_second_account(monkeypatch):
+    """S4 (BRIEF_INTRADAY.md) trades its own Alpaca paper account and must never share
+    credentials with s0/s3 -- `from_env` accepts which env vars to read instead of a
+    second broker class."""
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    monkeypatch.setenv("ALPACA_S4_API_KEY", "s4-key")
+    monkeypatch.setenv("ALPACA_S4_SECRET_KEY", "s4-secret")
+    broker = AlpacaPaperBroker.from_env("ALPACA_S4_API_KEY", "ALPACA_S4_SECRET_KEY")
+    assert broker._client is not None
+
+
+def test_from_env_error_names_the_specific_missing_vars(monkeypatch):
+    monkeypatch.delenv("ALPACA_S4_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_S4_SECRET_KEY", raising=False)
+    monkeypatch.setattr("semimc.execution.alpaca_broker.load_dotenv", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="ALPACA_S4_API_KEY/ALPACA_S4_SECRET_KEY"):
+        AlpacaPaperBroker.from_env("ALPACA_S4_API_KEY", "ALPACA_S4_SECRET_KEY")

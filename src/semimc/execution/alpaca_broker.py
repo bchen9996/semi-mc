@@ -203,17 +203,25 @@ class AlpacaPaperBroker:
         self._client = client
 
     @classmethod
-    def from_env(cls) -> AlpacaPaperBroker:
-        """Load ``ALPACA_API_KEY``/``ALPACA_SECRET_KEY`` from ``.env`` (or the real
-        environment) and build a paper-only client. ``paper=True`` is hardcoded here, not
-        a parameter -- there is no way to call this and get a live-trading client."""
+    def from_env(
+        cls, key_env: str = "ALPACA_API_KEY", secret_env: str = "ALPACA_SECRET_KEY"
+    ) -> AlpacaPaperBroker:
+        """Load a key pair from ``.env`` (or the real environment) and build a paper-only
+        client. ``paper=True`` is hardcoded here, not a parameter -- there is no way to
+        call this and get a live-trading client.
+
+        ``key_env``/``secret_env`` default to s0/s3's pair, unchanged from before this
+        parameter existed. S4 (``BRIEF_INTRADAY.md``) trades its own, separate Alpaca
+        paper account and must never share credentials with s0/s3 -- it calls this with
+        ``key_env="ALPACA_S4_API_KEY", secret_env="ALPACA_S4_SECRET_KEY"`` instead.
+        """
         load_dotenv()
-        api_key = os.environ.get("ALPACA_API_KEY")
-        secret_key = os.environ.get("ALPACA_SECRET_KEY")
+        api_key = os.environ.get(key_env)
+        secret_key = os.environ.get(secret_env)
         if not api_key or not secret_key:
             raise RuntimeError(
-                "ALPACA_API_KEY/ALPACA_SECRET_KEY not set. Copy .env.example to .env and "
-                "fill in your paper account's keys (app.alpaca.markets/paper/dashboard)."
+                f"{key_env}/{secret_env} not set. Copy .env.example to .env and fill in "
+                "your paper account's keys (app.alpaca.markets/paper/dashboard)."
             )
         return cls(TradingClient(api_key=api_key, secret_key=secret_key, paper=True))
 

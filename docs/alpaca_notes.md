@@ -89,6 +89,21 @@ real account is flagged as such, not guessed at.
   pulling 15-min-delayed SIP minute bars for the after-the-fact cost analysis T5
   mentions -- to be checked in Phase 6 against the real account's actual plan.
 
+## Options (S4, `BRIEF_INTRADAY.md`)
+
+Both of the brief's own options gates are unresolved -- recorded here per its instruction,
+not new research. Options stay `enabled: false` (`IntradayConfig.options`) through every
+rollout stage until both are checked, regardless of how far S4's equities-only stages get.
+
+- **Account gate**: the paper account's options trading level is unconfirmed. Alpaca paper
+  accounts enable options by default, but the level decides which structures (long calls/
+  puts vs. spreads) are actually allowed -- not yet checked against S4's account (which
+  doesn't exist yet either, see "Multiple paper accounts" above).
+- **Data gate**: the free Basic plan's options feed is indicative/derived, not real OPRA,
+  and trades are delayed 15 minutes; real-time OPRA needs the paid Algo Trader Plus plan.
+  Not yet decided whether to subscribe or accept the indicative feed under the brief's
+  conservative options rules -- moot until Stage 4 (options in shadow) is reached.
+
 ## Official MCP server
 
 - Package: `alpaca-mcp-server`. Defaults to paper trading (`ALPACA_PAPER_TRADE=true`);

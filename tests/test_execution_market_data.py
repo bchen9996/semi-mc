@@ -72,3 +72,14 @@ def test_from_env_reuses_the_same_env_vars_alpaca_paper_broker_uses(monkeypatch)
     monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
     client = AlpacaMarketDataClient.from_env()
     assert isinstance(client._client, StockHistoricalDataClient)
+
+
+def test_from_env_reads_a_named_key_pair_for_a_second_account(monkeypatch):
+    """S4 (BRIEF_INTRADAY.md) reads quotes on behalf of its own, separate paper account --
+    same account-separation reasoning as AlpacaPaperBroker.from_env."""
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    monkeypatch.setenv("ALPACA_S4_API_KEY", "s4-key")
+    monkeypatch.setenv("ALPACA_S4_SECRET_KEY", "s4-secret")
+    client = AlpacaMarketDataClient.from_env("ALPACA_S4_API_KEY", "ALPACA_S4_SECRET_KEY")
+    assert client._client is not None

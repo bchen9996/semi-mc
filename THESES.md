@@ -1,8 +1,9 @@
 # Paper-trading theses
 
-Pre-registered before any sleeve has traded for real (`paper.registered_accounts` is
-empty and every sleeve's `trading_enabled` is false as of this writing) -- the entire
-point of writing this down now, not after there is a result to be tempted by.
+Pre-registered before any sleeve has traded for real -- the entire point of writing this
+down now, not after there is a result to be tempted by. (As of this writing, `s3` is
+enabled and trading; `s0` and S4 are not. T6 below was pre-registered before S4 exists in
+code at all, ahead of that same rule.)
 
 The original brief that first numbered these theses T1-T5 no longer exists as a document
 (not in this repo, not recoverable). T2/T3/T5 below were reconstructed from what the
@@ -83,6 +84,40 @@ wrong in a specific, exploitable direction, not just noisy).
 time-gated so much as fill-count-gated; treat fewer than ~20 fills as anecdotal.
 
 **Status**: not yet evaluated -- no fills exist yet.
+
+## T6 -- does the S4 intraday agent add anything over a placebo and SOXX?
+
+Pre-registered ahead of S4's own first order, per `BRIEF_INTRADAY.md`'s own instruction --
+S4 does not exist in code yet (`tasks/todo.md`'s S4 section, Phase 0 only). Written now,
+in the same pre-registration spirit as T2/T3/T5, so the first real result isn't the first
+time this project decided what would count as a positive one.
+
+**Claim**: a scheduled, LLM-driven research-and-trade loop (Researcher/Trader/Reviewer
+roles reading news and market data, proposing trades validated against risk limits held
+in code, `BRIEF_INTRADAY.md`) produces better risk-adjusted returns, net of modeled
+costs, than the same risk controls applied to a placebo agent, and than holding SOXX.
+
+**Placebo agent**: identical sizing, execution, and risk controls as the real S4 loop, but
+entries drawn at random from the morning watchlist instead of the Trader's judgment. Runs
+on its own shadow ledger every day S4 runs, never submitting real orders.
+
+**Comparison**: not yet written -- an `analytics.paper_evaluation.evaluate_t6`-style
+function, following T2/T3's pattern of citing the exact module/function once it exists,
+comparing S4's real equity curve, the placebo's shadow equity curve, and SOXX buy-and-hold
+on net P&L per trade, expectancy, hit rate, average win vs. average loss, exposure-
+adjusted return, beta to SOXX, turnover, slippage vs. arrival price, time in market,
+confidence calibration, and process scores (per `BRIEF_INTRADAY.md`'s "Evaluation"
+section).
+
+**Decided by**: not yet set -- to be derived from a power analysis against the metrics
+above once S4 is far enough along to estimate their variance, the same "set it from a
+power analysis, don't guess" instruction the brief itself gives, mirroring how this
+project already treats minimum-sample gates elsewhere.
+
+**Minimum history**: monthly review once trading; a formal verdict at 3 and 6 months
+(`BRIEF_INTRADAY.md`'s own review cadence, distinct from `paper.review_months`).
+
+**Status**: not yet evaluated -- S4 has no code, no account, and no trades yet.
 
 ## Explicitly out of scope
 

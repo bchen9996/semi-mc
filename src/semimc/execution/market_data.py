@@ -44,16 +44,22 @@ class AlpacaMarketDataClient:
         self._client = client
 
     @classmethod
-    def from_env(cls) -> AlpacaMarketDataClient:
-        """Reuses the exact same ``.env`` keys as ``AlpacaPaperBroker.from_env`` -- no new
-        secret, no new `.env.example` entry."""
+    def from_env(
+        cls, key_env: str = "ALPACA_API_KEY", secret_env: str = "ALPACA_SECRET_KEY"
+    ) -> AlpacaMarketDataClient:
+        """Reuses whichever ``.env`` key pair ``AlpacaPaperBroker.from_env`` would use --
+        no new secret, no new `.env.example` entry. ``key_env``/``secret_env`` default to
+        s0/s3's pair, unchanged from before this parameter existed; pass S4's own pair
+        (``"ALPACA_S4_API_KEY"``/``"ALPACA_S4_SECRET_KEY"``) when reading quotes on its
+        behalf, for the same account-separation reason as ``AlpacaPaperBroker.from_env``.
+        """
         load_dotenv()
-        api_key = os.environ.get("ALPACA_API_KEY")
-        secret_key = os.environ.get("ALPACA_SECRET_KEY")
+        api_key = os.environ.get(key_env)
+        secret_key = os.environ.get(secret_env)
         if not api_key or not secret_key:
             raise RuntimeError(
-                "ALPACA_API_KEY/ALPACA_SECRET_KEY not set -- copy .env.example to .env "
-                "and fill in a paper account's keys"
+                f"{key_env}/{secret_env} not set -- copy .env.example to .env and fill in "
+                "a paper account's keys"
             )
         return cls(StockHistoricalDataClient(api_key=api_key, secret_key=secret_key))
 

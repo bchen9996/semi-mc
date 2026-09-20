@@ -341,6 +341,77 @@ class PaperConfig(_Base):
     ledger_path: str = "ledger/paper.sqlite3"
 
 
+class IntradayBudgetConfig(_Base):
+    """Per-call and per-day hard stops on LLM spend (BRIEF_INTRADAY.md).
+
+    ``max_cost_usd_per_day`` is a placeholder, not a researched figure -- the brief's own
+    instruction is to recalibrate it from real shadow-mode logging (`intraday/budget.py`)
+    rather than guess a number up front.
+    """
+
+    max_cost_usd_per_call: float = Field(1.0, gt=0)
+    max_cost_usd_per_day: float = Field(10.0, gt=0)
+
+
+class IntradayRiskConfig(_Base):
+    """Trading budget and risk limits (BRIEF_INTRADAY.md's "Risk limits and trading
+    budget" and "Defaults" tables) -- kept in code, never adjustable by the agent itself.
+    """
+
+    new_positions_per_day: int = Field(6, gt=0)
+    round_trips_per_symbol_per_day: int = Field(2, gt=0)
+    daily_turnover_pct: float = Field(1.50, gt=0)
+    risk_per_trade_pct: float = Field(0.0075, gt=0)
+    single_name_cap_pct: float = Field(0.15, gt=0)
+    gross_cap_pct: float = Field(1.50, gt=0)
+    net_long_cap_pct: float = Field(1.00, gt=0)
+    daily_loss_soft_pct: float = Field(0.02, gt=0)
+    daily_loss_hard_pct: float = Field(0.03, gt=0)
+    cooldown_minutes_after_stopout: int = Field(30, ge=0)
+    overnight_gross_cap_pct: float = Field(1.00, gt=0)
+    min_edge_multiple: float = Field(2.0, gt=0)
+    equity_cost_bps_per_side: float = Field(8.0, ge=0)
+
+
+class IntradayScheduleConfig(_Base):
+    timezone: str = "America/Chicago"
+    cycle_interval_minutes: int = Field(20, gt=0)
+
+
+class IntradayOptionsConfig(_Base):
+    """Both gates (account level, data feed) are unresolved -- see docs/alpaca_notes.md.
+    Stays False through the equities-only rollout stages regardless of either gate."""
+
+    enabled: bool = False
+
+
+class IntradayConfig(_Base):
+    """S4: the LLM-driven intraday agent sleeve (BRIEF_INTRADAY.md). Deliberately not a
+    `PaperConfig.sleeves` entry -- its LLM-proposed trades don't fit `Decision.weights`'s
+    closed-form target-weight shape (`strategy/decide.py`), and it trades its own,
+    separate Alpaca paper account rather than the one `paper.registered_accounts` guards.
+    """
+
+    trading_enabled: bool = False
+    # S4's OWN paper account number -- never the same account paper.registered_accounts
+    # guards. execution/alpaca_broker.py::AlpacaPaperBroker.from_env reads a distinct
+    # ALPACA_S4_API_KEY/ALPACA_S4_SECRET_KEY pair for this sleeve.
+    registered_account: str | None = None
+    budget: IntradayBudgetConfig = Field(default_factory=IntradayBudgetConfig)
+    risk: IntradayRiskConfig = Field(default_factory=IntradayRiskConfig)
+    schedule: IntradayScheduleConfig = Field(default_factory=IntradayScheduleConfig)
+    options: IntradayOptionsConfig = Field(default_factory=IntradayOptionsConfig)
+    # Separate sentinel from paper.kill_switch_path -- S4 can be halted independently of
+    # s0/s3 and vice versa.
+    kill_switch_path: str = "runs/intraday/KILL_SWITCH"
+    # Separate ledger file from paper.ledger_path: S4 writes roughly every 20 minutes all
+    # day, versus s0/s3's monthly-decide-plus-half-hourly-mark cadence. Sharing one file
+    # would mean every S4 cycle's git commit contends with s0/s3's commits on the exact
+    # same file -- the push-race class of bug Phase 8 already had to fix once, at a much
+    # lower write frequency than S4's.
+    ledger_path: str = "ledger/intraday.sqlite3"
+
+
 class ReportingConfig(_Base):
     fan_percentiles: list[int] = Field(default_factory=lambda: [5, 25, 50, 75, 95])
     figure_dpi: int = Field(120, gt=0)
@@ -364,6 +435,7 @@ class Config(_Base):
     scenarios: dict[str, dict[str, Any]] = Field(default_factory=dict)
     reporting: ReportingConfig = Field(default_factory=ReportingConfig)
     paper: PaperConfig = Field(default_factory=PaperConfig)
+    intraday: IntradayConfig = Field(default_factory=IntradayConfig)
 
     project_root: Path = Field(default=PROJECT_ROOT, exclude=True)
 
