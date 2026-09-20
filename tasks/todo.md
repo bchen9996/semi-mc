@@ -712,6 +712,40 @@ writing Phase 0's plan** (not assumed from the brief alone):
 - `THESES.md`'s T6 slot is free (T2/T3/T5 active, T1/T4 out of scope), so the brief's
   "pre-register as T6" needs no renumbering.
 
+**Phase 1 -- proposal schema and validator, built 2026-09-20.** Still no LLM call, order,
+or job. Built:
+
+- [x] `intraday/proposals.py::TradeProposal` -- a **pydantic** model, deliberately not a
+      dataclass like every other in-process type in this project (`Decision`,
+      `OrderRequest`, `Order`, `Position`): those are built by trusted internal code,
+      while a proposal is untrusted external input (a Trader LLM's JSON response) that
+      must be schema-validated before anything downstream trusts it, the same reason
+      `config.py`'s schema is pydantic. `extra="forbid"`, a `model_validator` requiring
+      `side`/`size_pct`/`limit_price`/`thesis`/`invalidation_price`/`time_stop_minutes`
+      for `open`/`add` only. `instrument: Literal["equity", "option"]` accepted at the
+      schema level for a future options phase, but every `option` proposal is rejected by
+      the validator below while `options.enabled` is `False` (every stage through Phase
+      7) -- no expiry/strike/right/structure fields yet, nothing to validate them against.
+- [x] `intraday/proposals.py::ValidationContext`/`validate_proposal` -- mirrors
+      `execution/pretrade.py::check_pretrade`'s shape (everything gathered once by the
+      caller, every failure returned as `list[str]`, not just the first). `hold`/
+      `no_trade` always pass ("first-class answers, never penalized"); `close`/`trim`
+      skip every risk-increasing check since they reduce exposure ("when the budget is
+      spent, the agent can still close, trim, and hold"). `open`/`add` are gated by: edge
+      vs. modeled round-trip cost, `new_positions_per_day`/`round_trips_per_symbol_per_day`
+      (counted from the ledger's already-*accepted* proposals today, filtered in Python --
+      no new ledger method needed), per-trade risk-to-invalidation, single-name/gross/net
+      concentration, a daily-loss soft/hard backstop, post-stop-out cooldown, and daily
+      turnover.
+- [x] **Deliberately deferred, not half-built**: `overnight_gross_cap_pct` (the `carry`
+      job's decision at day's end, Phase 4, not a per-proposal check) and real stop-out
+      detection (`last_stopout_at` is a fixture-supplied dict for now -- Phase 3 builds
+      real order/fill handling that would actually populate it).
+- [x] 26 tests (`tests/test_intraday_proposals.py`): schema (missing required fields,
+      length/range bounds, unknown-field rejection, `hold`/`no_trade`/`close`/`trim` need
+      none of `open`'s fields) and one test per validator check, including that a `close`/
+      `trim`/`hold`/`no_trade` bypasses every check that would otherwise fail.
+
 **Remaining prerequisites** -- what Phase 0 didn't (and couldn't) resolve:
 
 1. **The owner still needs to actually create the second Alpaca paper account** and add
