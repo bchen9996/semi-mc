@@ -271,8 +271,46 @@ Never live, at any stage.
 - Which machine runs the schedule, and what happens to an in-flight position if it goes down mid-session?
 - What's the acceptable spend per trading day on model calls?
 - Should the Researcher read anything beyond Alpaca's news API and the project's own data, and if so, which sources?
-- Does headless invocation for this loop run on Claude subscription auth (Pro/Max) or does
-  it need metered API billing? The owner is subscription-based, not API-metered, today.
-  Confirm with Anthropic directly whether unattended, cron-triggered, indefinite automated
-  calls (~20-25/day, every weekday) are within a subscription's intended use and usage
-  limits before building `-p` invocation around that auth -- not assumed either way.
+- ~~Does headless invocation run on Claude subscription auth or does it need metered API
+  billing?~~ **Resolved 2026-09-20, verified directly against `code.claude.com/docs/en/
+  headless`, `.../authentication`, `.../legal-and-compliance`, and `support.claude.com`'s
+  Agent SDK usage article (not taken from a secondhand summary) -- and it surfaces a real
+  conflict with this brief's own design, not just a yes/no answer:**
+
+  - Subscription (OAuth) auth for unattended `-p` calls is a real, intended, documented
+    path: `claude setup-token` mints a one-year token (`CLAUDE_CODE_OAUTH_TOKEN`) exactly
+    for "CI pipelines, scripts, or other environments where interactive browser login
+    isn't available," and non-interactive `-p` usage currently draws from the normal
+    subscription usage pool, not a separate credit -- confirmed current as of a June 15,
+    2026 update pausing a previously-announced change to the contrary. Anthropic says an
+    updated plan is still coming, with no date given; **treat this as provisional, not
+    settled, and re-check before each rollout stage**, not just once now.
+  - Anthropic's usage policy scopes subscription OAuth to "ordinary use" by the
+    subscriber, as opposed to a developer "building products or services" for others
+    (API-key territory). A personal, single-user, non-commercial research loop reads as
+    the former -- but this is this project's own reasonable reading of general policy
+    language, not a ruling on this exact pattern; the legal page itself invites contacting
+    sales for a definitive answer on unusual cases.
+  - **The conflict:** this brief's own "Agent runtime and cost control" section calls for
+    `--bare`, specifically to stop an unattended `-p` session from auto-loading a
+    project's hooks and connecting its `.mcp.json` MCP servers with no prompt and no one
+    watching to catch anything unexpected -- exactly the failure mode the brief's whole
+    "limits live in code, not a prompt" philosophy is about. But **`--bare` mode never
+    reads OAuth credentials or `CLAUDE_CODE_OAUTH_TOKEN` at all** (confirmed directly in
+    the docs) -- it only accepts `ANTHROPIC_API_KEY` or an `apiKeyHelper`, i.e. metered
+    billing. Subscription auth and `--bare` are mutually exclusive. Anthropic's own docs
+    also call `--bare` "the recommended mode for scripted and SDK calls" and say it "will
+    become the default for `-p` in a future release" -- a real signal about intended
+    practice for unattended use, not an incidental flag.
+  - **Recommendation: keep `--bare`, accept metered `ANTHROPIC_API_KEY` billing, don't
+    build around subscription auth.** This repo has no `.claude/settings.json` hooks or
+    `.mcp.json` today, so skipping `--bare` happens to be safe *right now* -- but a loop
+    meant to run unattended indefinitely shouldn't depend on that staying true, and the
+    whole point of `--bare` is not needing to keep re-checking it. Given the earlier
+    finding that this workload's actual token cost is small (compact per-cycle context, a
+    cheap model for ~20 Trader calls/day, a stronger model for only 2 calls/day), paying
+    for that isolation guarantee via metered billing is a small, bounded, known cost --
+    the same shape of tradeoff this project already made choosing GitHub's built-in
+    failure email over a new alerting dependency: take the option with the smallest new
+    failure surface, even at a little extra cost, over the one that's free but adds a
+    silent dependency on nothing changing.
