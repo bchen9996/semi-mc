@@ -271,3 +271,8 @@ Never live, at any stage.
 - Which machine runs the schedule, and what happens to an in-flight position if it goes down mid-session?
 - What's the acceptable spend per trading day on model calls?
 - Should the Researcher read anything beyond Alpaca's news API and the project's own data, and if so, which sources?
+- Does headless invocation for this loop run on Claude subscription auth (Pro/Max) or does
+  it need metered API billing? The owner is subscription-based, not API-metered, today.
+  Confirm with Anthropic directly whether unattended, cron-triggered, indefinite automated
+  calls (~20-25/day, every weekday) are within a subscription's intended use and usage
+  limits before building `-p` invocation around that auth -- not assumed either way.
