@@ -214,3 +214,34 @@ paper:
   registered_accounts: []     # paper-only guard: empty until an account is deliberately added
   kill_switch_path: runs/paper/KILL_SWITCH   # its mere existence halts all trading
   ledger_path: ledger/paper.sqlite3   # git-tracked, not under runs/ -- must survive a stateless CI runner
+
+# BRIEF_INTRADAY.md. S4: the LLM-driven intraday agent sleeve. No code path yet beyond
+# Phase 0's plumbing (config, ledger, credential routing, budget enforcement) -- see
+# tasks/todo.md's S4 section. Its own sleeve, its own Alpaca paper account, never s0/s3's.
+intraday:
+  trading_enabled: false
+  registered_account: null
+  budget:
+    max_cost_usd_per_call: 1.0
+    max_cost_usd_per_day: 10.0   # placeholder -- recalibrate from real shadow-mode logging
+  risk:
+    new_positions_per_day: 6
+    round_trips_per_symbol_per_day: 2
+    daily_turnover_pct: 1.50
+    risk_per_trade_pct: 0.0075
+    single_name_cap_pct: 0.15
+    gross_cap_pct: 1.50
+    net_long_cap_pct: 1.00
+    daily_loss_soft_pct: 0.02
+    daily_loss_hard_pct: 0.03
+    cooldown_minutes_after_stopout: 30
+    overnight_gross_cap_pct: 1.00
+    min_edge_multiple: 2.0
+    equity_cost_bps_per_side: 8.0
+  schedule:
+    timezone: America/Chicago
+    cycle_interval_minutes: 20
+  options:
+    enabled: false   # both gates unresolved -- see docs/alpaca_notes.md
+  kill_switch_path: runs/intraday/KILL_SWITCH
+  ledger_path: ledger/intraday.sqlite3
