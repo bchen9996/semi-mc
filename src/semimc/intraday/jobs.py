@@ -1,13 +1,12 @@
-"""S4's scheduled jobs (`BRIEF_INTRADAY.md`'s "Daily schedule"), Phase 5.
+"""S4's scheduled jobs (`BRIEF_INTRADAY.md`'s "Daily schedule"), Phases 5-6.
 
-Five of the brief's eight named jobs, given the further split `tasks/todo.md`'s S4
-addendum records: `preflight`, `preopen`, `open_batch`/`cycle` (one shared
+Six of the brief's eight named jobs, given the further split `tasks/todo.md`'s S4
+addendum records: `preflight`, `research`, `preopen`, `open_batch`/`cycle` (one shared
 implementation, `run_cycle`, since they are the same operation -- `open_batch` is just
 the first `cycle` of the day), and `carry`. `monitor` (not in the brief's original list,
 but matching its own separate `monitor.py` file) runs standalone on a tight, model-free
-cron and is also the first thing `run_cycle` calls. `research`/`eod_review`/
-`weekly_review` are Phase 6/9's jobs, not built here -- see the Phase 5 plan's "Context"
-section for why.
+cron and is also the first thing `run_cycle` calls. `eod_review`/`weekly_review` are
+Phase 9's jobs, not built here -- see `tasks/todo.md`'s S4 addendum for why.
 
 Every `run_<verb>` function here is a plain function returning a result dataclass, never
 raising for a routine outcome -- the same shape `live/{decide,execute,mark}.py` already
@@ -32,9 +31,12 @@ import pandas as pd
 from pydantic import ValidationError
 
 from ..config import Config, IntradayConfig
+from ..data import MarketData
+from ..data.realized import realized_variance
 from ..execution.broker import Broker, OrderSide, Position
 from ..execution.market_data import AlpacaMarketDataClient
-from .context import build_trader_context
+from ..execution.news import AlpacaNewsClient
+from .context import WatchlistCandidate, build_researcher_context, build_trader_context
 from .ledger import IntradayLedger
 from .llm import ClaudeCliClient, DailyBudgetExhausted, invoke_role
 from .monitor import check_invalidation_and_time_stops
@@ -145,6 +147,7 @@ def run_preflight(
     config: Config,
     broker: Broker,
     market_data: AlpacaMarketDataClient,
+    news_client: AlpacaNewsClient,
     ledger: IntradayLedger,
     now: dt.datetime,
 ) -> PreflightResult:
@@ -155,9 +158,11 @@ def run_preflight(
     cycle on it.
 
     Checks: `check_intraday_pretrade` (kill switch, trading_enabled, registered account,
-    account status, market open), yesterday's reconciliation status (if any), and a
-    market-data smoke test. "Playbook version loaded" (brief) is skipped -- no
-    `PLAYBOOK.md` exists before Phase 9.
+    account status, market open), yesterday's reconciliation status (if any), a
+    market-data smoke test, and (Phase 6) a news-feed smoke test -- `research` runs less
+    than an hour later and would otherwise be the first thing to discover a dead news
+    feed. "Playbook version loaded" (brief) is skipped -- no `PLAYBOOK.md` exists before
+    Phase 9.
     """
     failures = list(
         check_intraday_pretrade(IntradayPretradeContext(now=now, config=config, broker=broker))
@@ -172,10 +177,222 @@ def run_preflight(
     except Exception as exc:
         failures.append(f"market data unreachable: {exc}")
 
+    try:
+        news_client.get_news(["SPY"], start=now - dt.timedelta(hours=1), end=now)
+    except Exception as exc:
+        failures.append(f"news feed unreachable: {exc}")
+
     for failure in failures:
         ledger.record_incident("error", failure)
 
     return PreflightResult(passed=not failures, failures=failures)
+
+
+# -- research (Phase 6) ------------------------------------------------------------------
+
+
+def _premarket_moves(
+    tickers: list[str],
+    market_data_pit: MarketData,
+    market_data: AlpacaMarketDataClient,
+    now: dt.datetime,
+) -> dict[str, float]:
+    """Percent move from the last cached close to the latest Alpaca quote right now.
+    `market_data_pit`'s cache is refreshed by the workflow's own `semimc fetch` step
+    before `research` runs and today's session hasn't opened yet, so its most recent
+    cached row already *is* the prior close -- no separate "yesterday" lookup needed. A
+    ticker missing either side is simply absent, same "a single missing quote must not
+    crash a whole report" tolerance `quote_map` already uses."""
+    prior_close = market_data_pit.spot(tickers)
+    moves: dict[str, float] = {}
+    for ticker in tickers:
+        prior = prior_close.get(ticker)
+        if prior is None or pd.isna(prior) or prior <= 0:
+            continue
+        current = midpoint_price(market_data.latest_quote(ticker, at=now))
+        if current is None:
+            continue
+        moves[ticker] = (current - prior) / prior
+    return moves
+
+
+def _upcoming_earnings(
+    tickers: list[str], market_data_pit: MarketData, as_of: pd.Timestamp, lookahead_days: int
+) -> dict[str, str]:
+    """Nearest scheduled report date within `lookahead_days`, per ticker with one. The
+    report *date* is known ahead of time (`data/earnings.py`'s own point-in-time
+    reasoning); only the *reaction* is what the Researcher has to weigh -- not a leak."""
+    if market_data_pit.earnings is None:
+        return {}
+    stamp = pd.Timestamp(as_of).normalize()
+    horizon = stamp + pd.Timedelta(days=lookahead_days)
+    upcoming: dict[str, str] = {}
+    for ticker in tickers:
+        rows = market_data_pit.earnings.for_ticker(ticker)
+        future = rows[(rows["date"] > stamp) & (rows["date"] <= horizon)]
+        if not future.empty:
+            upcoming[ticker] = str(pd.Timestamp(future.iloc[0]["date"]).date())
+    return upcoming
+
+
+def _realized_vol(tickers: list[str], market_data_pit: MarketData) -> dict[str, float]:
+    """Latest Garman-Klass daily variance, annualized -- a deterministic, no-fit
+    volatility snapshot. Deliberately not a live GARCH/HAR/regime re-fit for the whole
+    universe every morning: no existing daily-refresh job to hang that on, and it would be
+    a real latency/cost addition deserving its own design pass (Phase 6 plan's scope
+    decision 2). A ticker with no cached intraday range is simply absent."""
+    vol: dict[str, float] = {}
+    for ticker in tickers:
+        if not market_data_pit.has_ohlc(ticker):
+            continue
+        try:
+            series = realized_variance(market_data_pit.ohlc, ticker)
+        except ValueError:
+            continue
+        if series.empty:
+            continue
+        vol[ticker] = (float(series.iloc[-1]) * 252) ** 0.5
+    return vol
+
+
+def _cap_news_per_symbol(articles: list[Any], max_per_symbol: int) -> list[Any]:
+    """Caps how many articles reach the model's context per symbol, most recent first --
+    BRIEF_INTRADAY.md's "a short list of high-quality candidates is worth more than a long
+    list," and it directly bounds Researcher call cost. Every fetched article is still
+    recorded in `headlines_seen` regardless of this cap (`run_research` iterates the
+    uncapped list for that) -- this cap is about context size, not dedup completeness."""
+    counts: dict[str, int] = {}
+    capped: list[Any] = []
+    for article in sorted(articles, key=lambda a: a.created_at, reverse=True):
+        symbols = article.symbols or ["_none_"]
+        if all(counts.get(s, 0) >= max_per_symbol for s in symbols):
+            continue
+        for s in symbols:
+            counts[s] = counts.get(s, 0) + 1
+        capped.append(article)
+    return capped
+
+
+@dataclass(frozen=True)
+class ResearchResult:
+    brief_recorded: bool = False
+    watchlist_size: int = 0
+    skipped_reason: str | None = None
+
+
+def run_research(
+    config: Config,
+    broker: Broker,
+    market_data: AlpacaMarketDataClient,
+    news_client: AlpacaNewsClient,
+    market_data_pit: MarketData,
+    ledger: IntradayLedger,
+    llm_client: ClaudeCliClient,
+    as_of: pd.Timestamp,
+    cycle: str,
+    now: dt.datetime,
+) -> ResearchResult:
+    """Once per trading day: reads overnight news, pre-market moves, the earnings
+    calendar, and a realized-vol snapshot, and writes a morning brief plus a watchlist
+    (`BRIEF_INTRADAY.md`'s `research` row). Two of the brief's named inputs are
+    deliberately not built -- analyst actions (no data source exists anywhere in this
+    project; the brief itself lists this as an open question, not a settled requirement)
+    and a live daily re-fit of the project's forecast/vol models (see `_realized_vol`).
+
+    Idempotent per `as_of`: if `ledger.watchlist_for(as_of)` is already non-empty, this is
+    a repeat call (most likely a retried GitHub Actions attempt) and returns immediately
+    without spending anything -- the same `ON CONFLICT DO NOTHING` reasoning
+    `record_session_open_equity` already uses, generalized to "don't re-call the model."
+    """
+    pretrade_failures = check_intraday_pretrade(
+        IntradayPretradeContext(now=now, config=config, broker=broker)
+    )
+    if pretrade_failures:
+        for failure in pretrade_failures:
+            ledger.record_incident("error", failure)
+        return ResearchResult(skipped_reason="; ".join(pretrade_failures))
+
+    if ledger.watchlist_for(as_of):
+        return ResearchResult(skipped_reason=f"research already ran for {as_of}")
+
+    intraday = config.intraday
+    research_cfg = intraday.research
+    tickers = config.universe.tickers
+
+    news_start = now - dt.timedelta(hours=research_cfg.news_lookback_hours)
+    articles = news_client.get_news(tickers, start=news_start, end=now)
+    capped_articles = _cap_news_per_symbol(articles, research_cfg.max_headlines_per_symbol)
+    news_sections = [
+        {
+            "headline": article.headline,
+            "summary": article.summary,
+            "symbols": article.symbols,
+            "created_at": str(article.created_at),
+            "source": article.source,
+        }
+        for article in capped_articles
+    ]
+
+    premarket_moves = _premarket_moves(tickers, market_data_pit, market_data, now)
+    upcoming_earnings = _upcoming_earnings(
+        tickers, market_data_pit, as_of, research_cfg.earnings_lookahead_days
+    )
+    realized_vol = _realized_vol(tickers, market_data_pit)
+
+    try:
+        context = build_researcher_context(
+            as_of, cycle, intraday, news_sections, premarket_moves, upcoming_earnings, realized_vol
+        )
+        response = invoke_role(
+            "researcher",
+            as_of=as_of,
+            cycle=cycle,
+            config=intraday,
+            ledger=ledger,
+            client=llm_client,
+            context=context,
+        )
+    except DailyBudgetExhausted as exc:
+        return ResearchResult(skipped_reason=str(exc))
+
+    payload = response.structured_output if isinstance(response.structured_output, dict) else None
+    if payload is None or "morning_brief" not in payload or "watchlist" not in payload:
+        ledger.record_incident(
+            "error", "malformed researcher response: missing morning_brief/watchlist"
+        )
+        return ResearchResult(skipped_reason="malformed researcher response")
+
+    candidates: list[WatchlistCandidate] = []
+    for item in payload.get("watchlist", []):
+        try:
+            candidates.append(WatchlistCandidate(**item))
+        except (ValidationError, TypeError) as exc:
+            ledger.record_incident("error", f"malformed watchlist candidate: {exc}")
+
+    ledger.record_brief(as_of, {"text": payload["morning_brief"]})
+    for candidate in candidates:
+        ledger.record_watchlist_item(
+            as_of,
+            candidate.symbol,
+            candidate.thesis,
+            entry_trigger=candidate.entry_trigger,
+            invalidation=candidate.invalidation,
+            size_band=candidate.size_band,
+            horizon=candidate.horizon,
+            expected_move=candidate.expected_move,
+            expected_cost_bps=candidate.expected_cost_bps,
+        )
+
+    for article in articles:
+        ledger.record_headline_seen(
+            as_of,
+            "alpaca_news",
+            str(article.id),
+            symbols=article.symbols,
+            headline=article.headline,
+        )
+
+    return ResearchResult(brief_recorded=True, watchlist_size=len(candidates))
 
 
 # -- preopen ----------------------------------------------------------------------------
@@ -185,11 +402,13 @@ def run_preflight(
 class PreopenResult:
     tradable: list[str] = field(default_factory=list)
     dropped: list[tuple[str, str]] = field(default_factory=list)
+    new_headlines: list[tuple[str, str]] = field(default_factory=list)
 
 
 def run_preopen(
     config: Config,
     market_data: AlpacaMarketDataClient,
+    news_client: AlpacaNewsClient,
     ledger: IntradayLedger,
     as_of: pd.Timestamp,
     now: dt.datetime,
@@ -197,14 +416,40 @@ def run_preopen(
     """Refreshes a quote per watchlist symbol and runs `check_spread_gate`, logging a
     warning incident per drop -- read-only/logging only. `open_batch`/`cycle` re-run the
     identical gate themselves rather than trusting this result, so a missed or late
-    `preopen` run never blocks trading. Headline refresh (brief) waits on Phase 6's news
-    source.
+    `preopen` run never blocks trading.
+
+    Also refreshes headlines per watchlist symbol (Phase 6): a genuinely new article (not
+    already in `headlines_seen`) is recorded and logged as an info incident, but never
+    used here to drop a candidate -- `preopen` is a *deterministic* refresh (the brief's
+    own word), and judging whether a headline breaks a thesis is exactly the kind of call
+    this project reserves for the model. `run_cycle`'s `build_trader_context` call is what
+    actually lets the Trader see and react to it.
     """
     watchlist = ledger.watchlist_for(as_of)
-    tradable, _quotes, dropped = _apply_spread_gate(
-        watchlist, market_data, config.intraday, ledger, now
+    intraday = config.intraday
+
+    lookback = dt.timedelta(hours=intraday.research.preopen_lookback_hours)
+    new_headlines: list[tuple[str, str]] = []
+    for row in watchlist:
+        symbol = row["symbol"]
+        for article in news_client.get_news([symbol], start=now - lookback, end=now):
+            headline_hash = str(article.id)
+            if ledger.headline_already_seen("alpaca_news", headline_hash):
+                continue
+            ledger.record_headline_seen(
+                as_of,
+                "alpaca_news",
+                headline_hash,
+                symbols=article.symbols,
+                headline=article.headline,
+            )
+            ledger.record_incident("info", f"{symbol}: new headline -- {article.headline}")
+            new_headlines.append((symbol, article.headline))
+
+    tradable, _quotes, dropped = _apply_spread_gate(watchlist, market_data, intraday, ledger, now)
+    return PreopenResult(
+        tradable=[row["symbol"] for row in tradable], dropped=dropped, new_headlines=new_headlines
     )
-    return PreopenResult(tradable=[row["symbol"] for row in tradable], dropped=dropped)
 
 
 # -- open_batch / cycle (shared implementation) ------------------------------------------
@@ -319,9 +564,19 @@ def run_cycle(
     )
     prices.update({s: midpoint_price(q) for s, q in watchlist_quotes.items()})
 
+    symbols_in_view = {row["symbol"] for row in tradable_watchlist} | set(positions_notional)
+    headlines = ledger.recent_headlines_for(as_of, list(symbols_in_view)) if symbols_in_view else []
+
     try:
         context = build_trader_context(
-            as_of, cycle, intraday, ledger, tradable_watchlist, positions_notional, prices
+            as_of,
+            cycle,
+            intraday,
+            ledger,
+            tradable_watchlist,
+            positions_notional,
+            prices,
+            headlines=headlines,
         )
         response = invoke_role(
             "trader",

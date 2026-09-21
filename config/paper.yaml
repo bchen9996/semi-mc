@@ -220,5 +220,10 @@ intraday:
     reviewer: sonnet
     max_turns: 6
     timeout_seconds: 300
+  research:
+    news_lookback_hours: 16.0
+    preopen_lookback_hours: 2.0
+    earnings_lookahead_days: 5
+    max_headlines_per_symbol: 5
   kill_switch_path: runs/intraday/KILL_SWITCH
   ledger_path: ledger/intraday.sqlite3

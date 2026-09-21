@@ -1,7 +1,10 @@
-"""`intraday/jobs.py`: the scheduled loop (S4, `BRIEF_INTRADAY.md`, Phase 5) --
-`preflight`/`preopen`/`open_batch`/`cycle` (`run_cycle`, shared)/`carry`. Every LLM call
-is a fake `ClaudeCliClient(run=...)` (no subprocess, no network) and every broker call is
-`FakeBroker` -- same boundary-mocking convention as every other intraday test file.
+"""`intraday/jobs.py`: the scheduled loop (S4, `BRIEF_INTRADAY.md`, Phases 5-6) --
+`preflight`/`research`/`preopen`/`open_batch`/`cycle` (`run_cycle`, shared)/`carry`. Every
+LLM call is a fake `ClaudeCliClient(run=...)` (no subprocess, no network) and every broker
+call is `FakeBroker` -- same boundary-mocking convention as every other intraday test file.
+`run_research`'s tests use the `market` fixture (`tests/conftest.py`) for its own-data
+inputs (OHLC/earnings) -- the real, fixture-backed `MarketData`, not a fake, since building
+one correctly is exactly what those tests should exercise.
 """
 
 from __future__ import annotations
@@ -14,7 +17,13 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from semimc.execution.fake_broker import FakeBroker
-from semimc.intraday.jobs import run_carry, run_cycle, run_preflight, run_preopen
+from semimc.intraday.jobs import (
+    run_carry,
+    run_cycle,
+    run_preflight,
+    run_preopen,
+    run_research,
+)
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.llm import ClaudeCliClient
 from semimc.intraday.orders import build_entry_order, submit_order_with_fault_isolation
@@ -70,6 +79,28 @@ def _quote(price: float, spread: float = 0.05, at: dt.datetime = NOW) -> _FakeQu
     return _FakeQuote(bid_price=price - spread / 2, ask_price=price + spread / 2, timestamp=at)
 
 
+@dataclass
+class _FakeArticle:
+    id: str
+    headline: str
+    symbols: list[str] = field(default_factory=list)
+    summary: str = ""
+    created_at: dt.datetime = NOW
+    source: str = "benzinga"
+
+
+@dataclass
+class _FakeNewsClient:
+    articles: list[_FakeArticle] = field(default_factory=list)
+    raises: bool = False
+
+    def get_news(self, symbols, start, end, limit=50):
+        if self.raises:
+            raise RuntimeError("news feed unreachable")
+        wanted = set(symbols)
+        return [a for a in self.articles if wanted & set(a.symbols)]
+
+
 def _completed(stdout: str) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
 
@@ -97,6 +128,19 @@ def _sequenced_llm_client(*stdouts: str) -> ClaudeCliClient:
         return _completed(stdout)
 
     return ClaudeCliClient(run=run)
+
+
+def _recording_llm_client(stdout: str) -> tuple[list[dict], ClaudeCliClient]:
+    """Records every call's stdin (the context payload) -- what the headline-wiring test
+    needs to confirm the Trader's context actually carried `recent_headlines_for`'s
+    output, not just that `run_cycle` didn't crash."""
+    calls: list[dict] = []
+
+    def run(argv, stdin_text, timeout_seconds):
+        calls.append({"argv": argv, "stdin": stdin_text})
+        return _completed(stdout)
+
+    return calls, ClaudeCliClient(run=run)
 
 
 def _seed_open_position(
@@ -150,7 +194,7 @@ def test_run_preflight_passes_when_everything_is_clear(config, tmp_path):
     cfg = _tradeable_config(config, tmp_path)
     ledger = _ledger(tmp_path)
     market_data = _FakeMarketData(quotes={"SPY": _quote(500.0)})
-    result = run_preflight(cfg, FakeBroker(), market_data, ledger, NOW)
+    result = run_preflight(cfg, FakeBroker(), market_data, _FakeNewsClient(), ledger, NOW)
     assert result.passed
     assert result.failures == []
     ledger.close()
@@ -160,7 +204,7 @@ def test_run_preflight_fails_on_the_kill_switch(config, tmp_path):
     cfg = _tradeable_config(config, tmp_path)
     (tmp_path / "KILL_SWITCH").write_text("stop", encoding="utf-8")
     ledger = _ledger(tmp_path)
-    result = run_preflight(cfg, FakeBroker(), _FakeMarketData(), ledger, NOW)
+    result = run_preflight(cfg, FakeBroker(), _FakeMarketData(), _FakeNewsClient(), ledger, NOW)
     assert not result.passed
     assert any("kill switch" in f for f in result.failures)
     assert any("kill switch" in i["message"] for i in ledger.incidents())
@@ -170,9 +214,23 @@ def test_run_preflight_fails_on_the_kill_switch(config, tmp_path):
 def test_run_preflight_fails_when_market_data_is_unreachable(config, tmp_path):
     cfg = _tradeable_config(config, tmp_path)
     ledger = _ledger(tmp_path)
-    result = run_preflight(cfg, FakeBroker(), _FakeMarketData(raises=True), ledger, NOW)
+    result = run_preflight(
+        cfg, FakeBroker(), _FakeMarketData(raises=True), _FakeNewsClient(), ledger, NOW
+    )
     assert not result.passed
     assert any("market data unreachable" in f for f in result.failures)
+    ledger.close()
+
+
+def test_run_preflight_fails_when_the_news_feed_is_unreachable(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    market_data = _FakeMarketData(quotes={"SPY": _quote(500.0)})
+    result = run_preflight(
+        cfg, FakeBroker(), market_data, _FakeNewsClient(raises=True), ledger, NOW
+    )
+    assert not result.passed
+    assert any("news feed unreachable" in f for f in result.failures)
     ledger.close()
 
 
@@ -181,7 +239,12 @@ def test_run_preflight_flags_a_bad_reconciliation(config, tmp_path):
     ledger = _ledger(tmp_path)
     ledger.record_reconciliation(AS_OF, status="mismatch", discrepancies=[{"symbol": "NVDA"}])
     result = run_preflight(
-        cfg, FakeBroker(), _FakeMarketData(quotes={"SPY": _quote(500.0)}), ledger, NOW
+        cfg,
+        FakeBroker(),
+        _FakeMarketData(quotes={"SPY": _quote(500.0)}),
+        _FakeNewsClient(),
+        ledger,
+        NOW,
     )
     assert not result.passed
     assert any("reconciliation" in f for f in result.failures)
@@ -196,7 +259,7 @@ def test_run_preopen_keeps_a_tight_fresh_quote(config, tmp_path):
     ledger = _ledger(tmp_path)
     ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
     market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
-    result = run_preopen(cfg, market_data, ledger, AS_OF, NOW)
+    result = run_preopen(cfg, market_data, _FakeNewsClient(), ledger, AS_OF, NOW)
     assert result.tradable == ["NVDA"]
     assert result.dropped == []
     ledger.close()
@@ -207,10 +270,61 @@ def test_run_preopen_drops_a_wide_spread_candidate(config, tmp_path):
     ledger = _ledger(tmp_path)
     ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
     market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0, spread=2.0)})  # ~105 bps
-    result = run_preopen(cfg, market_data, ledger, AS_OF, NOW)
+    result = run_preopen(cfg, market_data, _FakeNewsClient(), ledger, AS_OF, NOW)
     assert result.tradable == []
     assert result.dropped[0][0] == "NVDA"
     assert any("spread" in i["message"] for i in ledger.incidents())
+    ledger.close()
+
+
+def test_run_preopen_records_and_logs_a_new_headline(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    news_client = _FakeNewsClient(
+        articles=[_FakeArticle(id="a1", headline="NVDA guidance raised", symbols=["NVDA"])]
+    )
+
+    result = run_preopen(cfg, market_data, news_client, ledger, AS_OF, NOW)
+
+    assert result.new_headlines == [("NVDA", "NVDA guidance raised")]
+    assert ledger.headline_already_seen("alpaca_news", "a1")
+    assert any("new headline" in i["message"] for i in ledger.incidents())
+    ledger.close()
+
+
+def test_run_preopen_never_drops_a_candidate_over_a_headline(config, tmp_path):
+    """`preopen` is a *deterministic* refresh (the brief's own word) -- a new headline is
+    surfaced, never used here to judge whether a thesis broke. See `run_preopen`'s
+    docstring."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    news_client = _FakeNewsClient(
+        articles=[_FakeArticle(id="a1", headline="NVDA misses guidance", symbols=["NVDA"])]
+    )
+
+    result = run_preopen(cfg, market_data, news_client, ledger, AS_OF, NOW)
+
+    assert result.tradable == ["NVDA"]
+    assert result.dropped == []
+
+
+def test_run_preopen_skips_an_already_seen_headline(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    ledger.record_headline_seen(AS_OF, "alpaca_news", "a1")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    news_client = _FakeNewsClient(
+        articles=[_FakeArticle(id="a1", headline="NVDA guidance raised", symbols=["NVDA"])]
+    )
+
+    result = run_preopen(cfg, market_data, news_client, ledger, AS_OF, NOW)
+
+    assert result.new_headlines == []
     ledger.close()
 
 
@@ -419,6 +533,155 @@ def test_run_cycle_trim_proposal_reprotects_the_remainder_at_the_original_invali
     assert new_stop["broker_order_id"] is not None
     stop_order = broker.get_order_by_client_id(new_stop["client_order_id"])
     assert stop_order.status in ("new", "accepted")
+    ledger.close()
+
+
+# -- run_cycle: headlines reach the Trader (Phase 6) --------------------------------------
+
+
+def test_run_cycle_passes_recent_headlines_into_the_trader_context(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    ledger.record_headline_seen(
+        AS_OF, "alpaca_news", "h1", symbols=["NVDA"], headline="NVDA guidance raised"
+    )
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    calls, client = _recording_llm_client(_result_json())
+
+    run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, NOW)
+
+    payload = json.loads(calls[0]["stdin"])
+    headlines = payload["sections"]["headlines"]
+    assert any(h["headline"] == "NVDA guidance raised" for h in headlines)
+    assert "headlines" in payload["untrusted"]
+    ledger.close()
+
+
+# -- run_research (Phase 6) ---------------------------------------------------------------
+
+
+def test_run_research_is_skipped_when_trading_is_disabled(config, tmp_path, market):
+    ledger = _ledger(tmp_path)  # config.intraday.trading_enabled defaults to False
+    client = _sequenced_llm_client(_result_json())
+    result = run_research(
+        config,
+        FakeBroker(),
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        market,
+        ledger,
+        client,
+        AS_OF,
+        "research",
+        NOW,
+    )
+    assert result.skipped_reason is not None
+    assert ledger.watchlist_for(AS_OF) == []
+    ledger.close()
+
+
+def test_run_research_records_a_brief_and_watchlist(config, tmp_path, market):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    news_client = _FakeNewsClient(
+        articles=[_FakeArticle(id="a1", headline="NVDA rallies", symbols=["NVDA"])]
+    )
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0), "AMD": _quote(150.0)})
+    candidate = {"symbol": "NVDA", "thesis": "AI capex cycle"}
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"morning_brief": "quiet morning", "watchlist": [candidate]})
+    )
+
+    result = run_research(
+        cfg, FakeBroker(), market_data, news_client, market, ledger, client, AS_OF, "research", NOW
+    )
+
+    assert result.brief_recorded
+    assert result.watchlist_size == 1
+    assert ledger.latest_brief()["content"] == {"text": "quiet morning"}
+    assert [row["symbol"] for row in ledger.watchlist_for(AS_OF)] == ["NVDA"]
+    assert ledger.headline_already_seen("alpaca_news", "a1")
+    ledger.close()
+
+
+def test_run_research_is_a_no_op_on_a_repeat_call_the_same_day(config, tmp_path, market):
+    """A retried GitHub Actions attempt must not re-call the model or double the
+    watchlist -- the same `ON CONFLICT DO NOTHING` reasoning `record_session_open_equity`
+    already uses."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="already here")
+    client = _sequenced_llm_client(_result_json())
+
+    result = run_research(
+        cfg,
+        FakeBroker(),
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        market,
+        ledger,
+        client,
+        AS_OF,
+        "research",
+        NOW,
+    )
+
+    assert result.skipped_reason is not None
+    assert ledger.model_calls_for(AS_OF) == []
+    ledger.close()
+
+
+def test_run_research_handles_a_malformed_response_without_crashing(config, tmp_path, market):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    client = _sequenced_llm_client(_result_json(structured_output={"not": "the right shape"}))
+
+    result = run_research(
+        cfg,
+        FakeBroker(),
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        market,
+        ledger,
+        client,
+        AS_OF,
+        "research",
+        NOW,
+    )
+
+    assert result.skipped_reason is not None
+    assert any("malformed researcher response" in i["message"] for i in ledger.incidents())
+    ledger.close()
+
+
+def test_run_research_returns_skipped_reason_once_the_daily_budget_is_exhausted(
+    config, tmp_path, market
+):
+    cfg = _tradeable_config(config, tmp_path)
+    budget = cfg.intraday.budget.model_copy(update={"max_cost_usd_per_day": 1.0})
+    cfg = cfg.model_copy(update={"intraday": cfg.intraday.model_copy(update={"budget": budget})})
+    ledger = _ledger(tmp_path)
+    ledger.record_model_call(
+        AS_OF, "cycle_0", "researcher", "sonnet", "hash", 1000, 1000, cost_usd=1.0
+    )
+    client = _sequenced_llm_client(_result_json())
+
+    result = run_research(
+        cfg,
+        FakeBroker(),
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        market,
+        ledger,
+        client,
+        AS_OF,
+        "research",
+        NOW,
+    )
+
+    assert result.skipped_reason is not None
+    assert "budget" in result.skipped_reason
     ledger.close()
 
 

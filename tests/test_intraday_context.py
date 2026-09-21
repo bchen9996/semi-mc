@@ -7,7 +7,14 @@ import pandas as pd
 import pytest
 
 from semimc.config import IntradayConfig
-from semimc.intraday.context import build_context, build_trader_context, context_hash
+from semimc.intraday.context import (
+    WatchlistCandidate,
+    build_context,
+    build_researcher_context,
+    build_trader_context,
+    context_hash,
+    researcher_output_json_schema,
+)
 from semimc.intraday.ledger import IntradayLedger
 
 AS_OF = pd.Timestamp("2026-09-21")
@@ -96,7 +103,7 @@ def test_build_trader_context_includes_rejected_proposals_with_reasons(tmp_path)
     ledger.close()
 
 
-def test_build_trader_context_marks_watchlist_and_prices_as_untrusted(tmp_path):
+def test_build_trader_context_marks_watchlist_prices_and_headlines_as_untrusted(tmp_path):
     ledger = _ledger(tmp_path)
     config = IntradayConfig()
 
@@ -104,8 +111,35 @@ def test_build_trader_context_marks_watchlist_and_prices_as_untrusted(tmp_path):
         AS_OF, "cycle_1", config, ledger, watchlist=[], positions={}, prices={}
     )
 
-    assert set(bundle.payload["untrusted"]) == {"watchlist", "prices"}
+    assert set(bundle.payload["untrusted"]) == {"watchlist", "prices", "headlines"}
     assert "positions" not in bundle.payload["untrusted"]
+    ledger.close()
+
+
+def test_build_trader_context_defaults_headlines_to_an_empty_list(tmp_path):
+    ledger = _ledger(tmp_path)
+    config = IntradayConfig()
+
+    bundle = build_trader_context(
+        AS_OF, "cycle_1", config, ledger, watchlist=[], positions={}, prices={}
+    )
+
+    assert bundle.payload["sections"]["headlines"] == []
+    ledger.close()
+
+
+def test_build_trader_context_passes_through_headlines_when_given(tmp_path):
+    """Phase 6: `run_cycle` sources this from `ledger.recent_headlines_for` -- without it,
+    `preopen`'s/`research`'s headline logging would be an audit trail nobody reads."""
+    ledger = _ledger(tmp_path)
+    config = IntradayConfig()
+    headlines = [{"headline": "NVDA rallies", "symbols": "NVDA"}]
+
+    bundle = build_trader_context(
+        AS_OF, "cycle_1", config, ledger, watchlist=[], positions={}, prices={}, headlines=headlines
+    )
+
+    assert bundle.payload["sections"]["headlines"] == headlines
     ledger.close()
 
 
@@ -123,3 +157,59 @@ def test_build_trader_context_passes_through_watchlist_positions_and_prices(tmp_
     assert sections["positions"] == positions
     assert sections["prices"] == prices
     ledger.close()
+
+
+# -- build_researcher_context (Phase 6) --------------------------------------------------
+
+
+def test_build_researcher_context_marks_only_news_as_untrusted():
+    config = IntradayConfig()
+    bundle = build_researcher_context(
+        AS_OF,
+        "research",
+        config,
+        news=[{"headline": "NVDA rallies"}],
+        premarket_moves={"NVDA": 0.01},
+        upcoming_earnings={"AMD": "2026-09-25"},
+        realized_vol={"NVDA": 0.35},
+    )
+    assert bundle.payload["untrusted"] == ["news"]
+    assert bundle.role == "researcher"
+
+
+def test_build_researcher_context_passes_through_every_section():
+    config = IntradayConfig()
+    news = [{"headline": "NVDA rallies"}]
+    premarket_moves = {"NVDA": 0.01}
+    upcoming_earnings = {"AMD": "2026-09-25"}
+    realized_vol = {"NVDA": 0.35}
+
+    bundle = build_researcher_context(
+        AS_OF, "research", config, news, premarket_moves, upcoming_earnings, realized_vol
+    )
+
+    sections = bundle.payload["sections"]
+    assert sections["news"] == news
+    assert sections["premarket_moves"] == premarket_moves
+    assert sections["upcoming_earnings"] == upcoming_earnings
+    assert sections["realized_vol"] == realized_vol
+
+
+# -- WatchlistCandidate / researcher_output_json_schema -----------------------------------
+
+
+def test_watchlist_candidate_requires_only_symbol_and_thesis():
+    candidate = WatchlistCandidate(symbol="NVDA", thesis="AI capex cycle")
+    assert candidate.entry_trigger is None
+    assert candidate.horizon is None
+
+
+def test_watchlist_candidate_rejects_an_unknown_field():
+    with pytest.raises(ValueError, match="size"):
+        WatchlistCandidate(symbol="NVDA", thesis="AI capex cycle", size=10_000)
+
+
+def test_researcher_output_json_schema_requires_brief_and_watchlist():
+    schema = researcher_output_json_schema()
+    assert schema["required"] == ["morning_brief", "watchlist"]
+    assert schema["properties"]["watchlist"]["type"] == "array"

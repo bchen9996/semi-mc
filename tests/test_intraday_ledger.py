@@ -322,6 +322,41 @@ def test_headline_seen_dedups_by_source_and_hash(tmp_path):
     ledger.close()
 
 
+def test_record_headline_seen_stores_symbols_and_headline_text(tmp_path):
+    """Phase 6: `headlines_seen` gained `symbols`/`headline` so `recent_headlines_for` has
+    something to show the Trader -- the pre-Phase-6 3-arg call (above) still works with
+    both left `None`."""
+    ledger = _ledger(tmp_path)
+    ledger.record_headline_seen(
+        AS_OF, "alpaca_news", "hash2", symbols=["NVDA", "AMD"], headline="NVDA rallies on guidance"
+    )
+    rows = ledger.recent_headlines_for(AS_OF, ["NVDA"])
+    assert len(rows) == 1
+    assert rows[0]["headline"] == "NVDA rallies on guidance"
+    assert rows[0]["symbols"] == "NVDA,AMD"
+    ledger.close()
+
+
+def test_recent_headlines_for_matches_on_symbol_overlap(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_headline_seen(AS_OF, "alpaca_news", "h1", symbols=["NVDA"], headline="NVDA news")
+    ledger.record_headline_seen(AS_OF, "alpaca_news", "h2", symbols=["AMD"], headline="AMD news")
+    ledger.record_headline_seen(AS_OF, "alpaca_news", "h3", headline=None)  # no symbols/text
+    rows = ledger.recent_headlines_for(AS_OF, ["AMD", "TSM"])
+    assert [r["headline"] for r in rows] == ["AMD news"]
+    ledger.close()
+
+
+def test_recent_headlines_for_ignores_other_days(tmp_path):
+    ledger = _ledger(tmp_path)
+    other_day = pd.Timestamp("2026-09-20")
+    ledger.record_headline_seen(
+        other_day, "alpaca_news", "h1", symbols=["NVDA"], headline="old news"
+    )
+    assert ledger.recent_headlines_for(AS_OF, ["NVDA"]) == []
+    ledger.close()
+
+
 def test_incidents_reused_from_the_same_shape_as_live_ledger(tmp_path):
     ledger = _ledger(tmp_path)
     ledger.record_incident("error", "daily model-call budget exhausted")

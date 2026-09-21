@@ -1,7 +1,9 @@
-"""CLI smoke tests for `semimc intraday ...` (S4, `BRIEF_INTRADAY.md`, Phase 5):
-`preflight`/`preopen`/`monitor`/`open-batch`/`cycle`/`carry`. Same shallow-on-numbers,
-strict-on-plumbing convention as `test_cli.py`'s own paper command tests -- every broker/
-market-data/LLM client is patched to a fake, no network, no subprocess.
+"""CLI smoke tests for `semimc intraday ...` (S4, `BRIEF_INTRADAY.md`, Phases 5-6):
+`preflight`/`research`/`preopen`/`monitor`/`open-batch`/`cycle`/`carry`. Same
+shallow-on-numbers, strict-on-plumbing convention as `test_cli.py`'s own paper command
+tests -- every broker/market-data/news/LLM client is patched to a fake, no network, no
+subprocess. `research` also needs `data.load_market_data` patched (its own-data inputs --
+OHLC, earnings -- come from the shared price cache, which doesn't exist in a test run).
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
@@ -56,6 +59,29 @@ class _FakeMarketData:
         return _FakeQuote(price) if price is not None else None
 
 
+class _FakeNewsClient:
+    def __init__(self, articles: list | None = None):
+        self._articles = articles or []
+
+    def get_news(self, symbols, start, end, limit=50):
+        return self._articles
+
+
+class _FakePitMarketData:
+    """Stands in for `data.load_market_data`'s return value -- `research`'s own-data
+    inputs (`_premarket_moves`/`_upcoming_earnings`/`_realized_vol`, `intraday/jobs.py`)
+    all degrade to empty/absent gracefully, so this needs no real price cache."""
+
+    earnings = None
+    ohlc: dict = {}
+
+    def spot(self, tickers, as_of=None):
+        return pd.Series(dtype=float)
+
+    def has_ohlc(self, ticker):
+        return False
+
+
 def _result_json(**overrides) -> str:
     payload = {
         "session_id": "sess-1",
@@ -72,10 +98,14 @@ def _result_json(**overrides) -> str:
 @pytest.fixture
 def fake_intraday_env(monkeypatch):
     """Patches every `from_env` construction `cli.py`'s `intraday` commands make --
-    broker, market data, and the headless LLM client -- to injectable fakes, mirroring
-    `test_cli.py`'s own `fake_alpaca_broker` fixture."""
+    broker, market data, news client, and the headless LLM client -- to injectable fakes,
+    mirroring `test_cli.py`'s own `fake_alpaca_broker` fixture. Also patches
+    `data.load_market_data` (Phase 6's `research` command's only non-`from_env`
+    dependency) to a fake `MarketData` -- harmless for every other command, which never
+    calls it."""
     broker = FakeBroker(account_number="FAKE-PAPER-0001")
     market_data = _FakeMarketData()
+    news_client = _FakeNewsClient()
 
     def fake_run(argv, stdin_text, timeout_seconds):
         return subprocess.CompletedProcess(args=[], returncode=0, stdout=_result_json(), stderr="")
@@ -89,10 +119,15 @@ def fake_intraday_env(monkeypatch):
         classmethod(lambda cls, **kwargs: market_data),
     )
     monkeypatch.setattr(
+        "semimc.execution.news.AlpacaNewsClient.from_env",
+        classmethod(lambda cls, **kwargs: news_client),
+    )
+    monkeypatch.setattr(
         "semimc.intraday.llm.ClaudeCliClient.from_env",
         classmethod(lambda cls: ClaudeCliClient(run=fake_run)),
     )
-    return broker, market_data
+    monkeypatch.setattr("semimc.data.load_market_data", lambda *a, **k: _FakePitMarketData())
+    return broker, market_data, news_client
 
 
 def test_preflight_passes_cleanly_when_trading_is_enabled(tmp_path, fake_intraday_env):
@@ -106,6 +141,32 @@ def test_preflight_fails_the_job_on_the_kill_switch(tmp_path, fake_intraday_env)
     result = runner.invoke(app, ["intraday", "preflight"] + _tradeable_overrides(tmp_path))
     assert result.exit_code != 0
     assert "Preflight: failed" in result.output
+
+
+def test_research_declines_cleanly_when_trading_is_disabled(tmp_path, fake_intraday_env):
+    result = runner.invoke(app, ["intraday", "research"] + _intraday_overrides(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "Skipped" in result.output
+
+
+def test_research_runs_cleanly_and_records_a_brief(tmp_path, fake_intraday_env, monkeypatch):
+    def fake_run(argv, stdin_text, timeout_seconds):
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=_result_json(
+                structured_output={"morning_brief": "quiet morning", "watchlist": []}
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "semimc.intraday.llm.ClaudeCliClient.from_env",
+        classmethod(lambda cls: ClaudeCliClient(run=fake_run)),
+    )
+    result = runner.invoke(app, ["intraday", "research"] + _tradeable_overrides(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "Brief recorded" in result.output
 
 
 def test_preopen_runs_cleanly_with_an_empty_watchlist(tmp_path, fake_intraday_env):

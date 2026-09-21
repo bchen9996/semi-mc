@@ -135,6 +135,8 @@ CREATE TABLE IF NOT EXISTS headlines_seen (
     as_of TEXT NOT NULL,
     source TEXT NOT NULL,
     headline_hash TEXT NOT NULL,
+    symbols TEXT,
+    headline TEXT,
     created_at TEXT NOT NULL,
     UNIQUE (source, headline_hash)
 );
@@ -633,16 +635,33 @@ class IntradayLedger:
 
     # -- headlines seen (dedup) -------------------------------------------------------------
 
-    def record_headline_seen(self, as_of: pd.Timestamp, source: str, headline_hash: str) -> None:
+    def record_headline_seen(
+        self,
+        as_of: pd.Timestamp,
+        source: str,
+        headline_hash: str,
+        symbols: list[str] | None = None,
+        headline: str | None = None,
+    ) -> None:
         """``ON CONFLICT ... DO NOTHING`` -- the same headline from the same source is only
-        ever logged once, regardless of how many cycles re-fetch it."""
+        ever logged once, regardless of how many cycles re-fetch it. `symbols`/`headline`
+        (Phase 6) are optional so a caller with nothing but a dedup fingerprint (as in
+        every pre-Phase-6 test) still works unchanged; `recent_headlines_for` needs both to
+        show the Trader anything, so `research`/`preopen` always pass them."""
         self._conn.execute(
             """
-            INSERT INTO headlines_seen (as_of, source, headline_hash, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO headlines_seen (as_of, source, headline_hash, symbols, headline, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(source, headline_hash) DO NOTHING
             """,
-            (str(pd.Timestamp(as_of)), source, headline_hash, _now()),
+            (
+                str(pd.Timestamp(as_of)),
+                source,
+                headline_hash,
+                ",".join(symbols) if symbols else None,
+                headline,
+                _now(),
+            ),
         )
         self._conn.commit()
 
@@ -652,6 +671,27 @@ class IntradayLedger:
             (source, headline_hash),
         ).fetchone()
         return row is not None
+
+    def recent_headlines_for(self, as_of: pd.Timestamp, symbols: list[str]) -> list[dict[str, Any]]:
+        """Every headline recorded today (`as_of`) mentioning at least one of `symbols` --
+        one read path for both `preopen`'s own "what's new" log line and
+        `build_trader_context`'s headlines section, since both just want "what's been seen
+        today for names I care about." Filters in Python after a broad `as_of` pull
+        (`symbols` is stored as one comma-joined string), the same "filter in Python once
+        the SQL side gets awkward" pattern `pending_tranche_for` established in Phase 5.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM headlines_seen WHERE as_of = ? AND headline IS NOT NULL",
+            (str(pd.Timestamp(as_of)),),
+        ).fetchall()
+        wanted = set(symbols)
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            data = dict(row)
+            row_symbols = set(data["symbols"].split(",")) if data["symbols"] else set()
+            if row_symbols & wanted:
+                out.append(data)
+        return out
 
     # -- incidents ------------------------------------------------------------------------
 

@@ -37,8 +37,8 @@ app.add_typer(paper_app, name="paper")
 intraday_app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
-    help="S4 intraday agent jobs: preflight, preopen, monitor, open-batch, cycle, carry "
-    "(BRIEF_INTRADAY.md).",
+    help="S4 intraday agent jobs: preflight, research, preopen, monitor, open-batch, "
+    "cycle, carry (BRIEF_INTRADAY.md).",
 )
 app.add_typer(intraday_app, name="intraday")
 
@@ -1786,7 +1786,7 @@ def paper_evaluate(
         ledger.close()
 
 
-# -- S4 intraday agent jobs (BRIEF_INTRADAY.md, Phase 5) ---------------------------------
+# -- S4 intraday agent jobs (BRIEF_INTRADAY.md, Phases 5-6) ------------------------------
 
 
 def _intraday_as_of(value: str | None) -> pd.Timestamp:
@@ -1816,6 +1816,12 @@ def _intraday_market_data():  # noqa: ANN001 -- returns AlpacaMarketDataClient
     )
 
 
+def _intraday_news_client():  # noqa: ANN001 -- returns AlpacaNewsClient
+    from .execution.news import AlpacaNewsClient
+
+    return AlpacaNewsClient.from_env()
+
+
 IntradayAsOfOption = Annotated[
     str | None, typer.Option("--as-of", help="Trading day, YYYY-MM-DD. Defaults to today.")
 ]
@@ -1828,7 +1834,7 @@ def intraday_preflight(
     verbose: VerboseOption = False,
 ) -> None:
     """Health checks before today's trading: the pretrade gate, yesterday's
-    reconciliation status, and a market-data smoke test.
+    reconciliation status, a market-data smoke test, and a news-feed smoke test.
 
     A canary, not a gate other commands depend on -- `open-batch`/`cycle`/`carry` each
     re-run their own gates fresh regardless of this command's result, so a missed or
@@ -1843,8 +1849,9 @@ def intraday_preflight(
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
     broker = _intraday_broker()
     market_data = _intraday_market_data()
+    news_client = _intraday_news_client()
     try:
-        result = run_preflight(cfg, broker, market_data, ledger, now)
+        result = run_preflight(cfg, broker, market_data, news_client, ledger, now)
     finally:
         ledger.close()
 
@@ -1857,6 +1864,56 @@ def intraday_preflight(
     raise typer.Exit(code=1)
 
 
+@intraday_app.command("research")
+def intraday_research(
+    cycle: Annotated[
+        str, typer.Option("--cycle", help="Label recorded for this research run.")
+    ] = "research",
+    as_of: IntradayAsOfOption = None,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """The Researcher: reads overnight news, pre-market moves, the earnings calendar, and
+    a realized-vol snapshot, and writes a morning brief plus a watchlist. Idempotent per
+    trading day -- a repeat call after the first success this same `as_of` is a no-op
+    that spends nothing (see `run_research`'s docstring)."""
+    cfg = _setup(config, set_, verbose)
+    from .data import load_market_data
+    from .intraday.jobs import run_research
+    from .intraday.ledger import IntradayLedger
+    from .intraday.llm import ClaudeCliClient
+
+    as_of_ts = _intraday_as_of(as_of)
+    now = _intraday_now(cfg)
+    ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    broker = _intraday_broker()
+    market_data = _intraday_market_data()
+    news_client = _intraday_news_client()
+    market_data_pit = load_market_data(cfg, tickers=cfg.universe.tickers)
+    llm_client = ClaudeCliClient.from_env()
+    try:
+        result = run_research(
+            cfg,
+            broker,
+            market_data,
+            news_client,
+            market_data_pit,
+            ledger,
+            llm_client,
+            as_of_ts,
+            cycle,
+            now,
+        )
+    finally:
+        ledger.close()
+
+    if result.skipped_reason is not None:
+        typer.echo(f"Skipped: {result.skipped_reason}")
+        return
+    typer.echo(f"Brief recorded. Watchlist size: {result.watchlist_size}")
+
+
 @intraday_app.command("preopen")
 def intraday_preopen(
     as_of: IntradayAsOfOption = None,
@@ -1864,10 +1921,11 @@ def intraday_preopen(
     set_: SetOption = None,
     verbose: VerboseOption = False,
 ) -> None:
-    """Deterministic refresh of today's watchlist quotes: drops anything whose spread or
-    quote staleness fails the configured gate, logging why. Read-only/logging only --
-    `open-batch`/`cycle` re-run the identical gate themselves rather than trusting this
-    command's result."""
+    """Deterministic refresh of today's watchlist quotes and headlines: drops anything
+    whose spread or quote staleness fails the configured gate, and logs any genuinely new
+    headline per symbol (never used here to drop a candidate -- see `run_preopen`'s
+    docstring). Read-only/logging only -- `open-batch`/`cycle` re-run the identical spread
+    gate themselves rather than trusting this command's result."""
     cfg = _setup(config, set_, verbose)
     from .intraday.jobs import run_preopen
     from .intraday.ledger import IntradayLedger
@@ -1876,8 +1934,9 @@ def intraday_preopen(
     now = _intraday_now(cfg)
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
     market_data = _intraday_market_data()
+    news_client = _intraday_news_client()
     try:
-        result = run_preopen(cfg, market_data, ledger, as_of_ts, now)
+        result = run_preopen(cfg, market_data, news_client, ledger, as_of_ts, now)
     finally:
         ledger.close()
 
@@ -1886,6 +1945,10 @@ def intraday_preopen(
         typer.secho("Dropped:", fg=typer.colors.YELLOW)
         for _symbol, reason in result.dropped:
             typer.echo(f"  {reason}")
+    if result.new_headlines:
+        typer.echo("New headlines:")
+        for symbol, headline in result.new_headlines:
+            typer.echo(f"  {symbol}: {headline}")
 
 
 @intraday_app.command("monitor")

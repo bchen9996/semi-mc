@@ -898,8 +898,8 @@ whole shares for this order type). Built:
       tranche-splitting ("default to two tranches") -- a per-cycle flow-control decision
       that belongs with `jobs.py`'s loop (now Phase 5), not order-construction math with
       no loop to sit inside yet; the placebo agent (`placebo.py`) on a shadow ledger --
-      needs a real watchlist source (Phase 6's `research` job, once that phase exists) and
-      the brief never specifies the shadow ledger's fill mechanics.
+      needs a real watchlist source (Phase 6's `research` job, built 2026-09-21 -- see
+      that section below) and the brief never specifies the shadow ledger's fill mechanics.
 - [x] `docs/alpaca_notes.md`: wash-trade exemption item confirmed with a direct quote
       (noting OTO isn't named in it); two new "still to verify" items (OTO + fractional
       qty; OTO's own wash-trade exemption).
@@ -917,9 +917,12 @@ existing s0/s3 job/CLI/workflow pattern, one on what close/trim/tranches/placebo
 need): this phase is close/trim construction and keeping a position protected, buildable
 now with what already exists; `jobs.py`/CLI/the workflow/tranche-splitting move to Phase
 5 (needs Phase 4's primitives to call, and tranches are inherently loop-shaped); the
-placebo agent moves to Phase 6 (needs Phase 5's `research` job for a real watchlist).
+placebo agent moves to Phase 6 (needs Phase 5's `research` job for a real watchlist) --
+**since renumbered to Phase 7 once Phase 5 itself split again and `research` became its
+own Phase 6 (see below); the dependency itself is unchanged, only the numbers.**
 Old Phase 5/6/7 (injection defenses; reflections/EOD/`PLAYBOOK.md`; rollout stages)
-shift to 7/8/9 -- content unchanged, only numbers.
+shift to 7/8/9 -- content unchanged, only numbers (**since renumbered again to 8/9/10,
+see the Phase 5 section below**).
 
 **Phase 5 itself split again once it was actually scoped (see the Phase 5 section
 below)**: `research` needed a whole new data source (a news client) that didn't exist,
@@ -1108,6 +1111,115 @@ Built:
       (new, one smoke test per command), plus extensions to `tests/test_intraday_ledger.py`,
       `tests/test_intraday_pretrade.py`, `tests/test_execution_market_data.py`, and
       `tests/test_execution_fake_broker.py`'s docstring for the stop-order fix above.
+
+**Phase 6 -- the Researcher's news source and the `research` job, built 2026-09-20.** The
+request was "go ahead to Phase 6," the item Phase 5's own planning had already split out:
+`research` needed a whole new capability -- a news source -- that didn't exist anywhere in
+this repo. Confirmed directly (not assumed) before writing code: the installed `alpaca-py`
+package has `alpaca.data.historical.news.NewsClient`, never used anywhere in this project
+before; `intraday/ledger.py` already had unused `briefs`/`watchlist`/`headlines_seen`
+tables and a `prompts/researcher.md` role prompt from Phase 0, whose contract already
+matched `record_watchlist_item`'s existing parameters exactly; `intraday/llm.py::
+invoke_role` already resolved `config.models.researcher` and only needed its JSON-schema
+selection generalized past `role == "trader"`.
+
+Two scope decisions, made and documented rather than silently built or silently skipped:
+
+1. **Analyst actions are not built** -- no data source for this exists anywhere in the
+   project, and the brief itself lists this as an open question ("should the Researcher
+   read anything beyond Alpaca's news API and the project's own data"), not a settled
+   requirement. Adding a data source is CLAUDE.md's own "ask first" boundary.
+2. **"The project's forecast and volatility model" is a realized-vol snapshot
+   (`data/realized.py::realized_variance`/`garman_klass` on cached OHLC), not a live daily
+   re-fit of GARCH/HAR/regime models for the whole universe.** No existing job refreshes
+   those models daily, and fitting them fresh every morning for the whole universe is a
+   real latency/cost addition deserving its own design pass. `garman_klass` needs no fit
+   and reuses data already being pulled for the earnings calendar, so it ships as an
+   honest, labeled approximation rather than an omission.
+3. **`preopen`'s "drops candidates whose premise broke overnight" is read as "surfaces new
+   headlines," not "auto-drops via keyword/sentiment heuristics."** The brief calls
+   `preopen` a *deterministic* refresh; judging whether a headline breaks a thesis is
+   exactly the kind of call this project reserves for the model. `preopen` now fetches and
+   logs new headlines per watchlist symbol (deduped against `headlines_seen`), and
+   `run_cycle`'s `build_trader_context` call threads them into the Trader's own context so
+   the model -- which already re-evaluates every 20 minutes -- can act on them instead.
+
+Built:
+
+- [x] `execution/news.py` (new) -- `AlpacaNewsClient`, mirroring `AlpacaMarketDataClient`'s
+      shape (plain constructor over an injected SDK client, `from_env()` for real use), but
+      defaulting `from_env`'s key pair to S4's own (`ALPACA_S4_API_KEY`/
+      `ALPACA_S4_SECRET_KEY`) rather than s0/s3's, since nothing outside S4 will ever call
+      it. Verified directly against the installed package: `NewsRequest.symbols` is one
+      comma-joined string, not a list; `NewsClient.get_news` returns a `NewsSet` whose
+      `.data` is always `{"news": [News, ...]}`, a flat list despite the type hint.
+- [x] `config.py::IntradayResearchConfig` (new) -- `news_lookback_hours` (16),
+      `preopen_lookback_hours` (2), `earnings_lookahead_days` (5),
+      `max_headlines_per_symbol` (5), all starting guesses per the brief's own lack of a
+      numeric default. Added to both YAML configs' `intraday:` blocks.
+- [x] `intraday/ledger.py`: `headlines_seen` gains nullable `symbols`/`headline` columns
+      (safe to add directly -- S4 has never gone live) -- the table previously stored only
+      a dedup fingerprint, nothing to actually show the Trader. New
+      `recent_headlines_for(as_of, symbols)`, filtering symbol overlap in Python after a
+      broad `as_of` pull (same "filter in Python once SQL gets awkward" pattern
+      `pending_tranche_for` established in Phase 5). Dedup key is Alpaca's own `News.id`
+      (stringified), not a hash of the headline text, which would falsely dedup two
+      different articles sharing a headline.
+- [x] `intraday/context.py`: `build_researcher_context` (news untrusted; premarket moves/
+      upcoming earnings/realized vol are this project's own data, not labeled untrusted --
+      the same distinction `build_trader_context` already draws for its own sections).
+      `WatchlistCandidate` (a pydantic model, not a `TradeProposal` -- no order/size/side
+      fields) and `researcher_output_json_schema()`, generated from it the same way
+      `trader_output_json_schema` is generated from `TradeProposal`. `build_trader_context`
+      gains a `headlines` parameter (default `[]`), now always labeled untrusted alongside
+      `watchlist`/`prices`.
+- [x] `intraday/llm.py::invoke_role`'s schema selection generalizes from an `if role ==
+      "trader"` ternary to also route `"researcher"` to `researcher_output_json_schema()`;
+      the Reviewer (no output contract built yet) still gets none.
+- [x] `intraday/jobs.py::run_research` (new) -- once per trading day: the same pretrade
+      gate every job re-checks fresh, then an idempotency guard
+      (`ledger.watchlist_for(as_of)` already non-empty means a repeat call -- most likely a
+      retried GitHub Actions attempt -- and returns without spending anything, the same
+      `ON CONFLICT DO NOTHING` reasoning `record_session_open_equity` already uses), then
+      gathers news (capped per symbol via `max_headlines_per_symbol`, most recent first --
+      every fetched article is still recorded in `headlines_seen` regardless of the cap),
+      pre-market moves (`MarketData.spot()` against the shared cache vs. a live Alpaca
+      quote), upcoming earnings (`EarningsCalendar.for_ticker`, point-in-time by
+      construction), and the realized-vol snapshot, into `build_researcher_context` ->
+      `invoke_role("researcher", ...)` -> `record_brief` + `record_watchlist_item` per
+      candidate + `record_headline_seen` per article seen. A malformed response or
+      `DailyBudgetExhausted` is caught the same way `run_cycle` already handles them.
+- [x] `intraday/jobs.py::run_preopen` gains a `news_client` parameter and a
+      headline-refresh step before its existing spread gate: a genuinely new article per
+      watchlist symbol is recorded and logged as an info incident, never used to drop a
+      candidate (see scope decision 3 above). New `PreopenResult.new_headlines` field.
+      `run_cycle` now sources `ledger.recent_headlines_for` for the symbols in view and
+      passes it to `build_trader_context` -- without this, `preopen`'s/`research`'s
+      headline logging would be an audit trail nobody reads.
+- [x] `intraday/jobs.py::run_preflight` gains a `news_client` smoke test (mirrors its
+      existing market-data one) -- `research` runs less than an hour later and would
+      otherwise be the first thing to discover a dead feed.
+- [x] `cli.py::intraday_app` gains `research`, plus `_intraday_news_client()` threaded
+      into `preflight`/`preopen`/`research`. `research` also builds a project-side
+      `MarketData` via `data.load_market_data(cfg, tickers=cfg.universe.tickers)` for its
+      own-data inputs.
+- [x] `.github/workflows/intraday_trading.yml` gains a `research` job (cron `30 12 * * 1-5`
+      = ~07:30 Central, the same fixed UTC-5 offset the other jobs already use), between
+      `preflight` and `preopen`. Runs `semimc fetch` first, mirroring `paper_trading.yml`'s
+      `decide` job, so the realized-vol/earnings inputs are never more than minutes stale.
+      Same shared `intraday-trading-ledger-write` concurrency group as the other jobs.
+- [x] **Deliberately deferred (not this phase)**: analyst actions, a live daily model
+      re-fit, and keyword/sentiment-based auto-dropping in `preopen` (scope decisions 1-3
+      above); `eod_review`/`weekly_review`, the placebo agent, injection-corpus tests,
+      DST-aware cron -- unchanged, still Phases 7/8/9/10.
+- [x] Tests: `tests/test_execution_news.py` (new), extensions to
+      `tests/test_intraday_ledger.py` (`headlines_seen` columns, `recent_headlines_for`),
+      `tests/test_intraday_context.py` (`build_researcher_context`, `WatchlistCandidate`,
+      the trader-context `headlines` wiring), `tests/test_intraday_llm.py` (the researcher
+      schema, the reviewer's lack of one), `tests/test_intraday_jobs.py` (`run_research`
+      end to end against the real fixture-backed `MarketData` from `tests/conftest.py`'s
+      `market` fixture, plus `run_preopen`'s headline refresh and `run_cycle`'s headline
+      wiring), and `tests/test_cli_intraday.py` (one smoke test for `research`).
 
 **Remaining prerequisites** -- what Phase 0 didn't (and couldn't) resolve:
 

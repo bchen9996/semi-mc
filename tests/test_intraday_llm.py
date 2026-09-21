@@ -324,7 +324,10 @@ def test_invoke_role_records_an_incident_when_a_call_exceeds_the_per_call_cap(tm
     ledger.close()
 
 
-def test_invoke_role_uses_the_trader_json_schema_only_for_the_trader_role(tmp_path):
+def test_invoke_role_uses_the_researcher_json_schema_for_the_researcher_role(tmp_path):
+    """Phase 6: the Researcher gets its own schema (`researcher_output_json_schema`),
+    distinct from the Trader's -- both are schema-constrained now; only the Reviewer
+    (below), with no output contract built yet, gets none."""
     ledger = _ledger(tmp_path)
     config = IntradayConfig()
     calls, run = _recording_run(_result_json())
@@ -335,6 +338,30 @@ def test_invoke_role_uses_the_trader_json_schema_only_for_the_trader_role(tmp_pa
         "researcher",
         as_of=AS_OF,
         cycle="research",
+        config=config,
+        ledger=ledger,
+        client=client,
+        context=context,
+    )
+
+    argv = calls[0]["argv"]
+    assert "--json-schema" in argv
+    schema = json.loads(argv[argv.index("--json-schema") + 1])
+    assert schema["required"] == ["morning_brief", "watchlist"]
+    ledger.close()
+
+
+def test_invoke_role_omits_json_schema_for_the_reviewer_role(tmp_path):
+    ledger = _ledger(tmp_path)
+    config = IntradayConfig()
+    calls, run = _recording_run(_result_json())
+    client = ClaudeCliClient(run=run)
+    context = build_context("reviewer", AS_OF, "eod_review", sections={})
+
+    invoke_role(
+        "reviewer",
+        as_of=AS_OF,
+        cycle="eod_review",
         config=config,
         ledger=ledger,
         client=client,

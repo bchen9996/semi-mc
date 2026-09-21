@@ -412,6 +412,22 @@ class IntradayModelsConfig(_Base):
     timeout_seconds: int = Field(300, gt=0)
 
 
+class IntradayResearchConfig(_Base):
+    """Knobs for the Researcher's overnight news pull and `preopen`'s headline refresh
+    (Phase 6, BRIEF_INTRADAY.md's `research`/`preopen` rows). Numeric defaults are starting
+    guesses, not researched figures -- same caveat as `IntradayRiskConfig.max_spread_bps`.
+    A flat lookback window rather than exact calendar-derived "prior close" arithmetic is a
+    deliberate simplification: `IntradayLedger.headline_already_seen` dedup makes
+    overlapping windows across calls harmless, the same "fixed offset, documented drift,
+    safe by construction" reasoning Phase 5 already used for cron timing.
+    """
+
+    news_lookback_hours: float = Field(16.0, gt=0)
+    preopen_lookback_hours: float = Field(2.0, gt=0)
+    earnings_lookahead_days: int = Field(5, gt=0)
+    max_headlines_per_symbol: int = Field(5, gt=0)
+
+
 class IntradayConfig(_Base):
     """S4: the LLM-driven intraday agent sleeve (BRIEF_INTRADAY.md). Deliberately not a
     `PaperConfig.sleeves` entry -- its LLM-proposed trades don't fit `Decision.weights`'s
@@ -429,6 +445,7 @@ class IntradayConfig(_Base):
     schedule: IntradayScheduleConfig = Field(default_factory=IntradayScheduleConfig)
     options: IntradayOptionsConfig = Field(default_factory=IntradayOptionsConfig)
     models: IntradayModelsConfig = Field(default_factory=IntradayModelsConfig)
+    research: IntradayResearchConfig = Field(default_factory=IntradayResearchConfig)
     # Separate sentinel from paper.kill_switch_path -- S4 can be halted independently of
     # s0/s3 and vice versa.
     kill_switch_path: str = "runs/intraday/KILL_SWITCH"
