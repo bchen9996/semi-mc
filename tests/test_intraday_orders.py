@@ -1,6 +1,7 @@
-"""`intraday/orders.py`: turning an accepted `open`/`add` proposal into a real order with
-a real stop resting at the broker (S4, `BRIEF_INTRADAY.md`, Phase 3). Exercised only
-against `FakeBroker` -- no network, matching this project's convention.
+"""`intraday/orders.py`: turning an accepted proposal into a real order with a real stop
+resting at the broker -- opening/adding (Phase 3), or closing/trimming while keeping that
+protection intact (Phase 4). S4, `BRIEF_INTRADAY.md`. Exercised only against `FakeBroker`
+-- no network, matching this project's convention.
 """
 
 from __future__ import annotations
@@ -11,11 +12,15 @@ import pandas as pd
 import pytest
 
 from semimc.config import IntradayConfig
-from semimc.execution.broker import Asset, OrderRequest
+from semimc.execution.broker import Asset, OrderRequest, Position
 from semimc.execution.fake_broker import FakeBroker
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.orders import (
+    build_close_order,
     build_entry_order,
+    build_replacement_stop_order,
+    build_trim_order,
+    find_and_cancel_resting_stop,
     intraday_client_order_id,
     submit_order_with_fault_isolation,
 )
@@ -228,3 +233,146 @@ def test_a_normal_submit_records_the_order_and_fill_and_returns_it(tmp_path):
     assert len(fills) == 1
     assert fills[0]["qty"] == pytest.approx(order.qty)
     ledger.close()
+
+
+def test_submit_of_an_oto_order_also_records_its_resting_stop_leg(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    order = _order(client_order_id="entry-with-stop", order_class="oto", stop_loss_price=185.0)
+
+    submit_order_with_fault_isolation(order, broker, ledger, NOW, proposal_id=3)
+
+    leg = ledger.open_stop_leg_for("NVDA")
+    assert leg is not None
+    assert leg["client_order_id"] == "entry-with-stop::stop"
+    assert leg["proposal_id"] == 3
+    ledger.close()
+
+
+# -- find_and_cancel_resting_stop -----------------------------------------------------------
+
+
+def test_find_and_cancel_resting_stop_cancels_a_real_leg(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    entry = broker.submit_order(_order(client_order_id="entry-1"))  # order_class="oto" by default
+    leg = entry.legs[0]
+    ledger.record_order(
+        entry.client_order_id, "NVDA", "buy", status=entry.status, broker_order_id=entry.id
+    )
+    ledger.record_order(
+        leg.client_order_id, "NVDA", "sell", status=leg.status, broker_order_id=leg.id, leg="stop"
+    )
+
+    result = find_and_cancel_resting_stop("NVDA", broker, ledger)
+
+    assert result == leg.client_order_id
+    assert broker.get_order_by_client_id(leg.client_order_id).status == "canceled"
+    ledger.close()
+
+
+def test_find_and_cancel_resting_stop_returns_none_when_there_is_nothing_resting(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    assert find_and_cancel_resting_stop("NVDA", broker, ledger) is None
+    ledger.close()
+
+
+def test_find_and_cancel_resting_stop_tolerates_an_already_gone_order(tmp_path):
+    """The ledger thinks a stop is resting, but the broker no longer has it (already
+    canceled/filled) -- the same forgiving read real Alpaca's own cancel_order gets."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    ledger.record_order(
+        "stale-stop", "NVDA", "sell", status="new", broker_order_id="not-a-real-id", leg="stop"
+    )
+    result = find_and_cancel_resting_stop("NVDA", broker, ledger)
+    assert result == "stale-stop"
+    ledger.close()
+
+
+# -- build_close_order ---------------------------------------------------------------------
+
+
+def test_build_close_order_sells_a_long_position():
+    position = Position(
+        symbol="NVDA", qty=26.0, side="long", market_value=4940.0, avg_entry_price=190.0
+    )
+    order = build_close_order(position, AS_OF, CYCLE, price=190.0, config=IntradayConfig())
+    assert order.side == "sell"
+    assert order.qty == pytest.approx(26.0)
+    assert order.order_class == "simple"
+    assert order.stop_loss_price is None
+
+
+def test_build_close_order_buys_back_a_short_position():
+    position = Position(
+        symbol="NVDA", qty=-10.0, side="short", market_value=-1900.0, avg_entry_price=190.0
+    )
+    order = build_close_order(position, AS_OF, CYCLE, price=190.0, config=IntradayConfig())
+    assert order.side == "buy"
+    assert order.qty == pytest.approx(10.0)
+
+
+# -- build_trim_order ----------------------------------------------------------------------
+
+
+def test_build_trim_order_rejects_a_non_trim_proposal():
+    proposal = _proposal(action="open")
+    position = Position(
+        symbol="NVDA", qty=26.0, side="long", market_value=4940.0, avg_entry_price=190.0
+    )
+    with pytest.raises(ValueError, match="trim"):
+        build_trim_order(
+            proposal, position, AS_OF, CYCLE, price=190.0, equity=100_000.0, config=IntradayConfig()
+        )
+
+
+def test_build_trim_order_caps_at_the_held_quantity():
+    # size_pct implies 5_000 / 190 = 26.3 shares -- more than the 10 actually held.
+    proposal = TradeProposal(action="trim", symbol="NVDA", size_pct=0.05)
+    position = Position(
+        symbol="NVDA", qty=10.0, side="long", market_value=1900.0, avg_entry_price=190.0
+    )
+    order = build_trim_order(
+        proposal, position, AS_OF, CYCLE, price=190.0, equity=100_000.0, config=IntradayConfig()
+    )
+    assert order.side == "sell"
+    assert order.qty == pytest.approx(10.0)
+
+
+def test_build_trim_order_sizes_below_the_cap_normally():
+    proposal = TradeProposal(action="trim", symbol="NVDA", size_pct=0.02)
+    position = Position(
+        symbol="NVDA", qty=100.0, side="long", market_value=19_000.0, avg_entry_price=190.0
+    )
+    order = build_trim_order(
+        proposal, position, AS_OF, CYCLE, price=190.0, equity=100_000.0, config=IntradayConfig()
+    )
+    # 0.02 * 100_000 = 2_000; 2_000 / 190 = 10.5 -> floor to 10
+    assert order.qty == pytest.approx(10.0)
+
+
+def test_build_trim_order_raises_when_size_rounds_to_zero_shares():
+    proposal = TradeProposal(action="trim", symbol="NVDA", size_pct=0.001)
+    position = Position(
+        symbol="NVDA", qty=100.0, side="long", market_value=19_000.0, avg_entry_price=190.0
+    )
+    with pytest.raises(ValueError, match="too small"):
+        build_trim_order(
+            proposal, position, AS_OF, CYCLE, price=1000.0, equity=1000.0, config=IntradayConfig()
+        )
+
+
+# -- build_replacement_stop_order -----------------------------------------------------------
+
+
+def test_build_replacement_stop_order_is_a_plain_standalone_stop():
+    order = build_replacement_stop_order(
+        "NVDA", "sell", qty=16.0, stop_price=185.0, as_of=AS_OF, cycle=CYCLE
+    )
+    assert order.type == "stop"
+    assert order.order_class == "simple"
+    assert order.stop_price == pytest.approx(185.0)
+    assert order.qty == pytest.approx(16.0)
+    assert order.client_order_id.endswith("::stop")

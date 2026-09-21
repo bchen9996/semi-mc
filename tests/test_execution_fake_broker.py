@@ -69,6 +69,36 @@ def test_an_oto_order_fills_its_entry_leg_like_a_simple_order():
     assert order.filled_qty == pytest.approx(10.0)
 
 
+def test_an_oto_order_synthesizes_a_cancelable_resting_stop_leg():
+    """S4's close/trim path (Phase 4) needs to find and cancel the resting stop before
+    reversing -- confirms FakeBroker models it as a real, independently addressable
+    order, not just an inert field on the parent."""
+    broker = FakeBroker()
+    entry = broker.submit_order(
+        buy(client_order_id="co-oto", order_class="oto", stop_loss_price=95.0)
+    )
+
+    assert entry.legs is not None
+    assert len(entry.legs) == 1
+    leg = entry.legs[0]
+    assert leg.symbol == "NVDA"
+    assert leg.side == "sell"  # opposite of the buy entry
+    assert leg.type == "stop"
+    assert leg.status == "new"
+
+    found = broker.get_order_by_client_id(leg.client_order_id)
+    assert found is not None and found.id == leg.id
+
+    broker.cancel_order(leg.id)
+    assert broker.get_order_by_client_id(leg.client_order_id).status == "canceled"
+
+
+def test_a_simple_order_has_no_legs():
+    broker = FakeBroker()
+    order = broker.submit_order(buy())
+    assert order.legs is None
+
+
 def test_get_account_reflects_constructor_values():
     broker = FakeBroker(equity=50_000.0, cash=40_000.0, account_number="PA123")
     account = broker.get_account()

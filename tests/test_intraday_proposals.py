@@ -76,6 +76,14 @@ def test_close_and_trim_do_not_require_thesis_or_invalidation():
     TradeProposal(action="trim", symbol="NVDA", size_pct=0.02)
 
 
+def test_trim_requires_size_pct():
+    """Phase 4 (S4, BRIEF_INTRADAY.md): a trim without a size can't be turned into an
+    order, so the schema now requires it -- close needs no fields from the model at all,
+    its qty/side come from the real position instead."""
+    with pytest.raises(ValidationError, match="size_pct"):
+        TradeProposal(action="trim", symbol="NVDA")
+
+
 def test_thesis_over_300_characters_is_rejected():
     with pytest.raises(ValidationError):
         _open(thesis="x" * 301)

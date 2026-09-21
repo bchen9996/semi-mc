@@ -207,6 +207,38 @@ def test_submit_order_leaves_order_class_and_stop_loss_unset_for_a_simple_order(
     assert built.stop_loss is None
 
 
+def test_translate_order_recurses_into_legs():
+    """S4's close/trim path (Phase 4) needs to find a filled entry's resting stop-loss
+    leg -- `Order.legs` must carry it, translated the same way the parent is."""
+    stop_leg = _order(
+        id="leg-1",
+        client_order_id="s0-20260101-NVDA-abc::stop",
+        side=AlpacaSide.SELL,
+        type=AlpacaType.STOP,
+        order_class=OrderClass.OTO,
+        status=AlpacaStatus.NEW,
+    )
+    parent = _order(status=AlpacaStatus.NEW, order_class=OrderClass.OTO, legs=[stop_leg])
+    client = MagicMock()
+    client.submit_order.return_value = parent
+
+    order = _broker_with(client).submit_order(_request(order_class="oto", stop_loss_price=95.0))
+
+    assert order.legs is not None
+    assert len(order.legs) == 1
+    assert order.legs[0].id == "leg-1"
+    assert order.legs[0].client_order_id == "s0-20260101-NVDA-abc::stop"
+    assert order.legs[0].side == "sell"
+    assert order.legs[0].type == "stop"
+
+
+def test_translate_order_leaves_legs_none_for_a_simple_order():
+    client = MagicMock()
+    client.submit_order.return_value = _order(status=AlpacaStatus.NEW)
+    order = _broker_with(client).submit_order(_request())
+    assert order.legs is None
+
+
 def test_submit_order_falls_back_to_lookup_on_a_duplicate_client_order_id():
     client = MagicMock()
     client.submit_order.side_effect = _api_error(422, "client_order_id must be unique")

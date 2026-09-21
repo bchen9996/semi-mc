@@ -137,6 +137,35 @@ class FakeBroker:
         fraction = min(max(self.partial_fill_fraction, 0.0), 1.0)
         filled_qty = (request.qty or 0.0) * fraction
         status = "filled" if fraction >= 1.0 else "partially_filled" if fraction > 0 else "accepted"
+
+        legs = None
+        if request.order_class == "oto":
+            # The resting stop-loss leg an "oto" entry attaches (S4, Phase 4) -- a real,
+            # separately cancelable order, registered in self._orders like any other, so
+            # close/trim's find-and-cancel path is genuinely testable without a real
+            # account. Never simulated as triggering on its own -- see the class
+            # docstring above.
+            stop_leg = Order(
+                id=str(uuid.uuid4()),
+                client_order_id=f"{request.client_order_id}::stop",
+                symbol=request.symbol,
+                side="sell" if request.side == "buy" else "buy",
+                type="stop",
+                time_in_force=request.time_in_force,
+                status="new",
+                qty=request.qty,
+                notional=request.notional,
+                submitted_at=self.now,
+            )
+            self._orders[stop_leg.client_order_id] = stop_leg
+            # Open like any other resting order, so a wash_trade_symbols-flagged
+            # collision is genuinely simulated: a same-symbol opposite-side close/trim
+            # correctly raises WashTradeError unless it's canceled first (real Alpaca
+            # exempts only bracket/OCO/trailing-stop, not a plain close/trim order, from
+            # this check -- Phase 3's confirmed quote, docs/alpaca_notes.md).
+            self._open_sides.setdefault(request.symbol, set()).add(stop_leg.side)
+            legs = [stop_leg]
+
         order = Order(
             id=str(uuid.uuid4()),
             client_order_id=request.client_order_id,
@@ -152,6 +181,7 @@ class FakeBroker:
             limit_price=request.limit_price,
             submitted_at=self.now,
             filled_at=self.now if status == "filled" else None,
+            legs=legs,
         )
         self._orders[request.client_order_id] = order
         if status != "filled":

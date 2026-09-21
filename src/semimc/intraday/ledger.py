@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS orders (
     status TEXT NOT NULL,
     broker_order_id TEXT,
     submitted_at TEXT,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    leg TEXT NOT NULL DEFAULT 'entry'
 );
 
 CREATE TABLE IF NOT EXISTS fills (
@@ -306,16 +307,23 @@ class IntradayLedger:
         broker_order_id: str | None = None,
         submitted_at: dt.datetime | None = None,
         proposal_id: int | None = None,
+        leg: str = "entry",
     ) -> int:
         """Insert or update one order by its ``client_order_id`` -- a resubmission of the
         same id (idempotent at the broker) updates status in place, same reasoning as
-        ``live/ledger.py``'s ``record_order``."""
+        ``live/ledger.py``'s ``record_order``.
+
+        ``leg`` distinguishes an entry order's row from its resting stop-loss leg's own
+        row (S4, Phase 4) -- ``"entry"`` (the default, every order before Phase 4) or
+        ``"stop"``. :func:`~semimc.intraday.orders.submit_order_with_fault_isolation`
+        records a successful ``"oto"`` submission's leg this way automatically.
+        """
         self._conn.execute(
             """
             INSERT INTO orders
                 (client_order_id, proposal_id, symbol, side, qty, notional, limit_price,
-                 status, broker_order_id, submitted_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 status, broker_order_id, submitted_at, updated_at, leg)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(client_order_id) DO UPDATE SET
                 status = excluded.status,
                 broker_order_id = excluded.broker_order_id,
@@ -333,6 +341,7 @@ class IntradayLedger:
                 broker_order_id,
                 submitted_at.isoformat() if submitted_at else None,
                 _now(),
+                leg,
             ),
         )
         self._conn.commit()
@@ -353,6 +362,24 @@ class IntradayLedger:
             f"SELECT * FROM orders WHERE status IN ({placeholders})", _OPEN_ORDER_STATUSES
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def open_stop_leg_for(self, symbol: str) -> dict[str, Any] | None:
+        """The most recently recorded still-open stop-loss leg for ``symbol``, or
+        ``None`` (S4, Phase 4) -- what `intraday/orders.py::find_and_cancel_resting_stop`
+        looks up before a close/trim. Singular, not a list: nothing before Phase 5's
+        tranche-splitting can produce more than one open entry (and therefore more than
+        one resting stop) for the same symbol at once -- revisit this once that changes.
+        """
+        placeholders = ",".join("?" * len(_OPEN_ORDER_STATUSES))
+        row = self._conn.execute(
+            f"""
+            SELECT * FROM orders
+            WHERE symbol = ? AND leg = 'stop' AND status IN ({placeholders})
+            ORDER BY id DESC LIMIT 1
+            """,
+            (symbol, *_OPEN_ORDER_STATUSES),
+        ).fetchone()
+        return dict(row) if row is not None else None
 
     def record_fill(
         self, client_order_id: str, qty: float, price: float, filled_at: dt.datetime

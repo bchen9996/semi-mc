@@ -1,9 +1,10 @@
-"""Turning an already-*accepted* `open`/`add` `TradeProposal` into a real order at
-Alpaca, with a real stop resting at the broker (S4, `BRIEF_INTRADAY.md`, Phase 3).
+"""Turning an already-*accepted* `TradeProposal` into a real order at Alpaca, with a real
+stop resting at the broker rather than a polling process (S4, `BRIEF_INTRADAY.md`,
+Phases 3-4).
 
-`close`/`trim` order construction, tranche-splitting, and the placebo agent are
-deliberately not here -- see the Phase 3 plan's "Scope" section for why each is deferred
-to Phase 4 rather than half-built now.
+Tranche-splitting and the placebo agent are deliberately not here -- see the Phase 4
+plan's "Roadmap" section for why each waits on `jobs.py`'s loop (Phase 5) or a real
+watchlist source (Phase 6).
 
 Reuses `execution/orders.py`'s low-level helpers (`collared_limit_price`,
 `sequence_orders`) rather than a second copy, and mirrors `live/execute.py::run_execute`'s
@@ -13,6 +14,7 @@ takes down the rest of it.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import math
 
@@ -25,6 +27,8 @@ from ..execution.broker import (
     MarketClosedError,
     Order,
     OrderRequest,
+    OrderSide,
+    Position,
     RateLimitError,
     WashTradeError,
 )
@@ -96,6 +100,133 @@ def build_entry_order(
     )
 
 
+def find_and_cancel_resting_stop(symbol: str, broker: Broker, ledger: IntradayLedger) -> str | None:
+    """Cancels `symbol`'s resting protective stop leg, if any, and returns its
+    `client_order_id` (or `None` if there was none to cancel).
+
+    This is a correctness requirement for closing or trimming a position, not cleanup:
+    only bracket/OCO/trailing-stop orders are confirmed wash-trade-exempt at Alpaca
+    (Phase 3's direct quote, `docs/alpaca_notes.md`), so a plain "simple" close/trim order
+    left to collide with a still-resting stop-loss leg in the same symbol would likely be
+    rejected -- the brief's own "never leave an opposite-side order open in the same
+    symbol; cancel before reversing."
+
+    Tolerates the leg already being canceled or otherwise gone at the broker (`KeyError`/
+    `ValueError` from `cancel_order`) the same forgiving way real Alpaca's own
+    `cancel_order` already is (`docs/alpaca_notes.md`: canceling an already-canceled
+    order succeeds silently) -- nothing left to cancel is not a failure.
+    """
+    leg = ledger.open_stop_leg_for(symbol)
+    if leg is None:
+        return None
+    with contextlib.suppress(KeyError, ValueError):
+        broker.cancel_order(leg["broker_order_id"])
+    return leg["client_order_id"]
+
+
+def build_close_order(
+    position: Position,
+    as_of: pd.Timestamp,
+    cycle: str,
+    price: float,
+    config: IntradayConfig,
+    attempt: int = 0,
+) -> OrderRequest:
+    """Fully exits `position`. Qty and side come from the real, currently-held
+    `Position` -- never from a proposal, which needs neither `side` nor `size_pct` to
+    close (the schema doesn't require either for `action="close"`).
+
+    `order_class="simple"` -- exiting needs no new stop leg. The resting stop-loss leg
+    from the original entry must be canceled first via `find_and_cancel_resting_stop`
+    (not done here -- see the module docstring on sequencing being a job's job).
+    """
+    side: OrderSide = "sell" if position.side == "long" else "buy"
+    return OrderRequest(
+        symbol=position.symbol,
+        side=side,
+        type="limit",
+        time_in_force="day",
+        client_order_id=intraday_client_order_id(as_of, cycle, position.symbol, attempt),
+        qty=abs(position.qty),
+        limit_price=collared_limit_price(price, side, config.risk.equity_cost_bps_per_side),
+    )
+
+
+def build_trim_order(
+    proposal: TradeProposal,
+    position: Position,
+    as_of: pd.Timestamp,
+    cycle: str,
+    price: float,
+    equity: float,
+    config: IntradayConfig,
+    attempt: int = 0,
+) -> OrderRequest:
+    """Partially reduces `position`. `proposal.action` must be `"trim"` (raises
+    `ValueError` otherwise). `size_pct` is percent of equity, the same unit `open`/`add`
+    use (`TradeProposal`'s own model_validator now requires it for `trim`) -- capped at
+    what's actually held, so a trim can never exceed the position, the same defensive cap
+    `execution/orders.py::build_orders` already uses for its own sell-down case.
+
+    Like `build_close_order`, the resting stop-loss leg must be canceled first
+    (`find_and_cancel_resting_stop`), and -- unlike a close -- the remainder needs a
+    fresh, smaller replacement stop afterward (`build_replacement_stop_order`) so it is
+    never left resting unprotected. Neither is sequenced here; see the module docstring.
+    """
+    if proposal.action != "trim":
+        raise ValueError(f"build_trim_order only builds trim orders, got {proposal.action!r}")
+
+    # size_pct is required for "trim" by TradeProposal's own model_validator, so it's
+    # never None here.
+    position_notional = abs(position.qty) * price
+    desired_notional = min(proposal.size_pct * equity, position_notional)
+    qty = min(math.floor(desired_notional / price), math.floor(abs(position.qty)))
+    if qty <= 0:
+        raise ValueError(
+            f"size_pct {proposal.size_pct} is too small to trim a whole share of "
+            f"{proposal.symbol} at {price}"
+        )
+
+    side: OrderSide = "sell" if position.side == "long" else "buy"
+    return OrderRequest(
+        symbol=proposal.symbol,
+        side=side,
+        type="limit",
+        time_in_force="day",
+        client_order_id=intraday_client_order_id(as_of, cycle, proposal.symbol, attempt),
+        qty=qty,
+        limit_price=collared_limit_price(price, side, config.risk.equity_cost_bps_per_side),
+    )
+
+
+def build_replacement_stop_order(
+    symbol: str,
+    side: OrderSide,
+    qty: float,
+    stop_price: float,
+    as_of: pd.Timestamp,
+    cycle: str,
+    attempt: int = 0,
+) -> OrderRequest:
+    """A plain standalone stop order (`type="stop"`, `order_class="simple"` -- not
+    `"oto"`: there is no new entry here, just re-protecting a trimmed remainder) so a
+    position is never left resting unprotected between a trim and the next cycle noticing.
+
+    `client_order_id` is suffixed the same way `FakeBroker`'s synthesized OTO leg is
+    (`"...::stop"`), for the same reason: this isn't another attempt at the same order,
+    it's a different kind of order for the same symbol/cycle.
+    """
+    return OrderRequest(
+        symbol=symbol,
+        side=side,
+        type="stop",
+        time_in_force="day",
+        client_order_id=f"{intraday_client_order_id(as_of, cycle, symbol, attempt)}::stop",
+        qty=qty,
+        stop_price=stop_price,
+    )
+
+
 def submit_order_with_fault_isolation(
     request: OrderRequest,
     broker: Broker,
@@ -110,8 +241,9 @@ def submit_order_with_fault_isolation(
     response didn't arrive -- never blind-resubmit). `RateLimitError`/`WashTradeError`/
     `AccountBlockedError`/`MarketClosedError` are caught, logged as an incident, and
     turned into a `None` return rather than raised, so one bad order never takes down the
-    rest of a cycle's batch. On success, records the order (and any immediate fill) to the
-    ledger and returns the submitted `Order`.
+    rest of a cycle's batch. On success, records the order -- and, for an `"oto"` entry,
+    its resting stop-loss leg as its own `leg="stop"` row (Phase 4) -- and any immediate
+    fill, then returns the submitted `Order`.
     """
     tradable_failure = check_order_tradable(request, broker)
     if tradable_failure is not None:
@@ -142,6 +274,20 @@ def submit_order_with_fault_isolation(
         submitted_at=submitted.submitted_at,
         proposal_id=proposal_id,
     )
+    for child in submitted.legs or []:
+        ledger.record_order(
+            client_order_id=child.client_order_id,
+            symbol=child.symbol,
+            side=child.side,
+            status=child.status,
+            qty=child.qty,
+            notional=child.notional,
+            limit_price=child.limit_price,
+            broker_order_id=child.id,
+            submitted_at=child.submitted_at,
+            proposal_id=proposal_id,
+            leg="stop",
+        )
     if submitted.filled_qty > 0 and submitted.filled_avg_price is not None:
         ledger.record_fill(
             submitted.client_order_id,

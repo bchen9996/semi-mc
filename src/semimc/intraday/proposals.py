@@ -39,7 +39,10 @@ class TradeProposal(BaseModel):
     instrument: Literal["equity", "option"] = "equity"
     symbol: str
     side: Literal["buy", "sell"] | None = None
-    size_pct: float | None = Field(None, gt=0, le=1)  # percent of equity, not shares
+    # Percent of equity, not shares -- for open/add, the position's own size; for trim,
+    # how much of equity's worth to sell off (capped at what's actually held, see
+    # intraday/orders.py::build_trim_order). Not used by close (the whole position exits).
+    size_pct: float | None = Field(None, gt=0, le=1)
     limit_price: float | None = Field(None, gt=0)  # brief: marketable limit orders only
     thesis: str | None = Field(None, max_length=300)
     evidence: list[str] = Field(default_factory=list)
@@ -52,7 +55,7 @@ class TradeProposal(BaseModel):
     risk_flags: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _open_or_add_needs_thesis_invalidation_and_a_time_stop(self) -> TradeProposal:
+    def _required_fields_per_action(self) -> TradeProposal:
         if self.action in OPEN_OR_ADD_ACTIONS:
             required = (
                 "side",
@@ -65,6 +68,12 @@ class TradeProposal(BaseModel):
             missing = [field for field in required if getattr(self, field) is None]
             if missing:
                 raise ValueError(f"action={self.action!r} requires {missing}")
+        elif self.action == "trim" and self.size_pct is None:
+            # Same unit as open/add (percent of equity, not shares) -- Phase 4 (S4,
+            # BRIEF_INTRADAY.md) resolved this as the one meaning for the field across
+            # every action that uses it, rather than a second, silently-different unit
+            # for trim alone.
+            raise ValueError("action='trim' requires ['size_pct']")
         return self
 
 

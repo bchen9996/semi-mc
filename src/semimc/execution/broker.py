@@ -115,6 +115,10 @@ class Order:
     limit_price: float | None = None
     submitted_at: dt.datetime | None = None
     filled_at: dt.datetime | None = None
+    # Populated only for a multi-leg order (order_class="oto") -- the resting stop-loss
+    # leg an "oto" OrderRequest attaches (S4, BRIEF_INTRADAY.md, Phase 4). None for every
+    # existing "simple" order this project has ever submitted.
+    legs: list[Order] | None = None
 
 
 class BrokerError(Exception):

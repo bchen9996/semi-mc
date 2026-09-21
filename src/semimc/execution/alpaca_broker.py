@@ -29,6 +29,16 @@ What gets translated 1:1, and what needs help, was verified directly against the
   ``IntradayLedger.open_orders()`` instead, so this filter changing behavior for s0/s3
   (which never submits a non-simple order) would be a real-behavior change with nothing to
   gain from it.
+- **``Order.legs: Optional[List[Order]]`` carries a multi-leg order's children** --
+  confirmed directly against the installed package (``Order.model_fields``). A filled
+  "oto" entry's stop-loss leg becomes its own resting order there, previously dropped
+  entirely by this translation (a real gap, found and fixed in Phase 4): closing or
+  trimming a position needs to find and cancel that leg first (Alpaca's wash-trade check
+  exempts only bracket/OCO/trailing-stop orders, not a plain simple close/trim order
+  colliding with it), so :meth:`_translate_order` now recurses into ``.legs``.
+  ``list_open_orders``'s own skip above is unaffected -- S4 reads legs off the ``Order``
+  returned directly by :meth:`submit_order`/:meth:`get_order_by_client_id`, never through
+  that method.
 - **``Calendar.open``/``.close`` are already naive, exchange-local wall-clock times** --
   ``alpaca.trading.models.Calendar.__init__`` builds them with
   ``datetime.strptime(date + " " + "09:30", "%Y-%m-%d %H:%M")`` directly off the raw API
@@ -371,4 +381,5 @@ class AlpacaPaperBroker:
             limit_price=_optional_float(order.limit_price, field="limit_price"),
             submitted_at=order.submitted_at,
             filled_at=order.filled_at,
+            legs=[self._translate_order(leg) for leg in order.legs] if order.legs else None,
         )
