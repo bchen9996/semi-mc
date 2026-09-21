@@ -57,6 +57,27 @@ def test_arrival_price_is_none_for_a_non_positive_quote():
     assert client.arrival_price("NVDA", AT) is None
 
 
+def test_latest_quote_returns_the_whole_nearest_quote():
+    """S4's spread gate (Phase 5, `intraday/pretrade.py::check_spread_gate`) needs bid,
+    ask, and the quote's own timestamp -- a plain midpoint (`arrival_price`) can't
+    provide any of those."""
+    quotes = [
+        _quote(AT - dt.timedelta(minutes=4), 99.0, 101.0),  # farther away
+        _quote(AT - dt.timedelta(seconds=5), 100.0, 100.5),  # nearest to `at`
+    ]
+    client = AlpacaMarketDataClient(_client_returning(quotes))
+    quote = client.latest_quote("NVDA", AT)
+    assert quote is not None
+    assert quote.bid_price == pytest.approx(100.0)
+    assert quote.ask_price == pytest.approx(100.5)
+    assert quote.timestamp == AT - dt.timedelta(seconds=5)
+
+
+def test_latest_quote_is_none_when_no_quotes_come_back():
+    client = AlpacaMarketDataClient(_client_returning([]))
+    assert client.latest_quote("NVDA", AT) is None
+
+
 def test_from_env_raises_a_clear_error_when_keys_are_missing(monkeypatch):
     monkeypatch.delenv("ALPACA_API_KEY", raising=False)
     monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)

@@ -57,10 +57,12 @@ class FakeBroker:
 
     An ``OrderRequest`` with ``order_class="oto"`` (S4's protective stop, Phase 3) fills
     its entry leg exactly like a simple order -- ``submit_order`` never reads
-    ``stop_loss_price``/``stop_loss_limit_price`` at all. It deliberately does **not**
-    simulate that stop leg ever triggering later: real stop-triggering is Alpaca's own
-    server-side job once ``order_class=oto``, and ``AlpacaPaperBroker`` itself is already
-    exercised only by opt-in network-marked integration tests, not mirrored here.
+    ``stop_loss_price``/``stop_loss_limit_price`` at all. Any order of ``type="stop"`` or
+    ``"stop_limit"`` -- whether an OTO entry's attached leg, or a standalone request
+    (S4's replacement stop after a trim, Phase 5) -- rests at ``status="new"`` and is
+    never simulated as filling or triggering: real stop-triggering is Alpaca's own
+    server-side job, and ``AlpacaPaperBroker`` itself is already exercised only by opt-in
+    network-marked integration tests, not mirrored here.
     """
 
     equity: float = 100_000.0
@@ -134,9 +136,26 @@ class FakeBroker:
                     f"a {request.symbol} order could interact with one already open"
                 )
 
-        fraction = min(max(self.partial_fill_fraction, 0.0), 1.0)
-        filled_qty = (request.qty or 0.0) * fraction
-        status = "filled" if fraction >= 1.0 else "partially_filled" if fraction > 0 else "accepted"
+        if request.type in ("stop", "stop_limit"):
+            # A stop (standalone -- S4's own replacement stop, Phase 5 -- or an OTO
+            # entry's attached leg, Phase 4) rests untriggered, exactly like real Alpaca:
+            # nothing here simulates the trigger price ever being touched. Previously
+            # only the OTO leg branch below got this treatment; a standalone stop
+            # submitted directly used to fall through to the fill logic meant for
+            # market/limit orders and filled immediately -- wrong, and inconsistent with
+            # the OTO leg's own "never simulated as triggering" rule for the same order
+            # type.
+            filled_qty = 0.0
+            status = "new"
+        else:
+            fraction = min(max(self.partial_fill_fraction, 0.0), 1.0)
+            filled_qty = (request.qty or 0.0) * fraction
+            if fraction >= 1.0:
+                status = "filled"
+            elif fraction > 0:
+                status = "partially_filled"
+            else:
+                status = "accepted"
 
         legs = None
         if request.order_class == "oto":

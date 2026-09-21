@@ -38,12 +38,19 @@ from .ledger import IntradayLedger
 from .proposals import OPEN_OR_ADD_ACTIONS, TradeProposal
 
 
-def intraday_client_order_id(as_of: pd.Timestamp, cycle: str, symbol: str, attempt: int = 0) -> str:
+def intraday_client_order_id(
+    as_of: pd.Timestamp, cycle: str, symbol: str, attempt: int = 0, tranche: int = 1
+) -> str:
     """Deterministic per (as_of, cycle, symbol, attempt) -- the brief's own "deterministic
     `client_order_id` per cycle, symbol, and attempt" idempotency rule. There's no
     `Decision` to hash off the way `execution/orders.py::client_order_id` has; this hashes
-    the tuple itself directly."""
-    return f"s4-{pd.Timestamp(as_of):%Y%m%d}-{cycle}-{symbol}-{attempt}"
+    the tuple itself directly.
+
+    `tranche` (Phase 5) is appended only when it isn't `1`, so every id built before
+    tranche-splitting existed -- and every existing test asserting an exact id string --
+    is unaffected."""
+    base = f"s4-{pd.Timestamp(as_of):%Y%m%d}-{cycle}-{symbol}-{attempt}"
+    return base if tranche == 1 else f"{base}-t{tranche}"
 
 
 def build_entry_order(
@@ -54,6 +61,7 @@ def build_entry_order(
     equity: float,
     config: IntradayConfig,
     attempt: int = 0,
+    tranche: int = 1,
 ) -> OrderRequest:
     """One `open`/`add` proposal, one order, with a real stop resting at the broker the
     instant it fills -- this is what removes the need for a minute-level monitor process
@@ -66,6 +74,11 @@ def build_entry_order(
     convention (`execution/orders.py::build_orders` does the same), and a hedge pending
     real confirmation of whether an OTO stop-loss leg even accepts a fractional qty
     (unconfirmed anywhere checked -- see `docs/alpaca_notes.md`'s "still to verify" list).
+
+    `tranche` (Phase 5) is passed straight through to `intraday_client_order_id` -- this
+    function doesn't divide `size_pct` itself; a caller building tranche N > 1 passes an
+    already-divided `proposal` (`jobs.py::run_cycle` does this via `proposal.model_copy`)
+    and only uses `tranche` to keep that piece's `client_order_id` distinct.
     """
     if proposal.action not in OPEN_OR_ADD_ACTIONS:
         raise ValueError(f"build_entry_order only builds open/add orders, got {proposal.action!r}")
@@ -84,7 +97,7 @@ def build_entry_order(
         side=proposal.side,
         type="limit",
         time_in_force="day",
-        client_order_id=intraday_client_order_id(as_of, cycle, proposal.symbol, attempt),
+        client_order_id=intraday_client_order_id(as_of, cycle, proposal.symbol, attempt, tranche),
         qty=qty,
         # Reuses risk.equity_cost_bps_per_side as the collar -- the same modeled per-side
         # friction validate_proposal's edge-vs-cost check already uses, rather than a
@@ -233,6 +246,9 @@ def submit_order_with_fault_isolation(
     ledger: IntradayLedger,
     now: dt.datetime,
     proposal_id: int | None = None,
+    tranche_index: int = 1,
+    tranche_total: int = 1,
+    leg: str = "entry",
 ) -> Order | None:
     """Mirrors `live/execute.py::run_execute`'s per-order try/except exactly.
 
@@ -244,6 +260,17 @@ def submit_order_with_fault_isolation(
     rest of a cycle's batch. On success, records the order -- and, for an `"oto"` entry,
     its resting stop-loss leg as its own `leg="stop"` row (Phase 4) -- and any immediate
     fill, then returns the submitted `Order`.
+
+    `tranche_index`/`tranche_total` (Phase 5) are recorded on the entry row only -- a
+    resting stop leg is never itself split, so its own row always stays the ledger's
+    default `1`/`1` regardless of what its parent entry's tranche is.
+
+    `leg` (Phase 5) is the caller's own label for *this* submission -- `"entry"` (the
+    default) for `build_entry_order`, `"exit"` for `build_close_order`/`build_trim_order`,
+    `"stop"` for `build_replacement_stop_order`. This matters beyond bookkeeping:
+    `IntradayLedger.latest_filled_entry_for`/`pending_tranche_for` both filter on
+    `leg = 'entry'`, so a close/trim submitted through here without an explicit `leg`
+    would otherwise masquerade as a fresh entry and corrupt both lookups.
     """
     tradable_failure = check_order_tradable(request, broker)
     if tradable_failure is not None:
@@ -273,6 +300,9 @@ def submit_order_with_fault_isolation(
         broker_order_id=submitted.id,
         submitted_at=submitted.submitted_at,
         proposal_id=proposal_id,
+        tranche_index=tranche_index,
+        tranche_total=tranche_total,
+        leg=leg,
     )
     for child in submitted.legs or []:
         ledger.record_order(

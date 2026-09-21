@@ -34,6 +34,14 @@ paper_app = typer.Typer(
 )
 app.add_typer(paper_app, name="paper")
 
+intraday_app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    help="S4 intraday agent jobs: preflight, preopen, monitor, open-batch, cycle, carry "
+    "(BRIEF_INTRADAY.md).",
+)
+app.add_typer(intraday_app, name="intraday")
+
 LOGGER = logging.getLogger("semimc")
 
 ConfigOption = Annotated[Path | None, typer.Option("--config", "-c", help="Path to a YAML config.")]
@@ -1776,6 +1784,246 @@ def paper_evaluate(
                 )
     finally:
         ledger.close()
+
+
+# -- S4 intraday agent jobs (BRIEF_INTRADAY.md, Phase 5) ---------------------------------
+
+
+def _intraday_as_of(value: str | None) -> pd.Timestamp:
+    return pd.Timestamp(value) if value else pd.Timestamp.now().normalize()
+
+
+def _intraday_now(cfg: Config):  # noqa: ANN001 -- returns dt.datetime
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    return dt.datetime.now(ZoneInfo(cfg.intraday.schedule.timezone)).replace(tzinfo=None)
+
+
+def _intraday_broker():  # noqa: ANN001 -- returns AlpacaPaperBroker
+    from .execution.alpaca_broker import AlpacaPaperBroker
+
+    return AlpacaPaperBroker.from_env(
+        key_env="ALPACA_S4_API_KEY", secret_env="ALPACA_S4_SECRET_KEY"
+    )
+
+
+def _intraday_market_data():  # noqa: ANN001 -- returns AlpacaMarketDataClient
+    from .execution.market_data import AlpacaMarketDataClient
+
+    return AlpacaMarketDataClient.from_env(
+        key_env="ALPACA_S4_API_KEY", secret_env="ALPACA_S4_SECRET_KEY"
+    )
+
+
+IntradayAsOfOption = Annotated[
+    str | None, typer.Option("--as-of", help="Trading day, YYYY-MM-DD. Defaults to today.")
+]
+
+
+@intraday_app.command("preflight")
+def intraday_preflight(
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Health checks before today's trading: the pretrade gate, yesterday's
+    reconciliation status, and a market-data smoke test.
+
+    A canary, not a gate other commands depend on -- `open-batch`/`cycle`/`carry` each
+    re-run their own gates fresh regardless of this command's result, so a missed or
+    failed preflight never blocks trading by itself; it exists to surface a dead account
+    or feed via GitHub's own failure email before the day's real jobs waste a cycle on it.
+    """
+    cfg = _setup(config, set_, verbose)
+    from .intraday.jobs import run_preflight
+    from .intraday.ledger import IntradayLedger
+
+    now = _intraday_now(cfg)
+    ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    broker = _intraday_broker()
+    market_data = _intraday_market_data()
+    try:
+        result = run_preflight(cfg, broker, market_data, ledger, now)
+    finally:
+        ledger.close()
+
+    if result.passed:
+        typer.echo("Preflight: passed")
+        return
+    typer.secho("Preflight: failed", fg=typer.colors.RED)
+    for failure in result.failures:
+        typer.echo(f"  - {failure}")
+    raise typer.Exit(code=1)
+
+
+@intraday_app.command("preopen")
+def intraday_preopen(
+    as_of: IntradayAsOfOption = None,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Deterministic refresh of today's watchlist quotes: drops anything whose spread or
+    quote staleness fails the configured gate, logging why. Read-only/logging only --
+    `open-batch`/`cycle` re-run the identical gate themselves rather than trusting this
+    command's result."""
+    cfg = _setup(config, set_, verbose)
+    from .intraday.jobs import run_preopen
+    from .intraday.ledger import IntradayLedger
+
+    as_of_ts = _intraday_as_of(as_of)
+    now = _intraday_now(cfg)
+    ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    market_data = _intraday_market_data()
+    try:
+        result = run_preopen(cfg, market_data, ledger, as_of_ts, now)
+    finally:
+        ledger.close()
+
+    typer.echo(f"Tradable: {', '.join(result.tradable) if result.tradable else '(none)'}")
+    if result.dropped:
+        typer.secho("Dropped:", fg=typer.colors.YELLOW)
+        for _symbol, reason in result.dropped:
+            typer.echo(f"  {reason}")
+
+
+@intraday_app.command("monitor")
+def intraday_monitor(
+    as_of: IntradayAsOfOption = None,
+    cycle: Annotated[
+        str, typer.Option("--cycle", help="Label recorded on any close this run submits.")
+    ] = "monitor",
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Deterministic, model-free invalidation/time-stop enforcement -- meant for a tight
+    cron (every few minutes) since it makes no LLM call. `open-batch`/`cycle` also run
+    this first, so a position is never re-evaluated by the Trader after it should
+    already be closed."""
+    cfg = _setup(config, set_, verbose)
+    from .intraday.jobs import midpoint_price, quote_map
+    from .intraday.ledger import IntradayLedger
+    from .intraday.monitor import check_invalidation_and_time_stops
+
+    as_of_ts = _intraday_as_of(as_of)
+    now = _intraday_now(cfg)
+    ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    broker = _intraday_broker()
+    market_data = _intraday_market_data()
+    try:
+        positions = broker.list_positions()
+        quotes = quote_map({p.symbol for p in positions}, market_data, now)
+        prices = {s: midpoint_price(q) for s, q in quotes.items()}
+        result = check_invalidation_and_time_stops(
+            cfg.intraday, broker, ledger, prices, as_of_ts, cycle, now
+        )
+    finally:
+        ledger.close()
+
+    typer.echo(f"Closed: {', '.join(result.closed) if result.closed else '(none)'}")
+    typer.echo(f"Still open: {', '.join(result.still_open) if result.still_open else '(none)'}")
+
+
+def _run_intraday_cycle(
+    cycle: str,
+    as_of: str | None,
+    config: Path | None,
+    set_: list[str] | None,
+    verbose: bool,
+) -> None:
+    cfg = _setup(config, set_, verbose)
+    from .intraday.jobs import run_cycle
+    from .intraday.ledger import IntradayLedger
+    from .intraday.llm import ClaudeCliClient
+
+    as_of_ts = _intraday_as_of(as_of)
+    now = _intraday_now(cfg)
+    ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    broker = _intraday_broker()
+    market_data = _intraday_market_data()
+    llm_client = ClaudeCliClient.from_env()
+    try:
+        result = run_cycle(cycle, cfg, broker, ledger, market_data, llm_client, as_of_ts, now)
+    finally:
+        ledger.close()
+
+    if result.skipped_reason is not None:
+        typer.echo(f"Skipped: {result.skipped_reason}")
+        return
+
+    typer.echo(
+        f"Proposals: {result.proposals_seen} seen, {result.proposals_accepted} accepted, "
+        f"{result.proposals_rejected} rejected"
+    )
+    if result.orders_submitted:
+        typer.echo(f"Orders submitted: {', '.join(result.orders_submitted)}")
+    if result.order_failures:
+        typer.secho(f"{len(result.order_failures)} order failure(s):", fg=typer.colors.RED)
+        for failure in result.order_failures:
+            typer.echo(f"  {failure}")
+        raise typer.Exit(code=1)
+
+
+@intraday_app.command("open-batch")
+def intraday_open_batch(
+    as_of: IntradayAsOfOption = None,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """The first Trader cycle of the day -- identical to `cycle`, just labeled
+    "open_batch" for the ledger and idempotency (`intraday_client_order_id`)."""
+    _run_intraday_cycle("open_batch", as_of, config, set_, verbose)
+
+
+@intraday_app.command("cycle")
+def intraday_cycle(
+    as_of: IntradayAsOfOption = None,
+    cycle: Annotated[
+        str, typer.Option("--cycle", help="Label for this cycle, e.g. cycle_0835.")
+    ] = "cycle",
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """One Trader cycle: monitor -> tranche continuation -> propose -> validate ->
+    execute. Meant to run every `schedule.cycle_interval_minutes` through the session."""
+    _run_intraday_cycle(cycle, as_of, config, set_, verbose)
+
+
+@intraday_app.command("carry")
+def intraday_carry(
+    as_of: IntradayAsOfOption = None,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """End-of-session: closes anything without a written multi-day thesis, then closes
+    the lowest-confidence carried positions until back under the overnight gross cap."""
+    cfg = _setup(config, set_, verbose)
+    from .intraday.jobs import run_carry
+    from .intraday.ledger import IntradayLedger
+
+    as_of_ts = _intraday_as_of(as_of)
+    now = _intraday_now(cfg)
+    ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    broker = _intraday_broker()
+    market_data = _intraday_market_data()
+    try:
+        result = run_carry(cfg, broker, ledger, market_data, as_of_ts, now)
+    finally:
+        ledger.close()
+
+    closed_str = ", ".join(result.closed) if result.closed else "(none)"
+    carried_str = ", ".join(result.carried) if result.carried else "(none)"
+    typer.echo(f"Closed (no multi-day thesis): {closed_str}")
+    typer.echo(f"Carried: {carried_str}")
+    if result.closed_for_cap:
+        typer.secho(
+            f"Closed for overnight cap: {', '.join(result.closed_for_cap)}", fg=typer.colors.YELLOW
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

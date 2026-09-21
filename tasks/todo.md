@@ -829,7 +829,8 @@ below) -- close/trim order construction, tranche-splitting, and the placebo agen
 out of this phase. (That single "Phase 4" bucket was itself split further once Phase 4
 was actually scoped, 2026-09-21 -- see that section: close/trim construction is Phase 4,
 `jobs.py`/CLI/the GH Actions workflow/tranche-splitting is Phase 5, and the placebo agent
-is Phase 6.)
+is Phase 6, later Phase 7 once Phase 5 itself split further -- see the Phase 5 section
+below.)
 
 A scope correction found while researching this phase, before writing any code: the
 roadmap said "real bracket/stop orders," but `TradeProposal` only has an
@@ -897,7 +898,7 @@ whole shares for this order type). Built:
       tranche-splitting ("default to two tranches") -- a per-cycle flow-control decision
       that belongs with `jobs.py`'s loop (now Phase 5), not order-construction math with
       no loop to sit inside yet; the placebo agent (`placebo.py`) on a shadow ledger --
-      needs a real watchlist source (Phase 5's `research` job, now Phase 6's turn) and
+      needs a real watchlist source (Phase 6's `research` job, once that phase exists) and
       the brief never specifies the shadow ledger's fill mechanics.
 - [x] `docs/alpaca_notes.md`: wash-trade exemption item confirmed with a direct quote
       (noting OTO isn't named in it); two new "still to verify" items (OTO + fractional
@@ -919,6 +920,12 @@ now with what already exists; `jobs.py`/CLI/the workflow/tranche-splitting move 
 placebo agent moves to Phase 6 (needs Phase 5's `research` job for a real watchlist).
 Old Phase 5/6/7 (injection defenses; reflections/EOD/`PLAYBOOK.md`; rollout stages)
 shift to 7/8/9 -- content unchanged, only numbers.
+
+**Phase 5 itself split again once it was actually scoped (see the Phase 5 section
+below)**: `research` needed a whole new data source (a news client) that didn't exist,
+so it moves to its own new Phase 6, bumping placebo to 7, injection defenses to 8,
+reflections/EOD/`PLAYBOOK.md` to 9 (now also owning `eod_review`/`weekly_review`'s
+scheduling, not just their content), and rollout to 10.
 
 A real gap found while scoping `close`'s mechanics, before writing any code: once an
 `open`/`add` order fills, its OTO stop-loss leg becomes its own resting order at Alpaca,
@@ -981,6 +988,126 @@ canceling that resting leg first is a correctness requirement, not cleanup. Buil
       `tests/test_intraday_orders.py` (`find_and_cancel_resting_stop`,
       `build_close_order`, `build_trim_order`, `build_replacement_stop_order`). Re-ran
       `tests/test_live_execute.py` (s0/s3) to confirm `Order.legs` is a no-op for them.
+
+**Phase 5 -- the mechanical trading loop (`jobs.py`, CLI, GitHub Actions workflow,
+tranche-splitting), built 2026-09-21.** The request was "go ahead to Phase 5," which the
+existing roadmap described as one bucket (all eight of the brief's named jobs, CLI
+wiring, the workflow, tranches). Two more research passes (mapping the exact s0/s3 job/
+CLI/workflow pattern; inventorying everything Phases 0-4 already built) found the same
+kind of further split Phase 4 went through: `research` needs a whole new capability (a
+news client) that doesn't exist yet, and `eod_review`/`weekly_review`'s real content was
+already assigned to the old Phase 8 (reflections/EOD/`PLAYBOOK.md`), not this bucket. So
+this phase narrows to the loop that runs *given* a watchlist -- `preflight`, `preopen`,
+`open_batch`/`cycle` (one shared implementation), `carry`, plus a new `monitor` job -- and
+`research`/`eod_review`/`weekly_review` move out entirely (see the roadmap renumbering
+above the Phase 4 write-up). Tested end to end against `FakeBroker`, a fake
+`ClaudeCliClient`, and a manually-seeded `watchlist` table, since `research` producing a
+real one is Phase 6's job, not this one -- `ledger.watchlist_for(as_of)` is already a
+decoupled read, the same way `execute.py` never cares how `decide.py`'s decision was
+produced.
+
+Three findings shaped the design, all found before writing code:
+
+1. **The brief's "minute monitor" doesn't fit a GitHub-Actions-cron architecture as
+   literally described** (no persistent process, s0/s3 don't run one either). Fix:
+   invalidation/time-stop enforcement becomes its own job (`intraday/monitor.py::
+   check_invalidation_and_time_stops`), cheap enough (no LLM call) to run on a tight
+   5-minute cron -- closer to the brief's real safety intent than folding the same check
+   into the 20-minute Trader `cycle` alone. `run_cycle` calls it first, so the Trader is
+   never asked about a position that should already be gone.
+2. **`IntradayPretradeContext.config`'s type hint (`IntradayConfig`) was already wrong
+   before this phase** -- its body calls `context.config.path(...)` and
+   `context.config.intraday.*`, which only works if the real argument is the *full*
+   `Config` (confirmed: every existing test already passes the full `Config`, working by
+   accident since Python doesn't enforce dataclass field types). Rather than change that
+   already-shipped, already-tested contract, every `jobs.py::run_*` function takes the
+   full `Config` too (matching `live/{decide,execute,mark}.py`'s own actual convention,
+   which this session had initially misread as "narrow `IntradayConfig` everywhere" from
+   Phase 3-4's order builders alone) and narrows to `config.intraday` itself wherever a
+   Phase 2-4 helper expects the narrower type.
+3. **A `FakeBroker` gap found while testing the trim-and-reprotect path**: a standalone
+   `type="stop"` order (S4's own replacement stop after a trim) fell through to the same
+   fill logic as a market/limit order and filled *immediately* -- inconsistent with how
+   `FakeBroker` already refuses to simulate an OTO leg's own stop ever triggering. Fixed
+   in `execution/fake_broker.py`: any order with `type in ("stop", "stop_limit")` now
+   rests at `status="new"` regardless of whether it arrived as an OTO leg or a standalone
+   request, generalizing the existing rule rather than leaving the standalone case wrong.
+
+Built:
+
+- [x] `config.py::IntradayRiskConfig` gains `entry_tranches` (default 2, per the brief),
+      `max_spread_bps`/`max_quote_age_seconds` (both placeholders -- the brief names them
+      as configurable but gives no numeric default). Added to both `config/default.yaml`'s
+      and `config/paper.yaml`'s `intraday:` blocks (still hand-duplicated).
+- [x] `execution/market_data.py::AlpacaMarketDataClient` gains `latest_quote` (the whole
+      nearest `Quote` -- bid, ask, its own timestamp) alongside the existing `arrival_price`
+      (just the midpoint), refactored to share one `_nearest_quote` lookup. The spread gate
+      needs bid/ask/timestamp; a plain midpoint can't provide any of them.
+- [x] `intraday/pretrade.py::check_spread_gate` -- a per-candidate (not per-sleeve) gate:
+      rejects a spread over `max_spread_bps` or a quote older than `max_quote_age_seconds`,
+      normalizing a naive `now`/`quote_time` to UTC the same way `arrival_price` already
+      does. Called by `preopen` (log-only) and `run_cycle` (actually drops a candidate) --
+      never trusted from one job to the next.
+- [x] `intraday/monitor.py` (new) -- `check_invalidation_and_time_stops`: for every held
+      `Position`, recovers the proposal that opened it (`ledger.latest_filled_entry_for`
+      -> `ledger.get_proposal`) and closes it if price has crossed `invalidation_price` or
+      `time_stop_minutes` has elapsed since the first fill. An invalidation-triggered close
+      (never a time-stop close) also logs an incident prefixed `"stopout:{symbol}"` --
+      the brief's cooldown rule is specifically about being stopped out, not any close.
+- [x] `intraday/ledger.py`: `orders` gains `tranche_index`/`tranche_total` columns
+      (default 1/1, safe to add directly). New methods: `get_proposal(id)`,
+      `latest_filled_entry_for(symbol)` (the most recent *filled* `leg='entry'` row --
+      deliberately excludes `leg='exit'` rows, or a close/trim would masquerade as a fresh
+      entry), `pending_tranche_for(symbol)` (finds the most recent filled entry **first**,
+      then checks *its own* `tranche_index < tranche_total` -- filtering that condition
+      inside the SQL `WHERE` clause was tried first and is wrong: it keeps matching
+      tranche 1's own never-changing row forever, even after a later tranche already
+      closed out the split), `record_session_open_equity`/`session_open_equity` (a new
+      `session_state` table, idempotent by `as_of` -- the day's starting equity must never
+      drift once trading begins), `last_stopout_times` (reads back `monitor.py`'s own
+      `"stopout:{symbol}"` incident prefix -- the first real caller of
+      `ValidationContext.last_stopout_at`, previously only ever fixture-supplied).
+- [x] `intraday/orders.py`: `intraday_client_order_id`/`build_entry_order` gain a
+      `tranche: int = 1` parameter (appended to the id only when `!= 1`, so every existing
+      id and test is unaffected) -- tranche math (dividing `size_pct` by
+      `risk.entry_tranches`) happens in `jobs.py`, not here, same "primitives don't know
+      about sequencing" split Phase 3/4 used. `submit_order_with_fault_isolation` gains
+      `leg`/`tranche_index`/`tranche_total` parameters -- `leg` matters beyond bookkeeping:
+      without it, a close/trim submitted through here would default to `leg="entry"` and
+      corrupt `latest_filled_entry_for`.
+- [x] `intraday/jobs.py` (new) -- `run_preflight` (a canary, not a gate: every later job
+      re-checks its own gates fresh regardless), `run_preopen` (refresh + spread gate,
+      logging only), `run_cycle` (shared by `open_batch`/`cycle`: pretrade gate -> monitor
+      -> tranche continuation -> `build_trader_context`/`invoke_role` -> per-proposal
+      validate/build/submit, reusing every Phase 2-4 primitive with no new order-
+      construction math), `run_carry` (closes any position without a multi-day thesis on
+      file, then closes the lowest-confidence carried positions one at a time until back
+      under `overnight_gross_cap_pct`).
+- [x] `cli.py::intraday_app` -- `preflight`/`preopen`/`monitor`/`open-batch`/`cycle`/
+      `carry`, mirroring `paper_app`'s exit-code convention exactly (a decline/skip is
+      exit 0; a real order failure raises `typer.Exit(code=1)`).
+- [x] `.github/workflows/intraday_trading.yml` (new) -- one workflow, one `schedule:`
+      block per job (six cron entries), the identical fetch/reset/re-run/commit/push
+      retry loop `paper_trading.yml` already uses, all six jobs sharing one concurrency
+      group (`intraday-trading-ledger-write`) since -- unlike `paper_trading.yml`'s two
+      ledger-writing jobs -- all six of these touch the same `ledger/intraday.sqlite3`.
+      `cycle`/`monitor` pass a `--cycle` label derived from the current UTC time, not a
+      fixed literal, since two different runs on the same day need distinct idempotency
+      keys or the second run's orders would look like duplicate resubmissions of the
+      first's. UTC cron times approximate the brief's Central-time schedule, not DST-aware
+      (same documented approximation `paper_trading.yml` already accepts).
+- [x] **Deliberately deferred (not this phase)**: `research`/`eod_review`/`weekly_review`
+      jobs and their content (Phase 6/9); `preopen`'s headline refresh (Phase 6); true
+      event-triggered early cycles -- breaking news, a >1.5x-expected-move trigger --
+      (`monitor`'s 5-minute cadence covers the reaction, not the trigger, until Phase 6
+      exists); options (unchanged, still gated off).
+- [x] Tests: `tests/test_intraday_monitor.py` (new), `tests/test_intraday_jobs.py` (new,
+      the largest file this phase -- covers tranche-splitting across two `run_cycle`
+      calls, the trim-then-reprotect sequence, monitor-before-Trader ordering, a malformed
+      proposal, budget exhaustion, and `run_carry`'s cap logic), `tests/test_cli_intraday.py`
+      (new, one smoke test per command), plus extensions to `tests/test_intraday_ledger.py`,
+      `tests/test_intraday_pretrade.py`, `tests/test_execution_market_data.py`, and
+      `tests/test_execution_fake_broker.py`'s docstring for the stop-order fix above.
 
 **Remaining prerequisites** -- what Phase 0 didn't (and couldn't) resolve:
 

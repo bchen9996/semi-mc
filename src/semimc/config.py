@@ -371,6 +371,13 @@ class IntradayRiskConfig(_Base):
     overnight_gross_cap_pct: float = Field(1.00, gt=0)
     min_edge_multiple: float = Field(2.0, gt=0)
     equity_cost_bps_per_side: float = Field(8.0, ge=0)
+    # Phase 5 (jobs.py): "default to two tranches for a full-size position" (brief).
+    entry_tranches: int = Field(2, ge=1)
+    # Phase 5's spread/staleness gate (intraday/pretrade.py::check_spread_gate). The
+    # brief names both as configurable but gives no numeric default -- these are a
+    # starting guess, not a researched figure, same caveat as max_cost_usd_per_day.
+    max_spread_bps: float = Field(50.0, gt=0)
+    max_quote_age_seconds: float = Field(30.0, gt=0)
 
 
 class IntradayScheduleConfig(_Base):

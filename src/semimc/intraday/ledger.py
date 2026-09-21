@@ -78,7 +78,9 @@ CREATE TABLE IF NOT EXISTS orders (
     broker_order_id TEXT,
     submitted_at TEXT,
     updated_at TEXT NOT NULL,
-    leg TEXT NOT NULL DEFAULT 'entry'
+    leg TEXT NOT NULL DEFAULT 'entry',
+    tranche_index INTEGER NOT NULL DEFAULT 1,
+    tranche_total INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS fills (
@@ -135,6 +137,12 @@ CREATE TABLE IF NOT EXISTS headlines_seen (
     headline_hash TEXT NOT NULL,
     created_at TEXT NOT NULL,
     UNIQUE (source, headline_hash)
+);
+
+CREATE TABLE IF NOT EXISTS session_state (
+    as_of TEXT PRIMARY KEY,
+    equity_at_open REAL NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS incidents (
@@ -282,6 +290,17 @@ class IntradayLedger:
         self._conn.commit()
         return int(cursor.lastrowid)
 
+    def get_proposal(self, proposal_id: int) -> dict[str, Any] | None:
+        """One proposal by its row id (S4, Phase 5) -- what `intraday/monitor.py` uses to
+        recover the `invalidation_price`/`time_stop_minutes` an entry order was opened
+        under, via the order row's own `proposal_id`."""
+        row = self._conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+        data["payload"] = json.loads(data.pop("payload_json"))
+        return data
+
     def proposals_for(self, as_of: pd.Timestamp) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT * FROM proposals WHERE as_of = ? ORDER BY id", (str(pd.Timestamp(as_of)),)
@@ -308,6 +327,8 @@ class IntradayLedger:
         submitted_at: dt.datetime | None = None,
         proposal_id: int | None = None,
         leg: str = "entry",
+        tranche_index: int = 1,
+        tranche_total: int = 1,
     ) -> int:
         """Insert or update one order by its ``client_order_id`` -- a resubmission of the
         same id (idempotent at the broker) updates status in place, same reasoning as
@@ -317,13 +338,19 @@ class IntradayLedger:
         row (S4, Phase 4) -- ``"entry"`` (the default, every order before Phase 4) or
         ``"stop"``. :func:`~semimc.intraday.orders.submit_order_with_fault_isolation`
         records a successful ``"oto"`` submission's leg this way automatically.
+
+        ``tranche_index``/``tranche_total`` record which piece of a split entry this
+        order is (S4, Phase 5) -- ``1``/``1`` (the default, every order before Phase 5,
+        and every non-``open``/``add`` order) means "not split." See
+        :meth:`pending_tranche_for`.
         """
         self._conn.execute(
             """
             INSERT INTO orders
                 (client_order_id, proposal_id, symbol, side, qty, notional, limit_price,
-                 status, broker_order_id, submitted_at, updated_at, leg)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 status, broker_order_id, submitted_at, updated_at, leg, tranche_index,
+                 tranche_total)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(client_order_id) DO UPDATE SET
                 status = excluded.status,
                 broker_order_id = excluded.broker_order_id,
@@ -342,6 +369,8 @@ class IntradayLedger:
                 submitted_at.isoformat() if submitted_at else None,
                 _now(),
                 leg,
+                tranche_index,
+                tranche_total,
             ),
         )
         self._conn.commit()
@@ -378,6 +407,53 @@ class IntradayLedger:
             ORDER BY id DESC LIMIT 1
             """,
             (symbol, *_OPEN_ORDER_STATUSES),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def pending_tranche_for(self, symbol: str) -> dict[str, Any] | None:
+        """The most recently filled entry order for ``symbol`` (whichever tranche that
+        was), if its own ``tranche_index < tranche_total`` -- i.e. more tranches remain
+        to submit (S4, Phase 5). ``None`` if fully tranched in, never split, or there is
+        no filled entry at all.
+
+        Deliberately finds the most recent filled entry *first*, then checks its own
+        tranche fields -- filtering on ``tranche_index < tranche_total`` inside the SQL
+        `WHERE` clause would wrongly keep matching tranche 1's own row forever (its
+        `tranche_index`/`tranche_total` never change after tranche 1 fills), even once a
+        later tranche has already been submitted and itself reached `tranche_index ==
+        tranche_total`.
+
+        Generalizes :meth:`open_stop_leg_for`'s own disclosed "singular, not a list"
+        limitation now that tranche-splitting exists: still singular, on the same
+        assumption that only one entry can be mid-tranche for a symbol at once.
+        """
+        row = self._conn.execute(
+            """
+            SELECT * FROM orders
+            WHERE symbol = ? AND leg = 'entry' AND status = 'filled'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (symbol,),
+        ).fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+        return data if data["tranche_index"] < data["tranche_total"] else None
+
+    def latest_filled_entry_for(self, symbol: str) -> dict[str, Any] | None:
+        """The most recently filled entry order for `symbol` (S4, Phase 5) -- what
+        `intraday/monitor.py` starts from to find the proposal (and therefore the
+        invalidation/time-stop) a currently-held position was opened under. Singular,
+        same "most recent" convention as `open_stop_leg_for`/`pending_tranche_for`: a
+        symbol closed and reopened same-day is a new, more recent row, so this always
+        finds the entry that's actually still held."""
+        row = self._conn.execute(
+            """
+            SELECT * FROM orders
+            WHERE symbol = ? AND leg = 'entry' AND status = 'filled'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (symbol,),
         ).fetchone()
         return dict(row) if row is not None else None
 
@@ -457,6 +533,32 @@ class IntradayLedger:
         data = dict(row)
         data["discrepancies"] = json.loads(data.pop("discrepancies_json"))
         return data
+
+    # -- session state (S4, Phase 5) -------------------------------------------------------
+
+    def record_session_open_equity(self, as_of: pd.Timestamp, equity: float) -> None:
+        """Idempotent by `as_of` (`ON CONFLICT DO NOTHING`) -- the first cycle to run
+        today sets this; every later cycle's attempt to set it again is a no-op, since
+        "the day's starting equity" must never drift once trading has begun. Feeds
+        `ValidationContext.equity_at_session_open`'s daily-loss checks (Phase 1) -- the
+        first real caller to populate that field; every caller before Phase 5 was a test
+        supplying it directly.
+        """
+        self._conn.execute(
+            """
+            INSERT INTO session_state (as_of, equity_at_open, created_at) VALUES (?, ?, ?)
+            ON CONFLICT(as_of) DO NOTHING
+            """,
+            (str(pd.Timestamp(as_of)), equity, _now()),
+        )
+        self._conn.commit()
+
+    def session_open_equity(self, as_of: pd.Timestamp) -> float | None:
+        row = self._conn.execute(
+            "SELECT equity_at_open FROM session_state WHERE as_of = ?",
+            (str(pd.Timestamp(as_of)),),
+        ).fetchone()
+        return float(row["equity_at_open"]) if row is not None else None
 
     # -- reflections ----------------------------------------------------------------------
 
@@ -564,3 +666,18 @@ class IntradayLedger:
     def incidents(self) -> list[dict[str, Any]]:
         rows = self._conn.execute("SELECT * FROM incidents ORDER BY id").fetchall()
         return [dict(r) for r in rows]
+
+    def last_stopout_times(self) -> dict[str, dt.datetime]:
+        """symbol -> most recent invalidation-triggered stop-out time (S4, Phase 5),
+        derived from `intraday/monitor.py`'s own incident log (message prefixed
+        ``"stopout:{symbol}"`` -- there is no dedicated table for this, so the incident
+        log doubles as the record). Feeds `ValidationContext.last_stopout_at`'s
+        post-stop-out cooldown check (Phase 1) -- the first real caller to populate that
+        field; every caller before Phase 5 was a test supplying it directly.
+        """
+        out: dict[str, dt.datetime] = {}
+        for row in self.incidents():
+            if row["message"].startswith("stopout:"):
+                symbol = row["message"].split(":", 1)[1]
+                out[symbol] = dt.datetime.fromisoformat(row["created_at"])
+        return out

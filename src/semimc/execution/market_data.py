@@ -35,6 +35,7 @@ import os
 
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.models import Quote
 from alpaca.data.requests import StockQuotesRequest
 from dotenv import load_dotenv
 
@@ -63,6 +64,20 @@ class AlpacaMarketDataClient:
             )
         return cls(StockHistoricalDataClient(api_key=api_key, secret_key=secret_key))
 
+    def _nearest_quote(
+        self, symbol: str, at: dt.datetime, window: dt.timedelta, feed: DataFeed
+    ) -> Quote | None:
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=dt.UTC)
+        request = StockQuotesRequest(
+            symbol_or_symbols=symbol, start=at - window, end=at + window, feed=feed
+        )
+        response = self._client.get_stock_quotes(request)
+        quotes = response.data.get(symbol, [])
+        if not quotes:
+            return None
+        return min(quotes, key=lambda q: abs((q.timestamp - at).total_seconds()))
+
     def arrival_price(
         self,
         symbol: str,
@@ -81,19 +96,24 @@ class AlpacaMarketDataClient:
         a feed with no coverage) -- a single missing quote must not crash a whole cost
         report; the caller (``analytics/execution_cost.py``) skips that fill instead.
         """
-        if at.tzinfo is None:
-            at = at.replace(tzinfo=dt.UTC)
-        request = StockQuotesRequest(
-            symbol_or_symbols=symbol, start=at - window, end=at + window, feed=feed
-        )
-        response = self._client.get_stock_quotes(request)
-        quotes = response.data.get(symbol, [])
-        if not quotes:
+        nearest = self._nearest_quote(symbol, at, window, feed)
+        if nearest is None:
             return None
-
-        nearest = min(quotes, key=lambda q: abs((q.timestamp - at).total_seconds()))
         if nearest.bid_price is None or nearest.ask_price is None:
             return None
         if nearest.bid_price <= 0 or nearest.ask_price <= 0:
             return None
         return (nearest.bid_price + nearest.ask_price) / 2.0
+
+    def latest_quote(
+        self,
+        symbol: str,
+        at: dt.datetime,
+        window: dt.timedelta = dt.timedelta(minutes=5),
+        feed: DataFeed = DataFeed.IEX,
+    ) -> Quote | None:
+        """The whole quote nearest ``at`` (bid, ask, and its own timestamp) -- what
+        ``intraday/pretrade.py::check_spread_gate`` needs (S4, Phase 5) and a plain
+        midpoint (``arrival_price``) can't provide. Same nearest-quote lookup, same
+        ``None``-on-no-coverage contract."""
+        return self._nearest_quote(symbol, at, window, feed)

@@ -130,6 +130,126 @@ def test_open_stop_leg_for_is_none_for_a_symbol_with_no_stop(tmp_path):
     ledger.close()
 
 
+def test_record_order_defaults_to_tranche_one_of_one(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_order("s4-nvda-1", "NVDA", "buy", status="new")
+    order = ledger.get_order("s4-nvda-1")
+    assert order["tranche_index"] == 1
+    assert order["tranche_total"] == 1
+    ledger.close()
+
+
+def test_pending_tranche_for_finds_a_partially_filled_entry(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_order(
+        "s4-nvda-1",
+        "NVDA",
+        "buy",
+        status="filled",
+        leg="entry",
+        tranche_index=1,
+        tranche_total=2,
+    )
+    pending = ledger.pending_tranche_for("NVDA")
+    assert pending is not None
+    assert pending["client_order_id"] == "s4-nvda-1"
+    assert pending["tranche_index"] == 1
+    ledger.close()
+
+
+def test_pending_tranche_for_is_none_once_fully_tranched_in(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_order(
+        "s4-nvda-2",
+        "NVDA",
+        "buy",
+        status="filled",
+        leg="entry",
+        tranche_index=2,
+        tranche_total=2,
+    )
+    assert ledger.pending_tranche_for("NVDA") is None
+    ledger.close()
+
+
+def test_pending_tranche_for_ignores_an_unfilled_entry(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_order(
+        "s4-nvda-1",
+        "NVDA",
+        "buy",
+        status="new",
+        leg="entry",
+        tranche_index=1,
+        tranche_total=2,
+    )
+    assert ledger.pending_tranche_for("NVDA") is None
+    ledger.close()
+
+
+def test_get_proposal_round_trips(tmp_path):
+    ledger = _ledger(tmp_path)
+    proposal_id = ledger.record_proposal(
+        AS_OF, "cycle_1", "NVDA", "open", "accepted", payload={"invalidation_price": 185.0}
+    )
+    row = ledger.get_proposal(proposal_id)
+    assert row is not None
+    assert row["payload"]["invalidation_price"] == 185.0
+    ledger.close()
+
+
+def test_get_proposal_is_none_for_an_unknown_id(tmp_path):
+    ledger = _ledger(tmp_path)
+    assert ledger.get_proposal(999) is None
+    ledger.close()
+
+
+def test_latest_filled_entry_for_finds_the_most_recent_filled_entry(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_order("s4-nvda-1", "NVDA", "buy", status="filled", leg="entry")
+    ledger.record_order("s4-nvda-1::stop", "NVDA", "sell", status="new", leg="stop")
+    entry = ledger.latest_filled_entry_for("NVDA")
+    assert entry is not None
+    assert entry["client_order_id"] == "s4-nvda-1"
+
+
+def test_latest_filled_entry_for_ignores_an_exit_order(tmp_path):
+    """A close/trim order recorded with leg='exit' must never masquerade as the entry
+    that's still held, or monitor.py's invalidation lookup would break (S4, Phase 5)."""
+    ledger = _ledger(tmp_path)
+    ledger.record_order("s4-nvda-1", "NVDA", "buy", status="filled", leg="entry")
+    ledger.record_order("s4-nvda-2", "NVDA", "sell", status="filled", leg="exit")
+    entry = ledger.latest_filled_entry_for("NVDA")
+    assert entry is not None
+    assert entry["client_order_id"] == "s4-nvda-1"
+    ledger.close()
+
+
+def test_latest_filled_entry_for_is_none_with_no_filled_entry(tmp_path):
+    ledger = _ledger(tmp_path)
+    assert ledger.latest_filled_entry_for("NVDA") is None
+    ledger.close()
+
+
+def test_session_open_equity_is_set_once_and_never_drifts(tmp_path):
+    ledger = _ledger(tmp_path)
+    assert ledger.session_open_equity(AS_OF) is None
+    ledger.record_session_open_equity(AS_OF, 100_000.0)
+    ledger.record_session_open_equity(AS_OF, 90_000.0)  # later cycle -- must not overwrite
+    assert ledger.session_open_equity(AS_OF) == pytest.approx(100_000.0)
+    ledger.close()
+
+
+def test_last_stopout_times_reads_the_stopout_prefixed_incidents(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_incident("warning", "stopout:NVDA")
+    ledger.record_incident("error", "unrelated incident")
+    times = ledger.last_stopout_times()
+    assert "NVDA" in times
+    assert "unrelated" not in times
+    ledger.close()
+
+
 def test_fill_round_trips(tmp_path):
     ledger = _ledger(tmp_path)
     ledger.record_order("s4-nvda-1", "NVDA", "buy", status="filled")

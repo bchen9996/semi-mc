@@ -206,6 +206,9 @@ intraday:
     overnight_gross_cap_pct: 1.00
     min_edge_multiple: 2.0
     equity_cost_bps_per_side: 8.0
+    entry_tranches: 2
+    max_spread_bps: 50.0
+    max_quote_age_seconds: 30.0
   schedule:
     timezone: America/Chicago
     cycle_interval_minutes: 20

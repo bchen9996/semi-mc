@@ -1,0 +1,127 @@
+"""Deterministic invalidation/time-stop enforcement (S4, `BRIEF_INTRADAY.md`, Phase 5).
+
+The brief calls for "a monitor process [that] checks every position every minute and
+exits on its own when the level or time stop is hit" -- a persistent process this
+project's GitHub-Actions-cron architecture doesn't have (s0/s3 don't run one either).
+The pragmatic fit: :func:`check_invalidation_and_time_stops` is a cheap, model-free check
+that can run on its own tight cron (every few minutes, no LLM cost) *and* is the first
+thing `jobs.py::run_cycle` calls, so the Trader is never asked about a position that
+should already be gone. Code decides this, never the model, per the brief's "the model
+is asked what to do only when there's a real decision."
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from dataclasses import dataclass, field
+
+import pandas as pd
+
+from ..config import IntradayConfig
+from ..execution.broker import Broker
+from .ledger import IntradayLedger
+from .orders import (
+    build_close_order,
+    find_and_cancel_resting_stop,
+    submit_order_with_fault_isolation,
+)
+
+
+@dataclass(frozen=True)
+class MonitorResult:
+    closed: list[str] = field(default_factory=list)
+    still_open: list[str] = field(default_factory=list)
+
+
+def check_invalidation_and_time_stops(
+    config: IntradayConfig,
+    broker: Broker,
+    ledger: IntradayLedger,
+    prices: dict[str, float],
+    as_of: pd.Timestamp,
+    cycle: str,
+    now: dt.datetime,
+) -> MonitorResult:
+    """For every held `Position`, recovers the proposal that opened it (the most recent
+    filled entry order for that symbol, via `ledger.latest_filled_entry_for`, then that
+    order's own `proposal_id` via `ledger.get_proposal`) and closes it
+    (`find_and_cancel_resting_stop` -> `build_close_order` ->
+    `submit_order_with_fault_isolation`) if the current price has crossed the recorded
+    `invalidation_price`, or `time_stop_minutes` has elapsed since the entry's first
+    fill (`ledger.fills_for_order`).
+
+    A position with no traceable entry/proposal, or no current price to close it at
+    safely, is left alone and logged as an incident rather than guessed at -- the same
+    "never act on incomplete information" caution `execution/pretrade.py` uses
+    elsewhere.
+
+    An invalidation-triggered close (never a time-stop close, which isn't necessarily a
+    loss) also records an incident message prefixed ``"stopout:{symbol}"`` -- the brief's
+    own cooldown rule ("after a stop-out in a name, that name is untradable for a set
+    period... to break revenge-trading patterns") is about hitting the invalidation
+    level specifically, and `IntradayLedger.last_stopout_times` (Phase 5) reads this
+    prefix back out to feed `ValidationContext.last_stopout_at`.
+    """
+    closed: list[str] = []
+    still_open: list[str] = []
+
+    for position in broker.list_positions():
+        symbol = position.symbol
+        entry = ledger.latest_filled_entry_for(symbol)
+        proposal = None
+        if entry is not None and entry["proposal_id"] is not None:
+            proposal = ledger.get_proposal(entry["proposal_id"])
+        if entry is None or proposal is None:
+            still_open.append(symbol)
+            continue
+
+        payload = proposal["payload"]
+        invalidation_price = payload.get("invalidation_price")
+        time_stop_minutes = payload.get("time_stop_minutes")
+        price = prices.get(symbol)
+
+        stopped_out = False
+        timed_out = False
+        if invalidation_price is not None and price is not None:
+            long_stopped_out = position.side == "long" and price <= invalidation_price
+            short_stopped_out = position.side == "short" and price >= invalidation_price
+            stopped_out = long_stopped_out or short_stopped_out
+
+        if not stopped_out and time_stop_minutes is not None:
+            fills = ledger.fills_for_order(entry["client_order_id"])
+            if fills:
+                filled_at = dt.datetime.fromisoformat(fills[0]["filled_at"])
+                # filled_at/now may each be naive or aware -- same "assume UTC" fallback
+                # as intraday/pretrade.py::check_spread_gate, for the same reason (a real
+                # Order's submitted_at/filled_at come back aware UTC per
+                # execution/market_data.py's docstring; a naive value here would raise).
+                if filled_at.tzinfo is None:
+                    filled_at = filled_at.replace(tzinfo=dt.UTC)
+                aware_now = now if now.tzinfo is not None else now.replace(tzinfo=dt.UTC)
+                elapsed_minutes = (aware_now - filled_at).total_seconds() / 60.0
+                if elapsed_minutes >= time_stop_minutes:
+                    timed_out = True
+
+        if not stopped_out and not timed_out:
+            still_open.append(symbol)
+            continue
+
+        if price is None:
+            ledger.record_incident(
+                "error",
+                f"{symbol}: invalidation/time-stop breached but no current price to "
+                "close at -- left open, needs attention",
+            )
+            still_open.append(symbol)
+            continue
+
+        find_and_cancel_resting_stop(symbol, broker, ledger)
+        close_request = build_close_order(position, as_of, cycle, price, config)
+        submit_order_with_fault_isolation(
+            close_request, broker, ledger, now, proposal_id=entry["proposal_id"], leg="exit"
+        )
+        if stopped_out:
+            ledger.record_incident("warning", f"stopout:{symbol}")
+        closed.append(symbol)
+
+    return MonitorResult(closed=closed, still_open=still_open)

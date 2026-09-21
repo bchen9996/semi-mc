@@ -1,0 +1,301 @@
+name: Intraday trading (S4)
+
+# Scheduled jobs driving intraday/jobs.py (Phase 5, BRIEF_INTRADAY.md) via `semimc
+# intraday ...`. Mirrors .github/workflows/paper_trading.yml's own shape exactly -- see
+# that file's header comment for the reasoning this one shares: cron times below are UTC
+# and only approximate the brief's Central-time schedule (not DST-aware, same documented
+# approximation CLAUDE.md's "Gotchas" already accepts elsewhere); the real gate is in
+# code, not in these cron expressions -- intraday/pretrade.py::check_intraday_pretrade
+# refuses outside trading_enabled/registered_account/market-open regardless of exactly
+# when this workflow fires.
+#
+# Trading stays off by default even on a schedule: config/paper.yaml ships with
+# intraday.trading_enabled false and no registered_account. Both must be deliberately
+# edited before any of these jobs can do anything but decline at pretrade.
+#
+# Six jobs (preflight/preopen/monitor/open-batch/cycle/carry) -- the five Phase 5 builds
+# plus monitor's own frequent, model-free cron (BRIEF_INTRADAY.md's "minute monitor",
+# adapted to this project's cron architecture -- see the Phase 5 plan). `research`/
+# `eod_review`/`weekly_review` aren't wired here -- they don't exist yet (Phase 6/9).
+# Every job shares one concurrency group: unlike paper_trading.yml's two ledger-writing
+# jobs, all six of these touch the same ledger/intraday.sqlite3, so all six need to
+# serialize their git commits, not just a pair of them.
+#
+# `cycle`/`monitor` pass a per-invocation `--cycle` label derived from the current UTC
+# time (not a fixed literal) -- intraday_client_order_id's idempotency key includes this
+# label, so two different 20-minute (or 5-minute) runs on the same day must get distinct
+# labels, or the second run's orders would look like duplicate resubmissions of the
+# first's and never actually submit.
+
+"on":
+  workflow_dispatch: {}
+  schedule:
+    # preflight: ~06:45 Central.
+    - cron: "45 11 * * 1-5"
+    # preopen: ~08:15 Central.
+    - cron: "15 13 * * 1-5"
+    # open-batch: ~08:30 Central.
+    - cron: "30 13 * * 1-5"
+    # monitor: every 5 minutes, ~08:35-15:00 Central -- no LLM call, cheap to run often.
+    - cron: "*/5 13-20 * * 1-5"
+    # cycle: every 20 minutes, ~08:35-14:50 Central.
+    - cron: "*/20 13-19 * * 1-5"
+    # carry: ~14:45 Central.
+    - cron: "45 19 * * 1-5"
+
+permissions:
+  contents: write
+
+jobs:
+  preflight:
+    if: github.event.schedule == '45 11 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: intraday-trading-ledger-write
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Preflight and commit the ledger
+        # A failed preflight is a canary, not a blocker (intraday/jobs.py::run_preflight's
+        # own docstring) -- but `intraday preflight`'s CLI command still exits 1 on
+        # failure, on purpose, so GitHub's own failure email fires here specifically.
+        env:
+          ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
+          ALPACA_S4_SECRET_KEY: ${{ secrets.ALPACA_S4_SECRET_KEY }}
+        run: |
+          set -e
+          git config user.name "semimc-bot"
+          git config user.email "semimc-bot@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            uv run semimc intraday preflight --config config/paper.yaml
+            git add ledger/intraday.sqlite3
+            if git diff --cached --quiet; then
+              echo "nothing to commit"
+              exit 0
+            fi
+            git commit -m "intraday preflight: $(date -u +%F)"
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+          done
+          echo "failed to push after 3 attempts"
+          exit 1
+
+  preopen:
+    if: github.event.schedule == '15 13 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: intraday-trading-ledger-write
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Preopen and commit the ledger
+        env:
+          ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
+          ALPACA_S4_SECRET_KEY: ${{ secrets.ALPACA_S4_SECRET_KEY }}
+        run: |
+          set -e
+          git config user.name "semimc-bot"
+          git config user.email "semimc-bot@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            uv run semimc intraday preopen --config config/paper.yaml
+            git add ledger/intraday.sqlite3
+            if git diff --cached --quiet; then
+              echo "nothing to commit"
+              exit 0
+            fi
+            git commit -m "intraday preopen: $(date -u +%F)"
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+          done
+          echo "failed to push after 3 attempts"
+          exit 1
+
+  monitor:
+    if: github.event.schedule == '*/5 13-20 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: intraday-trading-ledger-write
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Enforce invalidation/time-stops and commit the ledger
+        # No Anthropic call here at all -- this is the cheap, model-free check
+        # (intraday/monitor.py) that can afford a 5-minute cron.
+        env:
+          ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
+          ALPACA_S4_SECRET_KEY: ${{ secrets.ALPACA_S4_SECRET_KEY }}
+        run: |
+          set -e
+          git config user.name "semimc-bot"
+          git config user.email "semimc-bot@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            uv run semimc intraday monitor --cycle "monitor_$(date -u +%H%M)" --config config/paper.yaml
+            git add ledger/intraday.sqlite3
+            if git diff --cached --quiet; then
+              echo "nothing to commit"
+              exit 0
+            fi
+            git commit -m "intraday monitor: $(date -u +%F) $(date -u +%H:%M)"
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+          done
+          echo "failed to push after 3 attempts"
+          exit 1
+
+  open-batch:
+    if: github.event.schedule == '30 13 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: intraday-trading-ledger-write
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Run the first Trader cycle and commit the ledger
+        env:
+          ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
+          ALPACA_S4_SECRET_KEY: ${{ secrets.ALPACA_S4_SECRET_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -e
+          git config user.name "semimc-bot"
+          git config user.email "semimc-bot@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            uv run semimc intraday open-batch --config config/paper.yaml
+            git add ledger/intraday.sqlite3
+            if git diff --cached --quiet; then
+              echo "nothing to commit"
+              exit 0
+            fi
+            git commit -m "intraday open-batch: $(date -u +%F)"
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+          done
+          echo "failed to push after 3 attempts"
+          exit 1
+
+  cycle:
+    if: github.event.schedule == '*/20 13-19 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: intraday-trading-ledger-write
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Run a Trader cycle and commit the ledger
+        env:
+          ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
+          ALPACA_S4_SECRET_KEY: ${{ secrets.ALPACA_S4_SECRET_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -e
+          git config user.name "semimc-bot"
+          git config user.email "semimc-bot@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            uv run semimc intraday cycle --cycle "cycle_$(date -u +%H%M)" --config config/paper.yaml
+            git add ledger/intraday.sqlite3
+            if git diff --cached --quiet; then
+              echo "nothing to commit"
+              exit 0
+            fi
+            git commit -m "intraday cycle: $(date -u +%F) $(date -u +%H:%M)"
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+          done
+          echo "failed to push after 3 attempts"
+          exit 1
+
+  carry:
+    if: github.event.schedule == '45 19 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: intraday-trading-ledger-write
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Carry or close out the session and commit the ledger
+        env:
+          ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
+          ALPACA_S4_SECRET_KEY: ${{ secrets.ALPACA_S4_SECRET_KEY }}
+        run: |
+          set -e
+          git config user.name "semimc-bot"
+          git config user.email "semimc-bot@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            uv run semimc intraday carry --config config/paper.yaml
+            git add ledger/intraday.sqlite3
+            if git diff --cached --quiet; then
+              echo "nothing to commit"
+              exit 0
+            fi
+            git commit -m "intraday carry: $(date -u +%F)"
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+          done
+          echo "failed to push after 3 attempts"
+          exit 1

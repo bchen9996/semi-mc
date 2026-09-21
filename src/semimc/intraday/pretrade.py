@@ -35,7 +35,7 @@ def check_intraday_pretrade(context: IntradayPretradeContext) -> list[str]:
 
     Returns every failure found, not just the first, same as `execution/pretrade.py::
     check_pretrade`. No configured start/cutoff execution window the way paper's has --
-    S4's time-of-day gating is the job schedule itself (Phase 4), not a second,
+    S4's time-of-day gating is the job schedule itself (Phase 5), not a second,
     overlapping window check here.
     """
     failures: list[str] = []
@@ -65,3 +65,52 @@ def check_intraday_pretrade(context: IntradayPretradeContext) -> list[str]:
         failures.append("market is closed")
 
     return failures
+
+
+def check_spread_gate(
+    symbol: str,
+    bid: float,
+    ask: float,
+    quote_time: dt.datetime,
+    now: dt.datetime,
+    config: IntradayConfig,
+) -> str | None:
+    """`None` if `symbol`'s quote is tradable, else a rejection reason string (S4, Phase
+    5) -- the brief's own "skip or defer any name whose quoted spread exceeds the
+    configured limit, or whose quote is stale."
+
+    A per-candidate check, not a per-sleeve one like `check_intraday_pretrade` above, so
+    it's a separate function rather than folded into that one. Called by `preopen` (to
+    log what's already untradable ahead of the bell) and by `run_cycle` (to actually drop
+    a candidate) -- never trusted from one job to the next, same "re-check fresh state"
+    discipline `live/mark.py` already uses.
+
+    `quote_time`/`now` may each be naive or aware -- `AlpacaMarketDataClient`'s own
+    `Quote.timestamp` always comes back aware UTC (confirmed against a real account,
+    `execution/market_data.py`'s docstring), so a naive value on either side is assumed
+    UTC rather than compared directly and raising, the same convention
+    `market_data.py::arrival_price` already uses.
+    """
+    if bid <= 0 or ask <= 0 or ask < bid:
+        return f"{symbol}: invalid quote (bid={bid}, ask={ask})"
+
+    mid = (bid + ask) / 2.0
+    spread_bps = (ask - bid) / mid * 1e4
+    if spread_bps > config.risk.max_spread_bps:
+        return (
+            f"{symbol}: spread {spread_bps:.1f}bps exceeds max_spread_bps "
+            f"{config.risk.max_spread_bps}"
+        )
+
+    if quote_time.tzinfo is None:
+        quote_time = quote_time.replace(tzinfo=dt.UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.UTC)
+    age_seconds = (now - quote_time).total_seconds()
+    if age_seconds > config.risk.max_quote_age_seconds:
+        return (
+            f"{symbol}: quote is {age_seconds:.0f}s old, exceeds max_quote_age_seconds "
+            f"{config.risk.max_quote_age_seconds}"
+        )
+
+    return None
