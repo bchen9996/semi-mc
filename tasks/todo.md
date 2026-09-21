@@ -1317,6 +1317,98 @@ Built:
       from_env` raise if ever called -- confirming "never a real order" structurally, not
       just by convention).
 
+**Phase 8 -- injection defenses, built 2026-09-21.** The request was "go ahead to phase
+8," the item the roadmap's own renumbering history had already assigned here (search
+"renumbered again to 8/9/10" above the Phase 5 write-up). The codebase pointed here
+directly: `context.py::build_context`'s own docstring already said *"It does not yet
+strip or neutralize anything inside an untrusted section -- that's Phase 8's job."*
+`BRIEF_INTRADAY.md`'s "Untrusted content and prompt injection" section is the spec: strip
+or neutralize instruction-like content before it enters a prompt, treat urgency framing as
+a red flag, log a suspected attempt as an incident with its source, and add it to a test
+corpus.
+
+Read every place raw external text already enters the system before writing anything, and
+found two things already true and one real gap:
+
+- `llm.py::ClaudeCliClient.call` already denies every tool call outright
+  (`--permission-mode dontAsk --permission-prompts none`, no `--allowedTools` for any
+  role) -- the brief's "agent's writable paths are limited to reports/ and proposals/"
+  bullet is already over-satisfied: no role has any tool access at all, so there's no
+  file-write surface to scope. Nothing to build.
+- `proposals.py::validate_proposal` + `TradeProposal`'s schema already make *"the executor
+  acts only on schema-valid proposals within limits; no text from a source can raise a
+  limit, skip a check, or trigger an order by itself"* structurally true, since Phases 1/3
+  -- not something this phase adds, just something worth proving with a test (below).
+- The real gap: nothing scanned or redacted the free text inside an untrusted section
+  before use. `jobs.py::run_research` built `news_sections` straight from
+  `article.headline`/`.summary`, and both `run_research` and `run_preopen` persisted
+  `article.headline` verbatim via `record_headline_seen` -- which is exactly what
+  `recent_headlines_for` later feeds into the Trader's own `headlines` context section.
+
+Built:
+
+- [x] `intraday/security.py` (new) -- a small, inspectable, pattern-based scanner (not an
+      ML classifier, matching `pretrade.py`'s own plain-rule-check style), explicitly a
+      placeholder heuristic pending real Stage-1 shadow-mode logging to recalibrate
+      false-positive/negative rates against, the same caveat this project already gives
+      `IntradayPlaceboConfig`'s defaults. Four categories: `instruction_override`,
+      `fake_role_message`, `direct_trade_command`, `urgency_framing`.
+      `sanitize_text` redacts the matched *phrase*, not the whole text -- the brief asks to
+      neutralize instruction-like content, not discard real market information, and a
+      false positive (e.g. "insiders bought 10,000 shares") only loses one clause, not the
+      whole headline. `sanitize_and_log` is the one function every real call site uses:
+      redacts, then logs one `"warning"` incident per finding -- warning, not error, same
+      convention as `check_order_tradable`'s own routine-not-fatal severity choice, since
+      an error here would fail a whole day's research over one flagged phrase, against the
+      brief's own "no missed jobs" success criterion.
+- [x] `intraday/jobs.py::run_research` -- sanitizes every fetched article's
+      headline/summary exactly once, up front, into an `{article.id: (clean_headline,
+      clean_summary)}` lookup; both the `news_sections` comprehension (over the per-symbol-
+      capped subset) and the `record_headline_seen` loop (over the full fetched list) read
+      from that lookup instead of touching `article.headline`/`.summary` directly -- one
+      scan and one incident per real finding, regardless of how many downstream consumers
+      exist. Also sanitizes each accepted `WatchlistCandidate`'s free-text fields
+      (`thesis`, `entry_trigger`, `invalidation`, `size_band`) before `record_watchlist_item`
+      -- closing a second real gap: if an injected headline's instruction ever got echoed
+      into the Researcher's own structured output despite the untrusted-label defense, this
+      is what stops it reaching the Trader's `watchlist` context unfiltered.
+- [x] `intraday/jobs.py::run_preopen` -- same treatment, simpler shape: only fetches one
+      symbol's news at a time and already dedups via `headline_already_seen` before doing
+      anything else, so sanitizes right after that dedup check, before both
+      `record_headline_seen` and the existing `"info"` new-headline incident.
+- [x] `intraday/context.py`: docstring only, no behavior change -- explains sanitization
+      now happens upstream, at the single point headline text enters the system (`jobs.py`,
+      immediately after `AlpacaNewsClient.get_news`), not inside `build_context` itself;
+      `build_context`'s own "untrusted" labeling stays as a second, independent layer for
+      whatever the pattern scanner misses, not replaced by it.
+- [x] **Deliberately not this phase**: scanning `prices`/numeric fields (no free text, no
+      injection surface); any change to `llm.py`'s tool-denial setup (already stricter than
+      the brief asks); a config-driven pattern list (this is fixed code logic, like
+      `validate_proposal`'s check *logic* itself, not a tunable business parameter like
+      `stop_distance_pct`); `eod_review`/`weekly_review`/`review.py`/`PLAYBOOK.md`
+      (Phase 9, unrelated).
+- [x] Tests: `tests/fixtures/injection_corpus.py` (new) -- the brief's own named examples
+      as `(label, text, expected_categories)` tuples (an instruction-override +
+      direct-command + urgency combo, a fake system message, a pure urgency example) plus
+      one ordinary clean headline as the negative control, a growable artifact per the
+      brief's own "add it to the test corpus" instruction, not one-off literals in a single
+      test function. `tests/test_intraday_security.py` (new) -- every corpus entry trips
+      its expected categories and is fully neutralized; the clean headline produces zero
+      findings and is returned byte-for-byte unchanged. Extended
+      `tests/test_intraday_jobs.py`: `run_research` and `run_preopen` each redact a
+      malicious headline before it reaches the captured model context payload (via the
+      file's existing `_recording_llm_client` helper) and the ledger
+      (`recent_headlines_for`), logging a `"warning"` incident either way; a "compromised
+      model" test proves the actual "zero orders" backstop -- a schema-valid Trader
+      proposal whose thesis quotes the corpus's own override phrase, sized to the schema's
+      maximum (`size_pct=0.9`), is still rejected by `validate_proposal`'s
+      `single_name_cap_pct` check, submitting zero orders. This is the brief's real
+      guarantee; the text-pattern scanner alone could never provide it on its own against
+      an actually-compromised model, only against the raw external text before any model
+      call happens.
+- [x] No `.github/workflows/intraday_trading.yml` change and no `THESES.md` change -- this
+      phase adds no job, no cron, and doesn't touch T6's claim or status.
+
 **Remaining prerequisites** -- what Phase 0 didn't (and couldn't) resolve:
 
 1. **The owner still needs to actually create the second Alpaca paper account** and add

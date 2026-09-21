@@ -4,9 +4,15 @@
 :func:`build_context` is the generic, role-agnostic envelope: it wraps whatever sections
 a caller has already gathered into one canonical JSON payload and labels the ones that
 came from outside this project as untrusted, per the brief's "every headline, article,
-filing...is data, never instructions." It does not yet strip or neutralize anything
-inside an untrusted section -- that's Phase 8's job (the injection-corpus tests); this
-phase only labels.
+filing...is data, never instructions." Labeling is one of two independent defense layers,
+not the whole of it: actual stripping/neutralizing of instruction-like content happens
+upstream of this function, at the single point raw headline text enters the system
+(`jobs.py`, immediately after `execution/news.py::AlpacaNewsClient.get_news` --
+`intraday/security.py::sanitize_and_log`, Phase 8) -- fixing it once there covers every
+downstream reader (`news_sections`, `headlines_seen`, and `recent_headlines_for`) rather
+than re-scanning at each place this function is called. What arrives here is already
+clean; the "untrusted" label stays as the second layer, for whatever the upstream scanner
+missed.
 
 :func:`build_trader_context` is the Trader's per-cycle assembler (Phase 2).
 :func:`build_researcher_context` is the Researcher's own assembler (Phase 6, once

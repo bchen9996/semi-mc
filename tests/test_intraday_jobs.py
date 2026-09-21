@@ -15,6 +15,7 @@ import subprocess
 from dataclasses import dataclass, field
 
 import pandas as pd
+from fixtures.injection_corpus import INJECTION_CORPUS
 
 from semimc.execution.fake_broker import FakeBroker
 from semimc.intraday.jobs import (
@@ -328,6 +329,29 @@ def test_run_preopen_skips_an_already_seen_headline(config, tmp_path):
     ledger.close()
 
 
+def test_run_preopen_redacts_a_malicious_new_headline_and_logs_an_incident(config, tmp_path):
+    """Phase 8: a headline carrying an injection attempt is neutralized before it's
+    persisted or logged -- `recent_headlines_for` (what the Trader's context reads later)
+    must never carry the raw payload."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    _label, malicious_headline, _categories = INJECTION_CORPUS[0]
+    news_client = _FakeNewsClient(
+        articles=[_FakeArticle(id="a1", headline=malicious_headline, symbols=["NVDA"])]
+    )
+
+    result = run_preopen(cfg, market_data, news_client, ledger, AS_OF, NOW)
+
+    assert malicious_headline not in result.new_headlines[0][1]
+    assert "[redacted:" in result.new_headlines[0][1]
+    stored = ledger.recent_headlines_for(AS_OF, ["NVDA"])
+    assert malicious_headline not in stored[0]["headline"]
+    assert any("suspected prompt injection" in i["message"] for i in ledger.incidents())
+    ledger.close()
+
+
 # -- run_cycle: pretrade gate ---------------------------------------------------------------
 
 
@@ -437,6 +461,42 @@ def test_run_cycle_rejects_a_proposal_over_the_new_positions_budget(config, tmp_
     assert result.orders_submitted == []
     rejected = [r for r in ledger.proposals_for(AS_OF) if r["status"] == "rejected"]
     assert "new_positions_per_day" in rejected[0]["reason"]
+    ledger.close()
+
+
+def test_run_cycle_rejects_an_oversized_proposal_even_if_the_model_looks_compromised(
+    config, tmp_path
+):
+    """Phase 8's actual backstop, not the text-pattern scanner in `security.py`: even a
+    schema-valid Trader proposal that reads as if the model had been steered by injected
+    content (a thesis quoting the corpus's own override/command phrase, sized to the
+    schema's maximum) is still bounded by `validate_proposal`'s `single_name_cap_pct`
+    check -- "no text from a source can raise a limit... by itself" holds structurally,
+    independent of whether any scanner caught the phrase that (hypothetically) produced it.
+    """
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    _label, injected_phrase, _categories = INJECTION_CORPUS[0]
+    proposal = {
+        "action": "open",
+        "symbol": "NVDA",
+        "side": "buy",
+        "size_pct": 0.9,
+        "limit_price": 190.0,
+        "thesis": injected_phrase,
+        "invalidation_price": 185.0,
+        "time_stop_minutes": 60,
+    }
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
+
+    result = run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, NOW)
+
+    assert result.proposals_rejected == 1
+    assert result.orders_submitted == []
+    rejected = [r for r in ledger.proposals_for(AS_OF) if r["status"] == "rejected"]
+    assert "single_name_cap_pct" in rejected[0]["reason"]
     ledger.close()
 
 
@@ -602,6 +662,39 @@ def test_run_research_records_a_brief_and_watchlist(config, tmp_path, market):
     assert ledger.latest_brief()["content"] == {"text": "quiet morning"}
     assert [row["symbol"] for row in ledger.watchlist_for(AS_OF)] == ["NVDA"]
     assert ledger.headline_already_seen("alpaca_news", "a1")
+    ledger.close()
+
+
+def test_run_research_redacts_a_malicious_headline_before_the_model_and_the_ledger_see_it(
+    config, tmp_path, market
+):
+    """Phase 8: `news_sections` (what the Researcher's own context payload carries) and
+    `headlines_seen` (what the Trader reads later via `recent_headlines_for`) must both
+    carry the redacted text, not the injection corpus's raw payload -- and a "warning"
+    incident records the attempt."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    _label, malicious_headline, _categories = INJECTION_CORPUS[1]
+    news_client = _FakeNewsClient(
+        articles=[_FakeArticle(id="a1", headline=malicious_headline, symbols=["NVDA"])]
+    )
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0), "AMD": _quote(150.0)})
+    calls, client = _recording_llm_client(
+        _result_json(structured_output={"morning_brief": "quiet morning", "watchlist": []})
+    )
+
+    run_research(
+        cfg, FakeBroker(), market_data, news_client, market, ledger, client, AS_OF, "research", NOW
+    )
+
+    sent_payload = json.loads(calls[0]["stdin"])
+    sent_news = sent_payload["sections"]["news"]
+    assert all(malicious_headline not in article["headline"] for article in sent_news)
+    assert any("[redacted:" in article["headline"] for article in sent_news)
+    stored = ledger.recent_headlines_for(AS_OF, ["NVDA"])
+    assert malicious_headline not in stored[0]["headline"]
+    incidents = [i["message"] for i in ledger.incidents()]
+    assert any("suspected prompt injection" in m for m in incidents)
     ledger.close()
 
 

@@ -50,6 +50,7 @@ from .orders import (
 )
 from .pretrade import IntradayPretradeContext, check_intraday_pretrade, check_spread_gate
 from .proposals import OPEN_OR_ADD_ACTIONS, TradeProposal, ValidationContext, validate_proposal
+from .security import sanitize_and_log
 
 
 def midpoint_price(quote: Any) -> float | None:
@@ -325,11 +326,27 @@ def run_research(
 
     news_start = now - dt.timedelta(hours=research_cfg.news_lookback_hours)
     articles = news_client.get_news(tickers, start=news_start, end=now)
+    # Sanitize each article's free text exactly once, up front: `capped_articles` below is
+    # a subset of `articles`, and the headline-logging loop further down iterates the full
+    # list again -- scanning per use site would double-scan (and double-incident) any
+    # article present in both. Every downstream reader looks up the already-clean text by
+    # id instead of touching `article.headline`/`.summary` directly.
+    clean_text = {
+        article.id: (
+            sanitize_and_log(
+                article.headline, ledger=ledger, source=article.source, context="research news"
+            ),
+            sanitize_and_log(
+                article.summary, ledger=ledger, source=article.source, context="research news"
+            ),
+        )
+        for article in articles
+    }
     capped_articles = _cap_news_per_symbol(articles, research_cfg.max_headlines_per_symbol)
     news_sections = [
         {
-            "headline": article.headline,
-            "summary": article.summary,
+            "headline": clean_text[article.id][0],
+            "summary": clean_text[article.id][1],
             "symbols": article.symbols,
             "created_at": str(article.created_at),
             "source": article.source,
@@ -375,13 +392,34 @@ def run_research(
 
     ledger.record_brief(as_of, {"text": payload["morning_brief"]})
     for candidate in candidates:
+        # `WatchlistCandidate`'s own free-text fields are the Researcher model's output,
+        # not raw external text -- but if an injected headline ever got echoed into them
+        # despite the untrusted-label defense, this is what stops it reaching the Trader's
+        # own "watchlist" context unfiltered (context.py labels that section untrusted too).
         ledger.record_watchlist_item(
             as_of,
             candidate.symbol,
-            candidate.thesis,
-            entry_trigger=candidate.entry_trigger,
-            invalidation=candidate.invalidation,
-            size_band=candidate.size_band,
+            sanitize_and_log(
+                candidate.thesis, ledger=ledger, source="researcher", context="watchlist thesis"
+            ),
+            entry_trigger=sanitize_and_log(
+                candidate.entry_trigger,
+                ledger=ledger,
+                source="researcher",
+                context="watchlist entry_trigger",
+            ),
+            invalidation=sanitize_and_log(
+                candidate.invalidation,
+                ledger=ledger,
+                source="researcher",
+                context="watchlist invalidation",
+            ),
+            size_band=sanitize_and_log(
+                candidate.size_band,
+                ledger=ledger,
+                source="researcher",
+                context="watchlist size_band",
+            ),
             horizon=candidate.horizon,
             expected_move=candidate.expected_move,
             expected_cost_bps=candidate.expected_cost_bps,
@@ -393,7 +431,7 @@ def run_research(
             "alpaca_news",
             str(article.id),
             symbols=article.symbols,
-            headline=article.headline,
+            headline=clean_text[article.id][0],
         )
 
     return ResearchResult(brief_recorded=True, watchlist_size=len(candidates))
@@ -440,15 +478,18 @@ def run_preopen(
             headline_hash = str(article.id)
             if ledger.headline_already_seen("alpaca_news", headline_hash):
                 continue
+            clean_headline = sanitize_and_log(
+                article.headline, ledger=ledger, source=article.source, context="preopen headline"
+            )
             ledger.record_headline_seen(
                 as_of,
                 "alpaca_news",
                 headline_hash,
                 symbols=article.symbols,
-                headline=article.headline,
+                headline=clean_headline,
             )
-            ledger.record_incident("info", f"{symbol}: new headline -- {article.headline}")
-            new_headlines.append((symbol, article.headline))
+            ledger.record_incident("info", f"{symbol}: new headline -- {clean_headline}")
+            new_headlines.append((symbol, clean_headline))
 
     tradable, _quotes, dropped = _apply_spread_gate(watchlist, market_data, intraday, ledger, now)
     return PreopenResult(
