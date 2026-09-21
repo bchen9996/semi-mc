@@ -40,6 +40,11 @@ def test_intraday_section_matches_the_briefs_defaults_table():
     assert cfg.intraday.schedule.timezone == "America/Chicago"
     assert cfg.intraday.schedule.cycle_interval_minutes == 20
     assert cfg.intraday.options.enabled is False
+    assert cfg.intraday.models.researcher == "sonnet"
+    assert cfg.intraday.models.trader == "haiku"
+    assert cfg.intraday.models.reviewer == "sonnet"
+    assert cfg.intraday.models.max_turns == 6
+    assert cfg.intraday.models.timeout_seconds == 300
 
 
 def test_intraday_ledger_and_kill_switch_paths_are_separate_from_paper():

@@ -385,6 +385,26 @@ class IntradayOptionsConfig(_Base):
     enabled: bool = False
 
 
+class IntradayModelsConfig(_Base):
+    """Which model each role calls, and the call-shape caps passed to `claude -p --bare`
+    (`intraday/llm.py`). Plain `str`, not a `Literal`, for the model fields -- Claude Code
+    resolves aliases like "sonnet"/"haiku" to whatever the latest model in that family is,
+    and a `Literal` here would need a code change every time a new model ships. `trader`
+    defaults to the cheapest model (`~20 calls/day`); `researcher`/`reviewer` default to a
+    stronger model since they run only twice a day -- matching the cost estimate already
+    given for S4 (BRIEF_INTRADAY.md's "Agent runtime and cost control": "pick models per
+    role accordingly").
+    """
+
+    researcher: str = "sonnet"
+    trader: str = "haiku"
+    reviewer: str = "sonnet"
+    max_turns: int = Field(6, gt=0)
+    # A wall-clock backstop alongside --max-turns/--max-budget-usd, since an unattended
+    # GH Actions job has no one to notice a hung call.
+    timeout_seconds: int = Field(300, gt=0)
+
+
 class IntradayConfig(_Base):
     """S4: the LLM-driven intraday agent sleeve (BRIEF_INTRADAY.md). Deliberately not a
     `PaperConfig.sleeves` entry -- its LLM-proposed trades don't fit `Decision.weights`'s
@@ -401,6 +421,7 @@ class IntradayConfig(_Base):
     risk: IntradayRiskConfig = Field(default_factory=IntradayRiskConfig)
     schedule: IntradayScheduleConfig = Field(default_factory=IntradayScheduleConfig)
     options: IntradayOptionsConfig = Field(default_factory=IntradayOptionsConfig)
+    models: IntradayModelsConfig = Field(default_factory=IntradayModelsConfig)
     # Separate sentinel from paper.kill_switch_path -- S4 can be halted independently of
     # s0/s3 and vice versa.
     kill_switch_path: str = "runs/intraday/KILL_SWITCH"

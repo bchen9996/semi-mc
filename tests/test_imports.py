@@ -87,6 +87,12 @@ MODULES = [
     "semimc.strategy.weights",
     "semimc.strategy.forecasts",
     "semimc.strategy.decide",
+    "semimc.intraday",
+    "semimc.intraday.ledger",
+    "semimc.intraday.budget",
+    "semimc.intraday.proposals",
+    "semimc.intraday.context",
+    "semimc.intraday.llm",
 ]
 
 

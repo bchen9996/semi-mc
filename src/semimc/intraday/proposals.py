@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ..config import IntradayConfig
 from .ledger import IntradayLedger
 
-_OPEN_OR_ADD = ("open", "add")
+OPEN_OR_ADD_ACTIONS = ("open", "add")
 
 
 class TradeProposal(BaseModel):
@@ -53,7 +53,7 @@ class TradeProposal(BaseModel):
 
     @model_validator(mode="after")
     def _open_or_add_needs_thesis_invalidation_and_a_time_stop(self) -> TradeProposal:
-        if self.action in _OPEN_OR_ADD:
+        if self.action in OPEN_OR_ADD_ACTIONS:
             required = (
                 "side",
                 "size_pct",
@@ -66,6 +66,23 @@ class TradeProposal(BaseModel):
             if missing:
                 raise ValueError(f"action={self.action!r} requires {missing}")
         return self
+
+
+def trader_output_json_schema() -> dict:
+    """The schema passed to `claude -p --json-schema` for the Trader role (`intraday/
+    llm.py::invoke_role`). Generated from :class:`TradeProposal` itself, not hand-
+    maintained, so the CLI-side constraint and the pydantic schema can never drift apart.
+
+    This only constrains *type* shape (JSON Schema has no way to express
+    `TradeProposal`'s `model_validator` -- "open/add requires these six fields"), so it's
+    a coarse pre-filter, not a replacement for constructing a real `TradeProposal` (and
+    then `validate_proposal`) out of each item afterward.
+    """
+    return {
+        "type": "object",
+        "properties": {"proposals": {"type": "array", "items": TradeProposal.model_json_schema()}},
+        "required": ["proposals"],
+    }
 
 
 @dataclass(frozen=True)
@@ -110,7 +127,7 @@ def validate_proposal(proposal: TradeProposal, context: ValidationContext) -> li
     if proposal.instrument == "option" and not context.config.options.enabled:
         failures.append("options are not enabled")
 
-    if proposal.action not in _OPEN_OR_ADD:
+    if proposal.action not in OPEN_OR_ADD_ACTIONS:
         return failures
 
     risk = context.config.risk
@@ -125,13 +142,15 @@ def validate_proposal(proposal: TradeProposal, context: ValidationContext) -> li
             )
 
     accepted = _accepted_proposals(context)
-    accepted_opens = [row for row in accepted if row["action"] in _OPEN_OR_ADD]
+    accepted_opens = [row for row in accepted if row["action"] in OPEN_OR_ADD_ACTIONS]
     if len(accepted_opens) >= risk.new_positions_per_day:
         failures.append(
             f"new_positions_per_day budget ({risk.new_positions_per_day}) already spent today"
         )
     same_symbol_round_trips = sum(
-        1 for row in accepted if row["symbol"] == proposal.symbol and row["action"] in _OPEN_OR_ADD
+        1
+        for row in accepted
+        if row["symbol"] == proposal.symbol and row["action"] in OPEN_OR_ADD_ACTIONS
     )
     if same_symbol_round_trips >= risk.round_trips_per_symbol_per_day:
         failures.append(
