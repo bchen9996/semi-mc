@@ -93,6 +93,8 @@ MODULES = [
     "semimc.intraday.proposals",
     "semimc.intraday.context",
     "semimc.intraday.llm",
+    "semimc.intraday.pretrade",
+    "semimc.intraday.orders",
 ]
 
 

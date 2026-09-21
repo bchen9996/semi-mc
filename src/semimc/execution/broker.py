@@ -83,6 +83,14 @@ class OrderRequest:
     limit_price: float | None = None
     stop_price: float | None = None
     extended_hours: bool = False
+    # A real protective stop resting at the broker (S4, BRIEF_INTRADAY.md), not a second
+    # order submitted later by a polling process. "oto" (one-triggers-other) attaches
+    # exactly a stop-loss leg -- there is no take-profit field here or in
+    # intraday/proposals.py::TradeProposal, so this is never Alpaca's OrderClass.BRACKET
+    # (which requires both legs). Every existing caller leaves these at their defaults.
+    order_class: Literal["simple", "oto"] = "simple"
+    stop_loss_price: float | None = None
+    stop_loss_limit_price: float | None = None  # None = a plain stop leg; set = stop-limit
 
     def __post_init__(self) -> None:
         if (self.qty is None) == (self.notional is None):

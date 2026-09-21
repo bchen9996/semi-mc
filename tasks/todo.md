@@ -822,6 +822,87 @@ max_cost_usd_per_call` natively, not just an after-the-fact check. Built:
       Stage 1 shadow rollout, same as `market_data.py`'s "confirmed against a real
       account" pattern. Prompt-injection hardening of the three role files is Phase 5.
 
+**Phase 3 -- order construction, the protective stop, and fault-isolated submission,
+built 2026-09-21.** Still no job -- `jobs.py` is Phase 4. **Narrowed from the roadmap's
+original one-line description**, each narrowing with a stated reason (see below) --
+close/trim order construction, tranche-splitting, and the placebo agent move to Phase 4.
+
+A scope correction found while researching this phase, before writing any code: the
+roadmap said "real bracket/stop orders," but `TradeProposal` only has an
+`invalidation_price` (a stop) -- no take-profit/target field anywhere in the schema or
+the brief. Alpaca's `OrderClass.BRACKET` requires *both* legs; the correct mechanism is
+`OrderClass.OTO` ("one triggers other") with a stop-loss leg only -- confirmed by
+inspecting the installed `alpaca-py` package directly (`LimitOrderRequest`/
+`StopLossRequest`/`TakeProfitRequest.model_fields`, `list(OrderClass)`). Also confirmed
+directly against Alpaca's docs this session, not assumed: bracket/OCO/trailing-stop
+orders are wash-trade-exempt (a direct quote resolves the exact follow-up
+`docs/alpaca_notes.md` flagged for "Phase 3" -- OTO isn't named in that quote, so its own
+exemption stays an open "still to verify" item); and whether an OTO stop-loss leg accepts
+a fractional entry qty is undocumented anywhere checked, resolved conservatively (always
+whole shares for this order type). Built:
+
+- [x] `execution/broker.py::OrderRequest` gets three new optional fields
+      (`order_class: Literal["simple", "oto"] = "simple"`, `stop_loss_price`,
+      `stop_loss_limit_price`), every one defaulting to today's exact behavior -- the
+      only other constructor (`execution/orders.py::build_orders`) never sets them, so
+      s0/s3 are unaffected. `execution/alpaca_broker.py::submit_order` adds
+      `order_class=OrderClass.OTO`/`stop_loss=StopLossRequest(...)` to its kwargs only
+      when `order_class == "oto"`. `list_open_orders`'s existing `OrderClass.SIMPLE`-only
+      filter is untouched -- S4 tracks its own open orders via
+      `IntradayLedger.open_orders()` (Phase 0) instead of needing that shared method's
+      filtering behavior to change. `FakeBroker.submit_order` needed no code change at
+      all (it already only reads the fields it uses) -- just a docstring note that it
+      fills the entry leg like a simple order and does not simulate the stop leg
+      triggering later (Alpaca's own server-side job, and `AlpacaPaperBroker` is already
+      only exercised by opt-in network-marked integration tests, not mirrored here).
+- [x] `execution/orders.py::_collared_limit_price` renamed to `collared_limit_price`
+      (public, no behavior change) so `intraday/orders.py` reuses the exact formula
+      instead of a second copy.
+- [x] `intraday/pretrade.py::IntradayPretradeContext`/`check_intraday_pretrade` -- mirrors
+      `execution/pretrade.py`'s exact shape reading `config.intraday` instead of
+      `config.paper` (not generalized into one shared function, for the same reason
+      `IntradayConfig` is already a top-level sibling rather than nested in
+      `PaperConfig`). Kill switch, `trading_enabled`, account match against
+      `registered_account` (singular -- never interpolating the account number itself
+      into the failure message, the same rule `execution/pretrade.py` already follows),
+      account `ACTIVE`, market open. No configured start/cutoff execution window -- S4's
+      time-of-day gating is the job schedule itself (Phase 4), not a second, overlapping
+      window check here.
+- [x] `intraday/orders.py::intraday_client_order_id`/`build_entry_order`/
+      `submit_order_with_fault_isolation`. `build_entry_order` only builds `open`/`add`
+      orders (raises `ValueError` otherwise), sizes to whole shares always (never
+      notional), reuses `collared_limit_price` for the limit price (collared off
+      `risk.equity_cost_bps_per_side` -- the same modeled per-side friction
+      `validate_proposal`'s edge-vs-cost check already uses, rather than a second,
+      separately-tuned execution parameter with no evidence behind it), and attaches a
+      plain stop (not stop-limit -- a stop-limit can fail to fill in exactly the
+      fast-moving market a stop protects against) at `invalidation_price`.
+      `submit_order_with_fault_isolation` mirrors `live/execute.py::run_execute`'s
+      per-order try/except exactly (`TimeoutError` falls back to lookup;
+      `RateLimitError`/`WashTradeError`/`AccountBlockedError`/`MarketClosedError` are
+      caught, logged as an incident, and return `None` rather than raising) -- one bad
+      order in a cycle's batch never takes down the rest of it. Took a `cycle` parameter
+      out of the plan's original signature during implementation: nothing in
+      `IntradayLedger.record_order`/`record_incident`/`record_fill` takes a `cycle`
+      argument, so it would have been dead weight.
+- [x] **Deliberately deferred, not half-built** (each moved into Phase 4's description
+      above): `close`/`trim` order construction (needs a *real* current share quantity
+      from an actual broker call, and `trim`'s `size_pct` semantics -- percent of equity
+      like open/add, or percent of the existing position -- are genuinely undefined
+      anywhere in this project yet); tranche-splitting ("default to two tranches") --
+      a per-cycle flow-control decision that belongs with `jobs.py`'s loop, not
+      order-construction math with no loop to sit inside yet; the placebo agent
+      (`placebo.py`) on a shadow ledger -- needs a real watchlist source (Phase 4's
+      `research` job) and the brief never specifies the shadow ledger's fill mechanics.
+- [x] `docs/alpaca_notes.md`: wash-trade exemption item confirmed with a direct quote
+      (noting OTO isn't named in it); two new "still to verify" items (OTO + fractional
+      qty; OTO's own wash-trade exemption).
+- [x] Tests: `tests/test_intraday_pretrade.py`, `tests/test_intraday_orders.py` (all
+      against `FakeBroker`, no network), plus extensions to `tests/test_execution_orders.py`
+      (new `OrderRequest` field defaults), `tests/test_alpaca_broker.py` (OTO kwargs,
+      mocked `TradingClient`), `tests/test_execution_fake_broker.py` (an OTO request
+      fills its entry leg like a simple order), and `tests/test_imports.py`.
+
 **Remaining prerequisites** -- what Phase 0 didn't (and couldn't) resolve:
 
 1. **The owner still needs to actually create the second Alpaca paper account** and add

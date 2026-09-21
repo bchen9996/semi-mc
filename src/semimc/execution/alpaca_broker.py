@@ -21,7 +21,14 @@ What gets translated 1:1, and what needs help, was verified directly against the
 - **``Order.side``/``.type`` are ``None`` for a multi-leg order** (``order_class`` other
   than ``simple`` -- a bracket/OCO/OTO order, e.g. one placed by hand on the dashboard).
   :meth:`AlpacaPaperBroker.list_open_orders` skips these rather than crash translating
-  one; this code never builds one itself.
+  one. As of Phase 3 (S4, ``BRIEF_INTRADAY.md``), :meth:`submit_order` *does* build one
+  kind itself -- ``OrderClass.OTO`` with a ``stop_loss`` leg only, never
+  ``OrderClass.BRACKET`` (that needs a take-profit leg too, and nothing upstream of this
+  ever supplies one). ``list_open_orders``'s skip is deliberately left as-is rather than
+  taught to translate S4's own OTO parents: S4 tracks its own open orders via
+  ``IntradayLedger.open_orders()`` instead, so this filter changing behavior for s0/s3
+  (which never submits a non-simple order) would be a real-behavior change with nothing to
+  gain from it.
 - **``Calendar.open``/``.close`` are already naive, exchange-local wall-clock times** --
   ``alpaca.trading.models.Calendar.__init__`` builds them with
   ``datetime.strptime(date + " " + "09:30", "%Y-%m-%d %H:%M")`` directly off the raw API
@@ -80,6 +87,7 @@ from alpaca.trading.requests import (
     LimitOrderRequest,
     MarketOrderRequest,
     StopLimitOrderRequest,
+    StopLossRequest,
     StopOrderRequest,
 )
 from dotenv import load_dotenv
@@ -293,6 +301,11 @@ class AlpacaPaperBroker:
             kwargs["limit_price"] = request.limit_price
         if request.type in ("stop", "stop_limit"):
             kwargs["stop_price"] = request.stop_price
+        if request.order_class == "oto":
+            kwargs["order_class"] = OrderClass.OTO
+            kwargs["stop_loss"] = StopLossRequest(
+                stop_price=request.stop_loss_price, limit_price=request.stop_loss_limit_price
+            )
 
         try:
             order = self._client.submit_order(order_data=request_cls(**kwargs))

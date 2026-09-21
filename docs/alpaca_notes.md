@@ -55,9 +55,14 @@ real account is flagged as such, not guessed at.
   resting buy limit and an incoming sell limit that could match.
 - Bracket, OCO, and trailing-stop orders are exempted from this check (they're
   Alpaca-recommended for take-profit/stop-loss situations specifically because of this).
-  Source: WebSearch summary of <https://docs.alpaca.markets/us/docs/user-protection> (not
-  independently re-fetched page-by-page; **flagged for a follow-up direct read** before
-  `execution/pretrade.py`'s wash-trade handling is finalized in Phase 3).
+  **Confirmed with a direct quote (S4 Phase 3, 2026-09-21)** from
+  <https://docs.alpaca.markets/us/docs/user-protection>: *"If a customer wants to set up a
+  'take profit' and a 'stop loss' situation, we recommend using a bracket or OCO...order.
+  These complex orders and trailing stop orders are exceptions to our wash trade
+  protection."* This quote names bracket/OCO/trailing-stop specifically, not OTO --
+  `intraday/orders.py::build_entry_order`'s stop-only leg uses `OrderClass.OTO`, so its
+  wash-trade exemption is **not** confirmed by this quote and remains a "still to verify"
+  item below.
 
 ## `client_order_id`
 
@@ -197,6 +202,17 @@ canceling an already-canceled order does not 422, see above), `get_account`/`get
 - Whether canceling a *filled* or *expired* order returns 422 (only the already-canceled
   case has been observed directly -- see above).
 - The market-closed queuing behavior above.
+- **Whether an `OrderClass.OTO` order's `stop_loss` leg accepts a fractional `qty` on the
+  entry** (S4 Phase 3, `intraday/orders.py::build_entry_order`) -- `fractional-trading.md`
+  and `orders-at-alpaca.md` were both fetched this session and neither addresses it.
+  Resolved conservatively in code regardless of this: `build_entry_order` always sizes in
+  whole shares for this order type, both because that's already this project's existing
+  sizing convention (`execution/orders.py::build_orders` does the same) and as a hedge
+  pending this confirmation.
+- **Whether `OrderClass.OTO` (stop-loss leg only, no take-profit) is wash-trade-exempt
+  the same way bracket/OCO/trailing-stop are** -- the direct quote above names those three
+  specifically, not OTO. Untested until a real wash-trade collision is provoked against a
+  live OTO order.
 - Actual paper-account creation limit.
 - Trade-updates websocket stream: reconnect behavior, whether missed events during a
   disconnect are backfilled or lost (matters for `live/mark.py`'s fill tracking, which the

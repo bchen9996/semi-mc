@@ -17,6 +17,23 @@ def _decision(weights: dict[str, float], as_of="2026-01-05", sleeve="s0") -> Dec
     return Decision(as_of=pd.Timestamp(as_of), sleeve=sleeve, weights=pd.Series(weights))
 
 
+def test_order_request_defaults_to_a_simple_order_with_no_protective_stop():
+    """S4's OTO protective stop (Phase 3) is opt-in -- every existing caller of this
+    module leaves these three fields untouched."""
+    order = OrderRequest(
+        symbol="NVDA",
+        side="buy",
+        type="limit",
+        time_in_force="day",
+        client_order_id="x",
+        qty=1.0,
+        limit_price=100.0,
+    )
+    assert order.order_class == "simple"
+    assert order.stop_loss_price is None
+    assert order.stop_loss_limit_price is None
+
+
 def test_client_order_id_is_deterministic_and_per_symbol():
     decision = _decision({"NVDA": 0.5, "AMD": 0.5})
     first = client_order_id(decision, "NVDA")

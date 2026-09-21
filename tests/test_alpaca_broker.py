@@ -183,6 +183,30 @@ def test_submit_order_translates_the_response():
     assert submitted_kwargs["order_data"].qty == 10.0
 
 
+def test_submit_order_attaches_an_oto_stop_loss_leg():
+    """S4's protective stop (Phase 3) -- a real order resting at Alpaca, not a second
+    order submitted later by a polling process."""
+    client = MagicMock()
+    client.submit_order.return_value = _order(status=AlpacaStatus.NEW)
+    request = _request(order_class="oto", stop_loss_price=185.0)
+    _broker_with(client).submit_order(request)
+    built = client.submit_order.call_args.kwargs["order_data"]
+    assert built.order_class == OrderClass.OTO
+    assert built.stop_loss.stop_price == 185.0
+    assert built.stop_loss.limit_price is None
+
+
+def test_submit_order_leaves_order_class_and_stop_loss_unset_for_a_simple_order():
+    """Confirmed against the installed alpaca-py 0.44.0 model: `order_class`/`stop_loss`
+    default to `None`, not `OrderClass.SIMPLE` -- this code only sets them for `"oto"`."""
+    client = MagicMock()
+    client.submit_order.return_value = _order(status=AlpacaStatus.NEW)
+    _broker_with(client).submit_order(_request())
+    built = client.submit_order.call_args.kwargs["order_data"]
+    assert built.order_class is None
+    assert built.stop_loss is None
+
+
 def test_submit_order_falls_back_to_lookup_on_a_duplicate_client_order_id():
     client = MagicMock()
     client.submit_order.side_effect = _api_error(422, "client_order_id must be unique")

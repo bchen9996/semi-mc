@@ -54,6 +54,13 @@ class FakeBroker:
         Fraction of ``qty``/``notional`` filled per call, when less than 1.0. The real
         paper account fills partially "a random size 10% of the time"; a test picks the
         fraction deterministically instead of leaving it to chance.
+
+    An ``OrderRequest`` with ``order_class="oto"`` (S4's protective stop, Phase 3) fills
+    its entry leg exactly like a simple order -- ``submit_order`` never reads
+    ``stop_loss_price``/``stop_loss_limit_price`` at all. It deliberately does **not**
+    simulate that stop leg ever triggering later: real stop-triggering is Alpaca's own
+    server-side job once ``order_class=oto``, and ``AlpacaPaperBroker`` itself is already
+    exercised only by opt-in network-marked integration tests, not mirrored here.
     """
 
     equity: float = 100_000.0

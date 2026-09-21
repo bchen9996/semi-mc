@@ -59,6 +59,16 @@ def test_order_request_requires_exactly_one_of_qty_or_notional():
         )
 
 
+def test_an_oto_order_fills_its_entry_leg_like_a_simple_order():
+    """S4's protective stop (Phase 3) -- FakeBroker never reads order_class/
+    stop_loss_price at all; it fills the entry leg exactly as before and does not
+    simulate the stop leg ever triggering (a disclosed gap, see the class docstring)."""
+    broker = FakeBroker()
+    order = broker.submit_order(buy(order_class="oto", stop_loss_price=95.0))
+    assert order.status == "filled"
+    assert order.filled_qty == pytest.approx(10.0)
+
+
 def test_get_account_reflects_constructor_values():
     broker = FakeBroker(equity=50_000.0, cash=40_000.0, account_number="PA123")
     account = broker.get_account()

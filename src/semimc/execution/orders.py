@@ -61,10 +61,11 @@ def target_notional(decision: Decision, equity: float) -> pd.Series:
     return decision.weights * equity
 
 
-def _collared_limit_price(price: float, side: OrderSide, collar_bps: float) -> float:
+def collared_limit_price(price: float, side: OrderSide, collar_bps: float) -> float:
     """A marketable limit: priced past the quote by ``collar_bps``, in the direction that
     makes it likely to fill, bounded so a fast-moving market can't fill it arbitrarily far
-    from the last known price."""
+    from the last known price. Public: ``intraday/orders.py`` (S4, Phase 3) reuses this
+    exact formula rather than a second copy."""
     offset = price * collar_bps / 10_000
     return price + offset if side == "buy" else price - offset
 
@@ -132,7 +133,7 @@ def build_orders(
                 time_in_force="day",
                 client_order_id=client_order_id(decision, symbol, as_of),
                 qty=qty,
-                limit_price=_collared_limit_price(price, side, config.paper.execution.collar_bps),
+                limit_price=collared_limit_price(price, side, config.paper.execution.collar_bps),
             )
         )
     return sequence_orders(orders)
