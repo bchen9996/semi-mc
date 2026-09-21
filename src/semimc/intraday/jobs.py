@@ -120,11 +120,15 @@ def _original_proposal_payload(ledger: IntradayLedger, symbol: str) -> dict[str,
     return proposal_row["payload"] if proposal_row is not None else None
 
 
-def _turnover_so_far_usd(ledger: IntradayLedger, as_of: pd.Timestamp, equity: float) -> float:
+def turnover_so_far_usd(ledger: IntradayLedger, as_of: pd.Timestamp, equity: float) -> float:
     """Approximates today's turnover from proposed (not filled) notional of every
     accepted proposal so far -- the same accepted-proposals-today read
     `validate_proposal`'s own budget checks already use, so this stays consistent with
-    what the validator enforces rather than a second, independently-derived figure."""
+    what the validator enforces rather than a second, independently-derived figure.
+
+    Not `_`-prefixed (Phase 5-6 had it as `_turnover_so_far_usd`, jobs.py-only) since
+    `intraday/placebo.py` (Phase 7) needs the identical computation against its own shadow
+    ledger -- shared utility, not private to this module anymore."""
     accepted = [row for row in ledger.proposals_for(as_of) if row["status"] == "accepted"]
     total = 0.0
     for row in accepted:
@@ -591,7 +595,7 @@ def run_cycle(
         result.skipped_reason = str(exc)
         return result
 
-    turnover_so_far_usd = _turnover_so_far_usd(ledger, as_of, account.equity)
+    turnover_usd = turnover_so_far_usd(ledger, as_of, account.equity)
     last_stopout_at = ledger.last_stopout_times()
 
     raw_proposals = (
@@ -617,7 +621,7 @@ def run_cycle(
             equity_at_session_open=equity_at_session_open,
             positions=positions_notional,
             prices=prices,
-            turnover_so_far_usd=turnover_so_far_usd,
+            turnover_so_far_usd=turnover_usd,
             last_stopout_at=last_stopout_at,
         )
         failures = validate_proposal(proposal, validation_context)

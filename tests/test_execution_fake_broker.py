@@ -279,3 +279,48 @@ def test_order_type_matches_the_protocol() -> None:
     order = FakeBroker().submit_order(buy())
     assert isinstance(order, Order)
     assert order.client_order_id == "co-1"
+
+
+# -- state (de)serialization (S4's placebo agent, Phase 7) ---------------------------------
+
+
+def test_to_state_from_state_round_trips_orders_positions_and_open_sides():
+    broker = FakeBroker(account_number="SHADOW-1", account_status="ACTIVE")
+    broker.submit_order(buy(client_order_id="co-oto", order_class="oto", stop_loss_price=95.0))
+
+    state = broker.to_state()
+    restored = FakeBroker.from_state(state, now=dt.datetime(2026, 3, 1, 9, 30))
+
+    assert restored.account_number == "SHADOW-1"
+    assert restored.account_status == "ACTIVE"
+    assert restored.now == dt.datetime(2026, 3, 1, 9, 30)  # from the caller, not the state
+
+    original_order = broker.get_order_by_client_id("co-oto")
+    restored_order = restored.get_order_by_client_id("co-oto")
+    assert restored_order is not None
+    assert restored_order.status == original_order.status
+    assert restored_order.filled_qty == pytest.approx(original_order.filled_qty)
+    assert restored_order.legs is not None and len(restored_order.legs) == 1
+    assert restored_order.legs[0].client_order_id == original_order.legs[0].client_order_id
+    assert restored_order.legs[0].status == "new"
+
+    assert restored.list_positions() == broker.list_positions()
+
+    # The resting stop leg's own side is still tracked as open on the restored broker --
+    # confirms find_and_cancel_resting_stop-style wash-trade checks survive the round trip.
+    assert restored._open_sides == broker._open_sides
+
+
+def test_from_state_none_returns_a_fresh_broker():
+    broker = FakeBroker.from_state(None, now=dt.datetime(2026, 3, 1, 9, 30))
+    assert broker.list_positions() == []
+    assert broker.now == dt.datetime(2026, 3, 1, 9, 30)
+
+
+def test_to_state_omits_equity_and_cash():
+    """placebo.py's mark-to-market is the single source of truth for both -- persisting
+    them here would just persist a number nothing keeps correct (FakeBroker.equity/.cash
+    never move on their own; see the class docstring)."""
+    state = FakeBroker(equity=123.0, cash=456.0).to_state()
+    assert "equity" not in state
+    assert "cash" not in state

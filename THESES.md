@@ -117,7 +117,12 @@ project already treats minimum-sample gates elsewhere.
 **Minimum history**: monthly review once trading; a formal verdict at 3 and 6 months
 (`BRIEF_INTRADAY.md`'s own review cadence, distinct from `paper.review_months`).
 
-**Status**: not yet evaluated -- S4 has no code, no account, and no trades yet.
+**Status**: not yet evaluated. As of 2026-09-21, the placebo agent itself is built and
+running on schedule (`intraday/placebo.py`, `semimc intraday placebo open-batch|cycle|
+carry`, S4 Phase 7) on its own shadow ledger (`ledger/intraday_shadow.sqlite3`) -- but
+S4's real account is still `trading_enabled: false` (`tasks/todo.md`'s "Remaining
+prerequisites"), so neither curve has real trades yet. No claim above changes until both
+do; `evaluate_t6` still doesn't exist.
 
 ## Explicitly out of scope
 

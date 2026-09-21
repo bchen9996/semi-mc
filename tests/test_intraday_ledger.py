@@ -364,4 +364,50 @@ def test_incidents_reused_from_the_same_shape_as_live_ledger(tmp_path):
     assert len(incidents) == 1
     assert incidents[0]["severity"] == "error"
     assert incidents[0]["message"] == "daily model-call budget exhausted"
+
+
+# -- shadow broker state / realized cash flow (S4's placebo agent, Phase 7) ---------------
+
+
+def test_shadow_broker_state_is_none_before_anything_saved(tmp_path):
+    ledger = _ledger(tmp_path)
+    assert ledger.load_shadow_broker_state() is None
+    ledger.close()
+
+
+def test_shadow_broker_state_round_trips_and_upserts(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.save_shadow_broker_state({"orders": {}, "positions": {}, "open_sides": {}})
+    ledger.save_shadow_broker_state({"orders": {"co-1": {}}, "positions": {}, "open_sides": {}})
+    state = ledger.load_shadow_broker_state()
+    assert state == {"orders": {"co-1": {}}, "positions": {}, "open_sides": {}}
+    ledger.close()
+
+
+def test_total_realized_cash_flow_sums_a_buy_and_a_sell(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_order("s4-nvda-1", "NVDA", "buy", status="filled", leg="entry")
+    ledger.record_fill("s4-nvda-1", qty=10, price=100.0, filled_at=dt.datetime(2026, 9, 21, 14, 30))
+    ledger.record_order("s4-nvda-2", "NVDA", "sell", status="filled", leg="exit")
+    ledger.record_fill("s4-nvda-2", qty=10, price=110.0, filled_at=dt.datetime(2026, 9, 21, 15, 30))
+    # buy: -10*100 = -1000; sell: +10*110 = +1100 -> net +100
+    assert ledger.total_realized_cash_flow() == pytest.approx(100.0)
+    ledger.close()
+
+
+def test_total_realized_cash_flow_ignores_a_resting_stop_leg(tmp_path):
+    """A resting `type="stop"` order never produces a `fills` row (`FakeBroker`'s own
+    rule) -- confirms the join needs no explicit `leg` filter to be correct."""
+    ledger = _ledger(tmp_path)
+    ledger.record_order("s4-nvda-1", "NVDA", "buy", status="filled", leg="entry")
+    ledger.record_fill("s4-nvda-1", qty=10, price=100.0, filled_at=dt.datetime(2026, 9, 21, 14, 30))
+    ledger.record_order("s4-nvda-1::stop", "NVDA", "sell", status="new", leg="stop")  # never fills
+    assert ledger.total_realized_cash_flow() == pytest.approx(-1000.0)
+    ledger.close()
+
+
+def test_total_realized_cash_flow_is_zero_with_no_fills(tmp_path):
+    ledger = _ledger(tmp_path)
+    assert ledger.total_realized_cash_flow() == pytest.approx(0.0)
+    ledger.close()
     ledger.close()

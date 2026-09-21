@@ -153,6 +153,12 @@ CREATE TABLE IF NOT EXISTS incidents (
     message TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS shadow_broker_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    state_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 _OPEN_ORDER_STATUSES = ("new", "accepted", "partially_filled")
@@ -721,3 +727,50 @@ class IntradayLedger:
                 symbol = row["message"].split(":", 1)[1]
                 out[symbol] = dt.datetime.fromisoformat(row["created_at"])
         return out
+
+    # -- shadow broker state (S4's placebo agent, Phase 7) -------------------------------
+
+    def save_shadow_broker_state(self, state: dict[str, Any]) -> None:
+        """Upserts the single persisted `FakeBroker.to_state()` snapshot -- one row,
+        always id=1. Each GitHub Actions run is a fresh process with no real broker to
+        query, so this is the placebo's only way to remember what it holds between runs.
+        """
+        self._conn.execute(
+            """
+            INSERT INTO shadow_broker_state (id, state_json, updated_at) VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json,
+                                           updated_at = excluded.updated_at
+            """,
+            (_dumps(state), _now()),
+        )
+        self._conn.commit()
+
+    def load_shadow_broker_state(self) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT state_json FROM shadow_broker_state WHERE id = 1"
+        ).fetchone()
+        return json.loads(row["state_json"]) if row is not None else None
+
+    def total_realized_cash_flow(self) -> float:
+        """Signed sum of every fill this ledger has ever recorded -- a buy is a cash
+        outflow, a sell is an inflow. `intraday/placebo.py`'s mark-to-market uses this
+        (plus a starting equity and a fresh mark of whatever's still held) to derive shadow
+        cash/equity fresh every call, since nothing else updates a `FakeBroker`'s own
+        `.cash`/`.equity` automatically the way a real broker would.
+
+        A full `fills JOIN orders` scan, fine at S4's cadence (on the order of one placebo
+        entry per day) -- a resting stop leg's own order never produces a `fills` row
+        (`FakeBroker.submit_order`'s own rule: `type in ("stop", "stop_limit")` always
+        rests at `filled_qty=0`), so this never needs to filter by `leg`.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT o.side AS side, f.qty AS qty, f.price AS price
+            FROM fills f JOIN orders o ON f.client_order_id = o.client_order_id
+            """
+        ).fetchall()
+        total = 0.0
+        for row in rows:
+            notional = row["qty"] * row["price"]
+            total += -notional if row["side"] == "buy" else notional
+        return total

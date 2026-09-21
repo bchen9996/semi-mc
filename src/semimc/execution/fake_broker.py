@@ -248,3 +248,99 @@ class FakeBroker:
             market_value=new_qty * price,
             avg_entry_price=price,
         )
+
+    # -- state (de)serialization (S4's placebo agent, Phase 7) --------------------------
+
+    def to_state(self) -> dict:
+        """A JSON-safe snapshot of everything a `FakeBroker` needs to be reconstructed as
+        the same broker later -- orders (recursively, including an OTO entry's own resting
+        stop leg), positions, open sides, and account identity fields. Datetimes become
+        isoformat strings.
+
+        Deliberately excludes `equity`/`cash`: `FakeBroker` never updates either on its own
+        (`_apply_fill_to_position` only ever touches `_positions`), so persisting them
+        would just persist a number nothing keeps correct. `intraday/placebo.py`'s
+        mark-to-market derives both fresh, every call, from the owning ledger's own fill
+        history plus a live quote -- the single source of truth, not a second one here.
+        """
+        return {
+            "account_number": self.account_number,
+            "account_status": self.account_status,
+            "orders": {cid: _order_to_state(order) for cid, order in self._orders.items()},
+            "positions": {symbol: _position_to_state(p) for symbol, p in self._positions.items()},
+            "open_sides": {symbol: sorted(sides) for symbol, sides in self._open_sides.items()},
+        }
+
+    @classmethod
+    def from_state(cls, state: dict | None, *, now: dt.datetime) -> FakeBroker:
+        """Reconstructs a `FakeBroker` from `to_state()`'s own output. `state=None` (no
+        snapshot saved yet -- the very first run) returns a fresh, empty broker, same
+        as calling `FakeBroker(now=now)` directly. `now` always comes from the caller,
+        never a persisted value -- every job run has its own real wall-clock time.
+        """
+        if state is None:
+            return cls(now=now)
+        return cls(
+            account_number=state["account_number"],
+            account_status=state["account_status"],
+            now=now,
+            _orders={cid: _order_from_state(o) for cid, o in state["orders"].items()},
+            _positions={sym: _position_from_state(p) for sym, p in state["positions"].items()},
+            _open_sides={sym: set(sides) for sym, sides in state["open_sides"].items()},
+        )
+
+
+def _order_to_state(order: Order) -> dict:
+    return {
+        "id": order.id,
+        "client_order_id": order.client_order_id,
+        "symbol": order.symbol,
+        "side": order.side,
+        "type": order.type,
+        "time_in_force": order.time_in_force,
+        "status": order.status,
+        "qty": order.qty,
+        "notional": order.notional,
+        "filled_qty": order.filled_qty,
+        "filled_avg_price": order.filled_avg_price,
+        "limit_price": order.limit_price,
+        "submitted_at": order.submitted_at.isoformat() if order.submitted_at else None,
+        "filled_at": order.filled_at.isoformat() if order.filled_at else None,
+        "legs": [_order_to_state(leg) for leg in order.legs] if order.legs else None,
+    }
+
+
+def _order_from_state(data: dict) -> Order:
+    return Order(
+        id=data["id"],
+        client_order_id=data["client_order_id"],
+        symbol=data["symbol"],
+        side=data["side"],
+        type=data["type"],
+        time_in_force=data["time_in_force"],
+        status=data["status"],
+        qty=data["qty"],
+        notional=data["notional"],
+        filled_qty=data["filled_qty"],
+        filled_avg_price=data["filled_avg_price"],
+        limit_price=data["limit_price"],
+        submitted_at=(
+            dt.datetime.fromisoformat(data["submitted_at"]) if data["submitted_at"] else None
+        ),
+        filled_at=dt.datetime.fromisoformat(data["filled_at"]) if data["filled_at"] else None,
+        legs=[_order_from_state(leg) for leg in data["legs"]] if data["legs"] else None,
+    )
+
+
+def _position_to_state(position: Position) -> dict:
+    return {
+        "symbol": position.symbol,
+        "qty": position.qty,
+        "side": position.side,
+        "market_value": position.market_value,
+        "avg_entry_price": position.avg_entry_price,
+    }
+
+
+def _position_from_state(data: dict) -> Position:
+    return Position(**data)

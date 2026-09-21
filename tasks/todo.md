@@ -1221,6 +1221,102 @@ Built:
       `market` fixture, plus `run_preopen`'s headline refresh and `run_cycle`'s headline
       wiring), and `tests/test_cli_intraday.py` (one smoke test for `research`).
 
+**Phase 7 -- the placebo agent, T6's control group, built 2026-09-21.** The request was
+"go ahead to Phase 7," the item Phase 4/5's own planning had already deferred twice
+(needed `jobs.py`'s loop, then Phase 6's `research` job for a real watchlist -- both now
+exist). `THESES.md`'s pre-registered T6 defines it exactly: *"identical sizing, execution,
+and risk controls as the real S4 loop, but entries drawn at random from the morning
+watchlist instead of the Trader's judgment. Runs on its own shadow ledger every day S4
+runs, never submitting real orders."*
+
+The one real design problem this phase had that no earlier phase faced: every earlier job
+gets its position/equity truth from a *real* broker; the placebo has none, and each GitHub
+Actions run is a brand-new process, so something has to persist "what the shadow book
+holds" between runs and compute equity/cash the way a real broker automatically would
+(confirmed: `FakeBroker.equity`/`.cash` are static dataclass defaults that never move --
+only `_apply_fill_to_position` touches `_positions`). Resolved two ways, both verified
+against the actual code before writing anything:
+
+1. `FakeBroker` is a plain `@dataclass` (`_orders`/`_positions`/`_open_sides` are ordinary
+   fields), so it can be fully reconstructed from a snapshot. New `FakeBroker.to_state()`/
+   `.from_state()` make this a proper, public, tested capability rather than reaching into
+   "private" fields from another module.
+2. Cash/equity are **derived, never persisted**: `IntradayLedger.total_realized_cash_flow()`
+   (new -- a `fills JOIN orders` scan, signed by side) plus a configured starting equity
+   plus a fresh mark of whatever's still held (falling back to `avg_entry_price` on a
+   missing quote) is recomputed every call. This can never drift out of sync with a
+   persisted running total, and it's correct regardless of which code path produced a fill
+   -- the placebo's own entry, or `monitor.py`/`run_carry` closing one out.
+
+Everything else the brief asks for is **reused unmodified**: `monitor.py::
+check_invalidation_and_time_stops` and `jobs.py::run_carry` already operate purely through
+the `Broker`/`IntradayLedger` interfaces, so calling them with a reconstructed `FakeBroker`
+and a second, placebo-only `IntradayLedger` just works. `proposals.py::validate_proposal`
+is reused unmodified too -- this is what makes the risk controls *identical*, not a
+parallel reimplementation of them. Confirmed via `execution/pretrade.py::check_kill_switch`
+(a standalone function needing no `Broker`) that the placebo needs no real broker even for
+its own pretrade gate -- only the kill-switch file shared with the real loop, so an
+emergency halt stops the control group too and the comparison stays clean.
+
+Built:
+
+- [x] `execution/fake_broker.py`: `to_state()`/`from_state()` -- JSON-safe orders
+      (recursively, including an OTO entry's own resting stop leg), positions, open sides,
+      account identity fields. Deliberately excludes equity/cash (see point 2 above).
+- [x] `intraday/ledger.py`: new `shadow_broker_state` table (single upserted row) with
+      `save_shadow_broker_state`/`load_shadow_broker_state`; `total_realized_cash_flow()`
+      (confirmed a resting stop leg never produces a `fills` row, so the join needs no
+      `leg` filter to be correct).
+- [x] `intraday/jobs.py`: `_turnover_so_far_usd` -> `turnover_so_far_usd` (dropped the
+      underscore -- `placebo.py` is a second real caller now, not `jobs.py`-private
+      anymore). No behavior change.
+- [x] `config.py::IntradayPlaceboConfig` (new) -- `stop_distance_pct` (0.02),
+      `time_stop_minutes` (120), `starting_equity` (100,000.0), all placeholders per the
+      brief's own lack of a numeric default, same caveat as `max_spread_bps`.
+      `stop_distance_pct`'s default is chosen so `risk_per_trade_pct / stop_distance_pct`
+      alone doesn't already exceed `single_name_cap_pct` (0.0075/0.02 = 0.375 > 0.15 would
+      still bind, but a materially tighter distance would make every single proposal
+      trivially over-concentrated). `IntradayConfig` gains `placebo`/`shadow_ledger_path`
+      (a separate file, same reasoning `ledger_path` already has for staying separate from
+      `paper.ledger_path`). Both YAML configs updated to match.
+- [x] `intraday/placebo.py` (new) -- `_mark_to_market` (the one genuinely new piece of
+      accounting logic this phase adds); `run_placebo_cycle` (kill switch -> reused
+      monitor -> mark-to-market -> one random not-already-held watchlist symbol -> random
+      side (a coin flip: no judgment means no directional view either) -> a mechanical
+      `TradeProposal` sized to `min(risk_per_trade_pct / stop_distance_pct,
+      single_name_cap_pct, 1.0)` -- capped against every known limit up front rather than
+      relying on `validate_proposal` to reject an over-concentrated size every cycle ->
+      `validate_proposal` (identical risk controls) -> reused `build_entry_order`/
+      `submit_order_with_fault_isolation` on acceptance); `run_placebo_carry`
+      (mark-to-market, then `run_carry` unmodified -- every placebo proposal leaves
+      `horizon` unset, so `run_carry`'s own safe default already makes every placebo
+      position intraday-only with no placebo-specific carry rule needed).
+- [x] `cli.py`: a nested `placebo` sub-app (`semimc intraday placebo open-batch|cycle|
+      carry`) -- structurally, not just conventionally, incapable of a real order: it
+      never imports `AlpacaPaperBroker` or `ClaudeCliClient`, only
+      `AlpacaMarketDataClient` (for quotes) and `random.Random()` (OS-seeded -- a
+      predictable placebo would defeat the point of a control group).
+- [x] `.github/workflows/intraday_trading.yml`: no new cron entries or jobs -- the
+      `open-batch`/`cycle`/`carry` jobs each gained one more command (the placebo's own,
+      right after the real one) and one more `git add` (the shadow ledger file) in the
+      same commit, since the placebo shares those three jobs' exact cadence already and
+      needs no LLM call and no real broker.
+- [x] `THESES.md`'s T6 "Status" line updated: the placebo now runs on schedule, but S4's
+      real account is still `trading_enabled: false`, so neither curve has real trades yet
+      and no claim changes.
+- [x] Tests: `tests/test_execution_fake_broker.py` (`to_state`/`from_state` round-trip,
+      including the OTO leg and open-sides survive it, and that equity/cash are
+      deliberately excluded), extensions to `tests/test_intraday_ledger.py`
+      (`shadow_broker_state`, `total_realized_cash_flow` including the resting-stop-leg
+      case), `tests/test_intraday_placebo.py` (new -- mark-to-market against a
+      hand-computed figure, a seeded-random accepted proposal, a rejection once a budget
+      cap binds, no-op on an empty or fully-held watchlist, the kill switch, a monitor-
+      triggered close reflected in the ledger's own cash-flow total, and `run_placebo_carry`
+      closing every position), and `tests/test_cli_intraday.py` (one smoke test per new
+      command, with a fixture that makes `AlpacaPaperBroker.from_env`/`ClaudeCliClient.
+      from_env` raise if ever called -- confirming "never a real order" structurally, not
+      just by convention).
+
 **Remaining prerequisites** -- what Phase 0 didn't (and couldn't) resolve:
 
 1. **The owner still needs to actually create the second Alpaca paper account** and add

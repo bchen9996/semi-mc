@@ -257,5 +257,10 @@ intraday:
     preopen_lookback_hours: 2.0
     earnings_lookahead_days: 5
     max_headlines_per_symbol: 5
+  placebo:
+    stop_distance_pct: 0.02
+    time_stop_minutes: 120
+    starting_equity: 100000.0
   kill_switch_path: runs/intraday/KILL_SWITCH
   ledger_path: ledger/intraday.sqlite3
+  shadow_ledger_path: ledger/intraday_shadow.sqlite3

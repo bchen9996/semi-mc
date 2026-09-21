@@ -31,6 +31,13 @@ name: Intraday trading (S4)
 # label, so two different 20-minute (or 5-minute) runs on the same day must get distinct
 # labels, or the second run's orders would look like duplicate resubmissions of the
 # first's and never actually submit.
+#
+# `open-batch`/`cycle`/`carry` each also run T6's placebo agent (Phase 7,
+# `intraday/placebo.py`) right after the real command, committing its own shadow ledger
+# (ledger/intraday_shadow.sqlite3) in the same commit -- no new cron entries or jobs:
+# the placebo shares those three jobs' exact cadence already, needs no LLM call and no
+# real broker, and folding it in avoids doubling the job/concurrency-group count for a
+# control group that costs nothing extra to run alongside the real one.
 
 "on":
   workflow_dispatch: {}
@@ -242,7 +249,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
-      - name: Run the first Trader cycle and commit the ledger
+      - name: Run the first Trader cycle and the placebo, then commit both ledgers
         env:
           ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
           ALPACA_S4_SECRET_KEY: ${{ secrets.ALPACA_S4_SECRET_KEY }}
@@ -255,7 +262,8 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
             uv run semimc intraday open-batch --config config/paper.yaml
-            git add ledger/intraday.sqlite3
+            uv run semimc intraday placebo open-batch --config config/paper.yaml
+            git add ledger/intraday.sqlite3 ledger/intraday_shadow.sqlite3
             if git diff --cached --quiet; then
               echo "nothing to commit"
               exit 0
@@ -284,7 +292,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
-      - name: Run a Trader cycle and commit the ledger
+      - name: Run a Trader cycle and the placebo, then commit both ledgers
         env:
           ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
           ALPACA_S4_SECRET_KEY: ${{ secrets.ALPACA_S4_SECRET_KEY }}
@@ -296,8 +304,10 @@ jobs:
           for attempt in 1 2 3; do
             git fetch origin main
             git reset --hard origin/main
-            uv run semimc intraday cycle --cycle "cycle_$(date -u +%H%M)" --config config/paper.yaml
-            git add ledger/intraday.sqlite3
+            cycle_label="cycle_$(date -u +%H%M)"
+            uv run semimc intraday cycle --cycle "$cycle_label" --config config/paper.yaml
+            uv run semimc intraday placebo cycle --cycle "$cycle_label" --config config/paper.yaml
+            git add ledger/intraday.sqlite3 ledger/intraday_shadow.sqlite3
             if git diff --cached --quiet; then
               echo "nothing to commit"
               exit 0
@@ -326,7 +336,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
-      - name: Carry or close out the session and commit the ledger
+      - name: Carry or close out the session and the placebo, then commit both ledgers
         env:
           ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
           ALPACA_S4_SECRET_KEY: ${{ secrets.ALPACA_S4_SECRET_KEY }}
@@ -338,7 +348,8 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
             uv run semimc intraday carry --config config/paper.yaml
-            git add ledger/intraday.sqlite3
+            uv run semimc intraday placebo carry --config config/paper.yaml
+            git add ledger/intraday.sqlite3 ledger/intraday_shadow.sqlite3
             if git diff --cached --quiet; then
               echo "nothing to commit"
               exit 0

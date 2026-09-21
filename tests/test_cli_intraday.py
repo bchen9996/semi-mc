@@ -29,6 +29,8 @@ def _intraday_overrides(tmp_path: Path, **extra) -> list[str]:
         "--set",
         f"intraday.ledger_path={(tmp_path / 'intraday.sqlite3').as_posix()}",
         "--set",
+        f"intraday.shadow_ledger_path={(tmp_path / 'intraday_shadow.sqlite3').as_posix()}",
+        "--set",
         f"intraday.kill_switch_path={(tmp_path / 'KILL_SWITCH').as_posix()}",
     ]
     for key, value in extra.items():
@@ -195,5 +197,54 @@ def test_cycle_runs_cleanly_with_no_proposals(tmp_path, fake_intraday_env):
 
 def test_carry_runs_cleanly_with_no_positions(tmp_path, fake_intraday_env):
     result = runner.invoke(app, ["intraday", "carry"] + _tradeable_overrides(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "Carried: (none)" in result.output
+
+
+# -- placebo (T6's control group, Phase 7) -------------------------------------------------
+
+
+@pytest.fixture
+def fake_placebo_env(monkeypatch):
+    """The placebo path needs only market data -- confirms it structurally, not just by
+    convention: `AlpacaPaperBroker.from_env`/`ClaudeCliClient.from_env` are made to raise
+    if ever called, since the placebo must never construct a real broker or an LLM client.
+    """
+    market_data = _FakeMarketData()
+
+    def _must_not_be_called(*_args, **_kwargs):
+        raise AssertionError("the placebo path must never construct this")
+
+    monkeypatch.setattr(
+        "semimc.execution.market_data.AlpacaMarketDataClient.from_env",
+        classmethod(lambda cls, **kwargs: market_data),
+    )
+    monkeypatch.setattr(
+        "semimc.execution.alpaca_broker.AlpacaPaperBroker.from_env",
+        classmethod(lambda cls, **kwargs: _must_not_be_called()),
+    )
+    monkeypatch.setattr(
+        "semimc.intraday.llm.ClaudeCliClient.from_env",
+        classmethod(lambda cls: _must_not_be_called()),
+    )
+    return market_data
+
+
+def test_placebo_open_batch_runs_cleanly_with_an_empty_watchlist(tmp_path, fake_placebo_env):
+    result = runner.invoke(
+        app, ["intraday", "placebo", "open-batch"] + _intraday_overrides(tmp_path)
+    )
+    assert result.exit_code == 0, result.output
+    assert "Skipped" in result.output
+
+
+def test_placebo_cycle_runs_cleanly_with_an_empty_watchlist(tmp_path, fake_placebo_env):
+    result = runner.invoke(app, ["intraday", "placebo", "cycle"] + _intraday_overrides(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "Skipped" in result.output
+
+
+def test_placebo_carry_runs_cleanly_with_no_positions(tmp_path, fake_placebo_env):
+    result = runner.invoke(app, ["intraday", "placebo", "carry"] + _intraday_overrides(tmp_path))
     assert result.exit_code == 0, result.output
     assert "Carried: (none)" in result.output

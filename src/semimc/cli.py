@@ -42,6 +42,14 @@ intraday_app = typer.Typer(
 )
 app.add_typer(intraday_app, name="intraday")
 
+placebo_app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    help="S4's placebo agent (T6's control group): open-batch, cycle, carry, on its own "
+    "shadow ledger. Never submits a real order -- no broker, no LLM call.",
+)
+intraday_app.add_typer(placebo_app, name="placebo")
+
 LOGGER = logging.getLogger("semimc")
 
 ConfigOption = Annotated[Path | None, typer.Option("--config", "-c", help="Path to a YAML config.")]
@@ -2078,6 +2086,118 @@ def intraday_carry(
         result = run_carry(cfg, broker, ledger, market_data, as_of_ts, now)
     finally:
         ledger.close()
+
+    closed_str = ", ".join(result.closed) if result.closed else "(none)"
+    carried_str = ", ".join(result.carried) if result.carried else "(none)"
+    typer.echo(f"Closed (no multi-day thesis): {closed_str}")
+    typer.echo(f"Carried: {carried_str}")
+    if result.closed_for_cap:
+        typer.secho(
+            f"Closed for overnight cap: {', '.join(result.closed_for_cap)}", fg=typer.colors.YELLOW
+        )
+
+
+# -- S4's placebo agent (BRIEF_INTRADAY.md's "Placebo agent", THESES.md's T6, Phase 7) ---
+
+
+def _load_shadow_broker(cfg: Config, shadow_ledger, now):  # noqa: ANN001 -- returns FakeBroker
+    from .execution.fake_broker import FakeBroker
+
+    return FakeBroker.from_state(shadow_ledger.load_shadow_broker_state(), now=now)
+
+
+def _run_placebo_cycle(
+    cycle: str, as_of: str | None, config: Path | None, set_: list[str] | None, verbose: bool
+) -> None:
+    import random
+
+    cfg = _setup(config, set_, verbose)
+    from .intraday.ledger import IntradayLedger
+    from .intraday.placebo import run_placebo_cycle
+
+    as_of_ts = _intraday_as_of(as_of)
+    now = _intraday_now(cfg)
+    real_ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    shadow_ledger = IntradayLedger(cfg.path(cfg.intraday.shadow_ledger_path))
+    market_data = _intraday_market_data()
+    shadow_broker = _load_shadow_broker(cfg, shadow_ledger, now)
+    try:
+        result = run_placebo_cycle(
+            cycle,
+            cfg,
+            shadow_broker,
+            shadow_ledger,
+            real_ledger,
+            market_data,
+            as_of_ts,
+            now,
+            random.Random(),
+        )
+        shadow_ledger.save_shadow_broker_state(shadow_broker.to_state())
+    finally:
+        real_ledger.close()
+        shadow_ledger.close()
+
+    if result.skipped_reason is not None:
+        typer.echo(f"Skipped: {result.skipped_reason}")
+        return
+    typer.echo(f"Proposed: {result.proposed_symbol}")
+    if result.order_submitted:
+        typer.echo(f"Order submitted: {result.order_submitted}")
+
+
+@placebo_app.command("open-batch")
+def placebo_open_batch(
+    as_of: IntradayAsOfOption = None,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """The first placebo cycle of the day -- identical to `cycle`, just labeled
+    "open_batch" for the shadow ledger and idempotency."""
+    _run_placebo_cycle("open_batch", as_of, config, set_, verbose)
+
+
+@placebo_app.command("cycle")
+def placebo_cycle(
+    as_of: IntradayAsOfOption = None,
+    cycle: Annotated[
+        str, typer.Option("--cycle", help="Label for this cycle, e.g. cycle_0835.")
+    ] = "cycle",
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """One placebo cycle: the shared kill switch -> deterministic invalidation/time-stop
+    enforcement -> one random watchlist entry, sized and risk-checked identically to the
+    real Trader's own proposals. Meant to run on the same cadence as `intraday cycle`."""
+    _run_placebo_cycle(cycle, as_of, config, set_, verbose)
+
+
+@placebo_app.command("carry")
+def placebo_carry(
+    as_of: IntradayAsOfOption = None,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """End-of-session for the shadow book: every placebo position is intraday-only by
+    construction, so this always closes whatever's still held (`run_carry`'s own "no
+    written multi-day thesis" safe default)."""
+    cfg = _setup(config, set_, verbose)
+    from .intraday.ledger import IntradayLedger
+    from .intraday.placebo import run_placebo_carry
+
+    as_of_ts = _intraday_as_of(as_of)
+    now = _intraday_now(cfg)
+    shadow_ledger = IntradayLedger(cfg.path(cfg.intraday.shadow_ledger_path))
+    market_data = _intraday_market_data()
+    shadow_broker = _load_shadow_broker(cfg, shadow_ledger, now)
+    try:
+        result = run_placebo_carry(cfg, shadow_broker, shadow_ledger, market_data, as_of_ts, now)
+        shadow_ledger.save_shadow_broker_state(shadow_broker.to_state())
+    finally:
+        shadow_ledger.close()
 
     closed_str = ", ".join(result.closed) if result.closed else "(none)"
     carried_str = ", ".join(result.carried) if result.carried else "(none)"

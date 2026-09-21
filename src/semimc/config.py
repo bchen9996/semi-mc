@@ -428,6 +428,27 @@ class IntradayResearchConfig(_Base):
     max_headlines_per_symbol: int = Field(5, gt=0)
 
 
+class IntradayPlaceboConfig(_Base):
+    """T6's control group (`THESES.md`, `BRIEF_INTRADAY.md`'s "Placebo agent"), Phase 7:
+    identical sizing, execution, and risk controls as the real S4 loop, but entries drawn
+    at random from the morning watchlist instead of the Trader's judgment. `
+    stop_distance_pct`/`time_stop_minutes` stand in for what a real thesis would otherwise
+    supply per candidate -- placeholders, not researched figures, same caveat as
+    `IntradayRiskConfig.max_spread_bps`. `starting_equity` seeds the shadow book once;
+    every equity/cash figure after that is derived
+    (`IntradayLedger.total_realized_cash_flow`), never itself persisted.
+    """
+
+    # 0.02: at the default risk_per_trade_pct (0.0075) and single_name_cap_pct (0.15),
+    # this is the smallest stop distance where risk_per_trade_pct / stop_distance_pct
+    # alone doesn't already exceed single_name_cap_pct -- placebo.py's own sizing caps
+    # against both up front, rather than relying on validate_proposal to reject an
+    # over-concentrated size every single cycle.
+    stop_distance_pct: float = Field(0.02, gt=0)
+    time_stop_minutes: int = Field(120, gt=0)
+    starting_equity: float = Field(100_000.0, gt=0)
+
+
 class IntradayConfig(_Base):
     """S4: the LLM-driven intraday agent sleeve (BRIEF_INTRADAY.md). Deliberately not a
     `PaperConfig.sleeves` entry -- its LLM-proposed trades don't fit `Decision.weights`'s
@@ -446,6 +467,7 @@ class IntradayConfig(_Base):
     options: IntradayOptionsConfig = Field(default_factory=IntradayOptionsConfig)
     models: IntradayModelsConfig = Field(default_factory=IntradayModelsConfig)
     research: IntradayResearchConfig = Field(default_factory=IntradayResearchConfig)
+    placebo: IntradayPlaceboConfig = Field(default_factory=IntradayPlaceboConfig)
     # Separate sentinel from paper.kill_switch_path -- S4 can be halted independently of
     # s0/s3 and vice versa.
     kill_switch_path: str = "runs/intraday/KILL_SWITCH"
@@ -455,6 +477,10 @@ class IntradayConfig(_Base):
     # same file -- the push-race class of bug Phase 8 already had to fix once, at a much
     # lower write frequency than S4's.
     ledger_path: str = "ledger/intraday.sqlite3"
+    # The placebo's own ledger (Phase 7) -- a second file, for the same reason ledger_path
+    # is already separate from paper.ledger_path: its own git commits must never contend
+    # with the real loop's commits on the same file.
+    shadow_ledger_path: str = "ledger/intraday_shadow.sqlite3"
 
 
 class ReportingConfig(_Base):
