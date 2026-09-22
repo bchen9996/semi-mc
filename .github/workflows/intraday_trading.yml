@@ -13,19 +13,28 @@ name: Intraday trading (S4)
 # intraday.trading_enabled false and no registered_account. Both must be deliberately
 # edited before any of these jobs can do anything but decline at pretrade.
 #
-# Eight jobs (preflight/research/preopen/monitor/open-batch/cycle/carry/eod-review) --
-# the five Phase 5 builds, monitor's own frequent, model-free cron (BRIEF_INTRADAY.md's
-# "minute monitor", adapted to this project's cron architecture -- see the Phase 5 plan),
-# Phase 6's `research`, and Phase 9b's `eod-review`. `weekly_review` isn't wired here --
-# it doesn't exist yet (Phase 10). Every job shares one concurrency group: unlike
-# paper_trading.yml's two ledger-writing jobs, all eight of these touch the same
-# ledger/intraday.sqlite3, so all eight need to serialize their git commits, not just a
-# pair of them.
+# Nine jobs (preflight/research/preopen/monitor/open-batch/cycle/carry/eod-review/
+# weekly-review) -- the five Phase 5 builds, monitor's own frequent, model-free cron
+# (BRIEF_INTRADAY.md's "minute monitor", adapted to this project's cron architecture --
+# see the Phase 5 plan), Phase 6's `research`, Phase 9b's `eod-review`, and Phase 10's
+# `weekly-review`. Every job shares one concurrency group: unlike paper_trading.yml's two
+# ledger-writing jobs, all nine of these touch the same ledger/intraday.sqlite3, so all
+# nine need to serialize their git commits, not just a pair of them.
+#
+# `weekly-review` never accepts, rejects, or retires a playbook proposal -- confirmed
+# directly against the brief before building it: the schedule table names no agent for
+# `weekly_review`, and "Ask first: Accepting a playbook proposal"/"accepted or rejected
+# by me... not automatically" both rule out a cron job deciding anything. It only writes
+# `reports/.../weekly_review.md`; the `intraday playbook accept/reject/retire` commands
+# that actually change `PLAYBOOK.md` are deliberately not wired into any workflow here --
+# they stay a human running the CLI locally (or via `workflow_dispatch` on this same repo,
+# outside this file), whenever the user actually does their weekly review.
 #
 # `eod-review` also commits `reports/` (the day's `eod.md`) and, on a day with a
 # proposal, `proposals/` -- both new, untracked directories the first time either exists,
 # hence the `[ -d ... ] && git add ... || true` guard (a bare `git add nonexistent-dir`
-# would fail the pathspec match and trip `set -e`).
+# would fail the pathspec match and trip `set -e`). `weekly-review` uses the same guard
+# for `reports/` alone -- it never writes `proposals/`.
 #
 # `research` also runs `semimc fetch` before its own command, mirroring
 # paper_trading.yml's `decide` job -- it reads the shared price cache (OHLC for a
@@ -85,6 +94,8 @@ name: Intraday trading (S4)
     - cron: "45 19 * * 1-5"
     # eod-review: ~15:15 Central.
     - cron: "15 20 * * 1-5"
+    # weekly-review: Friday ~15:45 Central.
+    - cron: "45 20 * * 5"
 
 permissions:
   contents: write
@@ -456,6 +467,49 @@ jobs:
               exit 0
             fi
             git commit -m "intraday eod-review: $(date -u +%F)"
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+          done
+          echo "failed to push after 3 attempts"
+          exit 1
+
+  weekly-review:
+    if: github.event.schedule == '45 20 * * 5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: intraday-trading-ledger-write
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Surface the week's numbers and commit the ledger and report
+        # No claude CLI install and no ALPACA_S4_* secrets here -- weekly-review reads
+        # only the ledger (no broker, no market data, no model call; confirmed against
+        # the brief -- see this file's header comment). It never touches PLAYBOOK.md or
+        # proposals/: accepting/rejecting/retiring stays a human action, run separately.
+        run: |
+          set -e
+          git config user.name "semimc-bot"
+          git config user.email "semimc-bot@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            uv run semimc intraday weekly-review --config config/paper.yaml
+            git add ledger/intraday.sqlite3
+            [ -d reports ] && git add reports/ || true
+            if git diff --cached --quiet; then
+              echo "nothing to commit"
+              exit 0
+            fi
+            git commit -m "intraday weekly-review: $(date -u +%F)"
             if git push; then
               exit 0
             fi

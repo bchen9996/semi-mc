@@ -1659,6 +1659,115 @@ Built:
       with a skip-on-empty-ledger test plus a full happy-path test asserting the
       Reviewer's real sections render and the graded reflection persists.
 
+**Phase 10 -- weekly_review + PLAYBOOK.md versioning, built 2026-09-21.** The request was
+"continue with phase 10," the roadmap's own bucket for `weekly_review`/`PLAYBOOK.md`
+left over once Phase 9 split into 9a/9b.
+
+**Confirmed directly from `BRIEF_INTRADAY.md` before designing anything, the same
+discipline every prior phase here has used**: the schedule table's `weekly_review` row,
+unlike `research (Researcher agent)`/`eod_review (Reviewer agent)`, names no agent, and
+"Agent roles" lists exactly three model roles. So `weekly_review` is mechanical, not a
+fourth model call. Its brief-given job -- "where playbook changes are actually accepted
+or rejected" -- collides with "Ask first: Accepting a playbook proposal" and "accepted
+or rejected by me at the weekly review, not automatically": the decision is the user's,
+so the Friday cron job can only *surface* pending proposals; accepting/rejecting/retiring
+had to become a separate, human-invoked CLI action, run whenever the user actually does
+their review (not gated to Friday, never automatic).
+
+Built:
+
+- [x] `intraday/ledger.py`: two new tables. `playbook_entries` -- one row per accept/
+      reject decision on a proposal file (`status`, `text`, `source_proposal_path`,
+      `adopted_at`, `review_date`, `resolved_at`, `resolution_reason`); retiring an
+      already-accepted entry updates that same row rather than inserting a new one.
+      `playbook_versions` -- one row per change to `PLAYBOOK.md` as a whole, `id`
+      doubling as the version number a proposal stamps itself with, `text` a full
+      snapshot (the same "snapshot per change" idiom `snapshots` already uses for
+      equity) so a past version's exact wording is always recoverable. New methods:
+      `record_playbook_decision`, `get_playbook_entry`, `update_playbook_entry_status`,
+      `active_playbook_entries`, `all_playbook_entries`, `record_playbook_version`,
+      `current_playbook_version`, and `distinct_trading_days` (every distinct calendar
+      date with any recorded activity, across `proposals`/`reflections`/`briefs` -- no
+      broker/market-calendar dependency).
+- [x] `intraday/proposals` table gained a `playbook_version INTEGER` column, its own
+      column rather than a `payload` key -- a real bug found and fixed mid-phase (see
+      below).
+- [x] `intraday/playbook.py` (new module) -- not one of the brief's own named files
+      (`jobs.py`/`context.py`/`proposals.py`/`monitor.py`/`budget.py`/`options.py`/
+      `placebo.py`/`review.py`), a disclosed departure from Phase 9b's own "match the
+      brief's file list" precedent: none of those names fit a versioned-document store
+      with human accept/reject/retire actions on it (`review.py` stays "mechanical
+      scoring, attribution, calibration" per its own docstring). Owns
+      `render_playbook_markdown`, `pending_proposal_paths` (files under `proposals_dir`
+      not yet referenced by any `playbook_entries` row), `accept_proposal`,
+      `reject_proposal`, `retire_entry`. The evidence bar ("at least 10 trading days or
+      20 relevant trades... unless it is a bug or process fix") is enforced in code via
+      `PlaybookEvidenceError`, taking the trading-day/trade counts as explicit arguments
+      the *user* supplies on the command line -- never parsed back out of the proposal's
+      own freeform text (`playbook_proposal` is deliberately a plain string, per Phase
+      9b's own schema choice). `review_date = adopted_at + review_after_days` uses
+      calendar days, not trading-session-precise arithmetic -- a disclosed
+      simplification, same reasoning `IntradayResearchConfig`'s own lookback windows
+      already use, and it avoids needing a `Broker`/market-calendar dependency in a
+      command that otherwise only touches the ledger and the filesystem.
+- [x] `intraday/review.py`: `weekly_summary` (the most recent 5 distinct trading days on
+      record, not calendar Mon-Fri -- a disclosed simplification so a short week
+      naturally pulls in one extra prior day instead of under-reporting; also two
+      since-inception counters, bounded by `as_of` for reproducibility, so a human can
+      eyeball a pending proposal's stated evidence against real totals without the code
+      parsing that freeform prose) and `render_weekly_review_markdown`.
+- [x] `intraday/jobs.py`: `run_weekly_review` (Friday 15:45) -- no broker, no LLM client,
+      no market data, confirmed unnecessary by the "no fourth agent" finding above.
+      Writes `reports/YYYY-MM-DD/weekly_review.md`; no idempotency guard needed (pure
+      aggregation, no mutation, unlike `eod_review`'s reflection-grading side effects).
+      `run_cycle` now stamps the current playbook version onto every recorded proposal
+      (accepted or rejected). `run_preflight` reports `ledger.current_playbook_version()`
+      via a new `PreflightResult.playbook_version` field -- un-skipping the brief's
+      "playbook version loaded" check the function's own docstring had flagged as
+      skipped "before Phase 9."
+- [x] `config.py` + both YAML files: `IntradayPlaybookConfig` (`evidence_min_trading_days`
+      =10, `evidence_min_trades`=20 -- the brief's own named default; `review_after_days`
+      =30, a placeholder, same caveat as `IntradayRiskConfig.max_spread_bps`), mounted as
+      `IntradayConfig.playbook`.
+- [x] `cli.py`: `intraday weekly-review` (thin wrapper, ledger-only). New `playbook_app`
+      sub-typer (mirrors `placebo_app`'s own nesting): `intraday playbook pending/accept/
+      reject/retire`, all keyword-flag arguments (`--date`/`--entry-id`/...) rather than
+      positional, matching this CLI's existing all-flags convention throughout.
+- [x] `.github/workflows/intraday_trading.yml`: added the `weekly-review` job (Friday
+      ~15:45 Central, `"45 20 * * 5"`) -- no claude CLI install step and no
+      `ALPACA_S4_*` secrets (confirmed unneeded: the command opens only the ledger).
+      Deliberately did **not** wire `intraday playbook accept/reject/retire` into any
+      workflow -- they stay a human running the CLI locally, per the brief's own "Ask
+      first."
+- [x] **A real bug found and fixed mid-phase**: the first cut stamped
+      `playbook_version` directly into the proposal's `payload` dict passed to
+      `ledger.record_proposal`. That broke `run_cycle`'s own tranche-continuation path,
+      which reconstructs `TradeProposal(**proposal_row["payload"])` from that same
+      payload -- `TradeProposal` is `extra="forbid"`, so the added key raised a
+      `ValidationError` there, silently caught by an existing `except ValidationError:
+      continue`, and a full test-suite run caught it immediately
+      (`test_run_cycle_submits_the_next_tranche_on_a_later_call` started failing with
+      zero orders submitted). Fixed by giving `proposals` its own `playbook_version`
+      column instead, keeping `payload` exactly `TradeProposal.model_dump()` everywhere
+      it's stored and reconstructed.
+- [x] Manually confirmed `semimc intraday weekly-review --help` / `intraday playbook
+      --help` both render correctly, and `git status --short reports/ proposals/
+      PLAYBOOK.md` stayed clean (nothing leaked into the real repo) -- this phase never
+      constructs a credentialed client at all, so unlike every earlier S4 phase there
+      was no local credential wall to hit; the CLI commands themselves were exercised
+      directly rather than only via the test suite.
+- [x] Tests: `tests/test_intraday_playbook.py` (new, 16 tests) -- rendering, pending-
+      proposal discovery, the evidence gate (pass/fail/`--bug-fix`), version bumps
+      across accept/reject/retire, and rejecting a retire on an unknown/already-resolved
+      id. Extended `tests/test_intraday_ledger.py` (the two new tables' methods,
+      `distinct_trading_days`), `tests/test_intraday_review.py` (`weekly_summary`'s
+      windowing and `render_weekly_review_markdown`), `tests/test_intraday_jobs.py`
+      (`run_weekly_review`'s three surfacing cases, `run_cycle`'s playbook-version
+      stamp, `run_preflight`'s new field), and `tests/test_cli_intraday.py`
+      (`weekly-review` and all four `playbook` subcommands, including the evidence-gate
+      failure exiting 1). Full suite green (`uv run pytest`), `ruff check`/`format`
+      clean.
+
 **Remaining prerequisites** -- what Phase 0 didn't (and couldn't) resolve:
 
 1. **The owner still needs to actually create the second Alpaca paper account** and add

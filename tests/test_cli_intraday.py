@@ -340,6 +340,144 @@ def test_eod_review_grades_the_day_and_writes_a_full_report(
         assert graded["pnl_net"] == 98.0
 
 
+def test_weekly_review_writes_a_report_with_nothing_pending(tmp_path):
+    """No `fake_intraday_env` needed -- `weekly-review` calls no broker, market data, or
+    model (confirmed against the brief; see `run_weekly_review`'s docstring), so nothing
+    needs patching to `from_env` for this command to run cleanly."""
+    result = runner.invoke(
+        app,
+        ["intraday", "weekly-review"]
+        + _intraday_overrides(
+            tmp_path, **{"intraday.reports_dir": (tmp_path / "reports").as_posix()}
+        ),
+    )
+    assert result.exit_code == 0, result.output
+    assert "Wrote" in result.output
+    assert "Pending playbook proposals: 0" in result.output
+
+    report_files = list((tmp_path / "reports").rglob("weekly_review.md"))
+    assert len(report_files) == 1
+    assert "None pending." in report_files[0].read_text(encoding="utf-8")
+
+
+# -- playbook: human accept/reject/retire actions (Phase 10) -------------------------------
+
+
+def _playbook_overrides(tmp_path: Path, **extra) -> list[str]:
+    return _intraday_overrides(
+        tmp_path,
+        **{
+            "intraday.playbook_path": (tmp_path / "PLAYBOOK.md").as_posix(),
+            "intraday.proposals_dir": (tmp_path / "proposals").as_posix(),
+            **extra,
+        },
+    )
+
+
+def _write_proposal(tmp_path: Path, date: str, text: str) -> None:
+    proposals_dir = tmp_path / "proposals"
+    proposals_dir.mkdir(parents=True, exist_ok=True)
+    (proposals_dir / f"{date}.md").write_text(text, encoding="utf-8")
+
+
+def test_playbook_pending_lists_an_unresolved_proposal(tmp_path):
+    _write_proposal(tmp_path, "2026-09-21", "Raise the spread gate.")
+    result = runner.invoke(app, ["intraday", "playbook", "pending"] + _playbook_overrides(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "2026-09-21.md" in result.output
+
+
+def test_playbook_pending_reports_none_with_nothing_outstanding(tmp_path):
+    result = runner.invoke(app, ["intraday", "playbook", "pending"] + _playbook_overrides(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "No pending proposals." in result.output
+
+
+def test_playbook_accept_fails_without_meeting_the_evidence_bar(tmp_path):
+    _write_proposal(tmp_path, "2026-09-21", "Raise the spread gate.")
+    result = runner.invoke(
+        app,
+        ["intraday", "playbook", "accept", "--date", "2026-09-21", "--evidence-trading-days", "2"]
+        + _playbook_overrides(tmp_path),
+    )
+    assert result.exit_code != 0
+    assert "Not accepted" in result.output
+    assert not (tmp_path / "PLAYBOOK.md").exists()
+
+
+def test_playbook_accept_with_bug_fix_writes_a_new_playbook_version(tmp_path):
+    _write_proposal(tmp_path, "2026-09-21", "Fix a bug in the sizing formula.")
+    result = runner.invoke(
+        app,
+        ["intraday", "playbook", "accept", "--date", "2026-09-21", "--bug-fix"]
+        + _playbook_overrides(tmp_path),
+    )
+    assert result.exit_code == 0, result.output
+    assert "version 1" in result.output
+    assert "Fix a bug in the sizing formula." in (tmp_path / "PLAYBOOK.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_playbook_reject_records_the_decision_without_touching_playbook_md(tmp_path):
+    _write_proposal(tmp_path, "2026-09-21", "Raise the spread gate.")
+    result = runner.invoke(
+        app,
+        [
+            "intraday",
+            "playbook",
+            "reject",
+            "--date",
+            "2026-09-21",
+            "--reason",
+            "not enough evidence",
+        ]
+        + _playbook_overrides(tmp_path),
+    )
+    assert result.exit_code == 0, result.output
+    assert "Rejected" in result.output
+    assert not (tmp_path / "PLAYBOOK.md").exists()
+
+
+def test_playbook_retire_removes_an_active_entry(tmp_path):
+    _write_proposal(tmp_path, "2026-09-21", "Never chase a gap over 3% at the open.")
+    accept_result = runner.invoke(
+        app,
+        ["intraday", "playbook", "accept", "--date", "2026-09-21", "--bug-fix"]
+        + _playbook_overrides(tmp_path),
+    )
+    assert accept_result.exit_code == 0, accept_result.output
+    with IntradayLedger(tmp_path / "intraday.sqlite3") as ledger:
+        entry_id = ledger.active_playbook_entries()[0]["id"]
+
+    result = runner.invoke(
+        app,
+        [
+            "intraday",
+            "playbook",
+            "retire",
+            "--entry-id",
+            str(entry_id),
+            "--reason",
+            "stopped holding",
+        ]
+        + _playbook_overrides(tmp_path),
+    )
+    assert result.exit_code == 0, result.output
+    assert "version 2" in result.output
+    assert "Never chase" not in (tmp_path / "PLAYBOOK.md").read_text(encoding="utf-8")
+
+
+def test_playbook_retire_fails_for_an_unknown_entry(tmp_path):
+    result = runner.invoke(
+        app,
+        ["intraday", "playbook", "retire", "--entry-id", "999", "--reason", "stopped holding"]
+        + _playbook_overrides(tmp_path),
+    )
+    assert result.exit_code != 0
+    assert "Not retired" in result.output
+
+
 # -- placebo (T6's control group, Phase 7) -------------------------------------------------
 
 

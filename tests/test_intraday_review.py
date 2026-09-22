@@ -5,12 +5,20 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
 from semimc.config import IntradayConfig
 from semimc.intraday.ledger import IntradayLedger
-from semimc.intraday.review import confidence_calibration, day_attribution, process_scorecard
+from semimc.intraday.review import (
+    confidence_calibration,
+    day_attribution,
+    process_scorecard,
+    render_weekly_review_markdown,
+    weekly_summary,
+)
 
 AS_OF = pd.Timestamp("2026-09-21")
 
@@ -182,3 +190,88 @@ def test_day_attribution_is_none_with_no_soxx_benchmark():
 def test_day_attribution_is_none_with_no_reflections_today():
     result = day_attribution([], soxx_return=0.01)
     assert result == {"sector": None, "stock_specific": None, "options": 0.0}
+
+
+# -- weekly_summary (Phase 10) ------------------------------------------------------------
+
+
+def test_weekly_summary_windows_to_the_most_recent_five_trading_days(tmp_path):
+    ledger = _ledger(tmp_path)
+    days = pd.date_range("2026-09-14", periods=6, freq="D")  # 6 distinct days
+    for day in days:
+        ledger.record_reflection(day, "NVDA", {"pnl_gross": 10.0, "pnl_net": 8.0})
+
+    summary = weekly_summary(ledger, IntradayConfig(), days[-1])
+
+    assert len(summary["window_trading_days"]) == 5
+    assert str(days[0].date()) not in summary["window_trading_days"]
+    assert summary["pnl_gross"] == pytest.approx(50.0)  # 5 days, not all 6
+    assert summary["pnl_net"] == pytest.approx(40.0)
+    assert summary["total_trading_days"] == 6
+    assert summary["total_reflections"] == 6
+    ledger.close()
+
+
+def test_weekly_summary_bounds_by_as_of_ignoring_later_activity(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_reflection(pd.Timestamp("2026-09-21"), "NVDA", {"pnl_net": 10.0})
+    ledger.record_reflection(pd.Timestamp("2026-09-22"), "AMD", {"pnl_net": 100.0})  # after as_of
+
+    summary = weekly_summary(ledger, IntradayConfig(), pd.Timestamp("2026-09-21"))
+
+    assert summary["window_trading_days"] == ["2026-09-21"]
+    assert summary["pnl_net"] == pytest.approx(10.0)
+    assert summary["total_trading_days"] == 1
+    ledger.close()
+
+
+def test_weekly_summary_is_empty_with_no_activity(tmp_path):
+    ledger = _ledger(tmp_path)
+    summary = weekly_summary(ledger, IntradayConfig(), AS_OF)
+    assert summary["window_trading_days"] == []
+    assert summary["pnl_gross"] == 0.0
+    assert summary["avg_rejection_rate"] == 0.0
+    assert summary["total_trading_days"] == 0
+    ledger.close()
+
+
+# -- render_weekly_review_markdown --------------------------------------------------------
+
+
+def _summary_stub() -> dict:
+    return {
+        "window_trading_days": ["2026-09-21"],
+        "pnl_gross": 100.0,
+        "pnl_net": 80.0,
+        "avg_rejection_rate": 0.25,
+        "incidents": 0,
+        "calibration": [],
+        "total_trading_days": 1,
+        "total_reflections": 3,
+    }
+
+
+def test_render_weekly_review_markdown_lists_pending_proposals():
+    text = render_weekly_review_markdown(
+        _summary_stub(), [Path("proposals/2026-09-21.md")], [], AS_OF
+    )
+    assert "2026-09-21.md" in text
+    assert "None pending." not in text
+
+
+def test_render_weekly_review_markdown_says_none_pending_with_nothing_outstanding():
+    text = render_weekly_review_markdown(_summary_stub(), [], [], AS_OF)
+    assert "None pending." in text
+
+
+def test_render_weekly_review_markdown_lists_entries_due_for_review():
+    due = [{"id": 3, "review_date": "2026-09-01 00:00:00"}]
+    text = render_weekly_review_markdown(_summary_stub(), [], due, AS_OF)
+    assert "Entry 3" in text
+    assert "None due." not in text
+
+
+def test_render_weekly_review_markdown_never_crashes_on_an_empty_week():
+    text = render_weekly_review_markdown(_summary_stub(), [], [], AS_OF)
+    assert "None pending." in text
+    assert "None due." in text

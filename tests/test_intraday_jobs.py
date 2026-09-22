@@ -25,6 +25,7 @@ from semimc.intraday.jobs import (
     run_preflight,
     run_preopen,
     run_research,
+    run_weekly_review,
 )
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.llm import ClaudeCliClient
@@ -272,6 +273,43 @@ def test_run_preflight_flags_a_bad_reconciliation(config, tmp_path):
     ledger.close()
 
 
+def test_run_preflight_reports_no_playbook_version_before_any_acceptance(config, tmp_path):
+    ledger = _ledger(tmp_path)
+    result = run_preflight(
+        config,
+        FakeBroker(),
+        _FakeMarketData(quotes={"SPY": _quote(500.0)}),
+        _FakeNewsClient(),
+        ledger,
+        NOW,
+    )
+    assert result.playbook_version is None
+    ledger.close()
+
+
+def test_run_preflight_reports_the_current_playbook_version(config, tmp_path):
+    """(Phase 10) `PLAYBOOK.md`'s own version, informational only -- never logged as a
+    `"warning"` incident the way `notes` are, since it's routine, not a warning."""
+    ledger = _ledger(tmp_path)
+    entry_id = ledger.record_playbook_decision(
+        "active", "rule A", "proposals/2026-09-01.md", adopted_at=AS_OF, review_date=AS_OF
+    )
+    ledger.record_playbook_version("# PLAYBOOK.md\n\nrule A", "accepted", entry_id)
+
+    result = run_preflight(
+        config,
+        FakeBroker(),
+        _FakeMarketData(quotes={"SPY": _quote(500.0)}),
+        _FakeNewsClient(),
+        ledger,
+        NOW,
+    )
+
+    assert result.playbook_version == 1
+    assert not any("playbook version" in i["message"] for i in ledger.incidents())
+    ledger.close()
+
+
 # -- run_preopen ----------------------------------------------------------------------------
 
 
@@ -414,6 +452,62 @@ def test_run_cycle_submits_only_the_first_tranche_of_an_accepted_open(config, tm
     assert pending is not None
     assert pending["tranche_index"] == 1
     assert pending["tranche_total"] == 2
+    ledger.close()
+
+
+def test_run_cycle_stamps_the_current_playbook_version_onto_every_recorded_proposal(
+    config, tmp_path
+):
+    """(Phase 10) Mechanical, added by `jobs.py` after the model call returns -- never
+    asked of the Trader, and `TradeProposal`'s own schema stays untouched."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    entry_id = ledger.record_playbook_decision(
+        "active", "rule A", "proposals/2026-09-01.md", adopted_at=AS_OF, review_date=AS_OF
+    )
+    ledger.record_playbook_version("# PLAYBOOK.md\n\nrule A", "accepted", entry_id)
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    proposal = {
+        "action": "open",
+        "symbol": "NVDA",
+        "side": "buy",
+        "size_pct": 0.05,
+        "limit_price": 190.0,
+        "thesis": "AI capex",
+        "invalidation_price": 185.0,
+        "time_stop_minutes": 60,
+    }
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
+
+    run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, NOW)
+
+    recorded = ledger.proposals_for(AS_OF)
+    assert recorded[-1]["playbook_version"] == 1
+    ledger.close()
+
+
+def test_run_cycle_stamps_no_playbook_version_before_any_acceptance(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    proposal = {
+        "action": "open",
+        "symbol": "NVDA",
+        "side": "buy",
+        "size_pct": 0.05,
+        "limit_price": 190.0,
+        "thesis": "AI capex",
+        "invalidation_price": 185.0,
+        "time_stop_minutes": 60,
+    }
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
+
+    run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, NOW)
+
+    recorded = ledger.proposals_for(AS_OF)
+    assert recorded[-1]["playbook_version"] is None
     ledger.close()
 
 
@@ -1055,4 +1149,69 @@ def test_run_eod_review_writes_a_playbook_proposal_when_the_reviewer_makes_one(
     assert proposal_text in proposal_files[0].read_text(encoding="utf-8")
     paper_ledger.close()
     ledger.close()
+
+
+# -- run_weekly_review (Phase 10) ----------------------------------------------------------
+
+
+def test_run_weekly_review_writes_a_report_with_nothing_pending(config, tmp_path):
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_reflection(AS_OF, "NVDA", {"pnl_gross": 10.0, "pnl_net": 8.0})
+
+    result = run_weekly_review(cfg, ledger, AS_OF)
+
+    assert result.pending_proposals == 0
+    assert result.entries_due_for_review == 0
+    with open(result.report_path, encoding="utf-8") as handle:
+        content = handle.read()
+    assert "None pending." in content
+    assert "None due." in content
+    ledger.close()
+
+
+def test_run_weekly_review_surfaces_a_pending_proposal(config, tmp_path):
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    proposals_dir = cfg.path(cfg.intraday.proposals_dir)
+    proposals_dir.mkdir(parents=True)
+    (proposals_dir / "2026-09-21.md").write_text("Raise the spread gate.", encoding="utf-8")
+
+    result = run_weekly_review(cfg, ledger, AS_OF)
+
+    assert result.pending_proposals == 1
+    with open(result.report_path, encoding="utf-8") as handle:
+        content = handle.read()
+    assert "2026-09-21.md" in content
+    ledger.close()
+
+
+def test_run_weekly_review_surfaces_an_entry_due_for_review(config, tmp_path):
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    entry_id = ledger.record_playbook_decision(
+        "active",
+        "rule A",
+        "proposals/2026-08-01.md",
+        adopted_at=pd.Timestamp("2026-08-01"),
+        review_date=pd.Timestamp("2026-09-01"),  # already past AS_OF
+    )
+    ledger.record_playbook_version("# PLAYBOOK.md\n\nrule A", "accepted", entry_id)
+
+    result = run_weekly_review(cfg, ledger, AS_OF)
+
+    assert result.entries_due_for_review == 1
+    with open(result.report_path, encoding="utf-8") as handle:
+        content = handle.read()
+    assert f"Entry {entry_id}" in content
+    ledger.close()
+
+
+def test_run_weekly_review_never_calls_a_model_or_a_broker(config, tmp_path):
+    """Confirmed against the brief before building this: `weekly_review` names no agent
+    -- this call signature takes only `config`/`ledger`/`as_of`, nothing else."""
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    result = run_weekly_review(cfg, ledger, AS_OF)
+    assert result.report_path is not None
     ledger.close()

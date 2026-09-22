@@ -261,6 +261,10 @@ intraday:
     stop_distance_pct: 0.02
     time_stop_minutes: 120
     starting_equity: 100000.0
+  playbook:
+    evidence_min_trading_days: 10
+    evidence_min_trades: 20
+    review_after_days: 30   # placeholder -- brief gives no number, see config.py's caveat
   kill_switch_path: runs/intraday/KILL_SWITCH
   ledger_path: ledger/intraday.sqlite3
   shadow_ledger_path: ledger/intraday_shadow.sqlite3

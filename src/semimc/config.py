@@ -428,6 +428,21 @@ class IntradayResearchConfig(_Base):
     max_headlines_per_symbol: int = Field(5, gt=0)
 
 
+class IntradayPlaybookConfig(_Base):
+    """`PLAYBOOK.md`'s accept/reject/retire knobs (`BRIEF_INTRADAY.md`'s "Self-improvement
+    rules" and its "Playbook change threshold" default), Phase 10.
+    `evidence_min_trading_days`/`evidence_min_trades` are the brief's own named default
+    (10 trading days or 20 relevant trades); `review_after_days` has no brief-given
+    number -- a placeholder, not a researched figure, same caveat as
+    `IntradayRiskConfig.max_spread_bps`. Calendar days, not trading-session-precise, per
+    `intraday/playbook.py`'s own disclosed simplification.
+    """
+
+    evidence_min_trading_days: int = Field(10, gt=0)
+    evidence_min_trades: int = Field(20, gt=0)
+    review_after_days: int = Field(30, gt=0)
+
+
 class IntradayPlaceboConfig(_Base):
     """T6's control group (`THESES.md`, `BRIEF_INTRADAY.md`'s "Placebo agent"), Phase 7:
     identical sizing, execution, and risk controls as the real S4 loop, but entries drawn
@@ -468,6 +483,7 @@ class IntradayConfig(_Base):
     models: IntradayModelsConfig = Field(default_factory=IntradayModelsConfig)
     research: IntradayResearchConfig = Field(default_factory=IntradayResearchConfig)
     placebo: IntradayPlaceboConfig = Field(default_factory=IntradayPlaceboConfig)
+    playbook: IntradayPlaybookConfig = Field(default_factory=IntradayPlaybookConfig)
     # Separate sentinel from paper.kill_switch_path -- S4 can be halted independently of
     # s0/s3 and vice versa.
     kill_switch_path: str = "runs/intraday/KILL_SWITCH"

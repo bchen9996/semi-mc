@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS proposals (
     status TEXT NOT NULL,
     reason TEXT,
     payload_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    playbook_version INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS orders (
@@ -158,6 +159,26 @@ CREATE TABLE IF NOT EXISTS shadow_broker_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     state_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS playbook_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL,
+    text TEXT NOT NULL,
+    source_proposal_path TEXT NOT NULL,
+    adopted_at TEXT,
+    review_date TEXT,
+    resolved_at TEXT,
+    resolution_reason TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS playbook_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    change_kind TEXT NOT NULL,
+    entry_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL
 );
 """
 
@@ -274,15 +295,24 @@ class IntradayLedger:
         status: str,
         payload: dict[str, Any],
         reason: str | None = None,
+        playbook_version: int | None = None,
     ) -> int:
         """Every proposal, accepted or rejected -- a plain append, per the brief's own
         "blotter: every proposal including rejected ones." ``status`` carries the
-        accept/reject outcome; ``reason`` is populated on a rejection."""
+        accept/reject outcome; ``reason`` is populated on a rejection.
+
+        ``playbook_version`` (Phase 10) is its own column, deliberately not folded into
+        ``payload`` -- ``payload`` is exactly ``TradeProposal.model_dump()``, and more
+        than one code path (`run_cycle`'s own tranche continuation,
+        `intraday/reflect.py`) reconstructs a `TradeProposal` via `TradeProposal(**
+        payload)`; that schema is `extra="forbid"`, so an extra key would raise a
+        `ValidationError` everywhere it's read back, not just where it was written.
+        """
         cursor = self._conn.execute(
             """
             INSERT INTO proposals (as_of, cycle, symbol, action, status, reason,
-                                    payload_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                    payload_json, created_at, playbook_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(pd.Timestamp(as_of)),
@@ -293,6 +323,7 @@ class IntradayLedger:
                 reason,
                 _dumps(payload),
                 _now(),
+                playbook_version,
             ),
         )
         self._conn.commit()
@@ -832,3 +863,107 @@ class IntradayLedger:
             notional = row["qty"] * row["price"]
             total += -notional if row["side"] == "buy" else notional
         return total
+
+    # -- playbook (S4, Phase 10) -----------------------------------------------------------
+
+    def record_playbook_decision(
+        self,
+        status: str,
+        text: str,
+        source_proposal_path: str,
+        adopted_at: pd.Timestamp | None = None,
+        review_date: pd.Timestamp | None = None,
+        resolution_reason: str | None = None,
+    ) -> int:
+        """One row per accept/reject decision on a proposal file (`intraday/playbook.py`).
+        A rejection (`status="rejected"`) sets `resolution_reason` and leaves
+        `adopted_at`/`review_date` null; an acceptance (`status="active"`) sets the
+        reverse. Retiring an already-accepted entry later goes through
+        :meth:`update_playbook_entry_status` instead of a second insert -- one row per
+        proposal's whole lifecycle, not one row per state transition."""
+        cursor = self._conn.execute(
+            """
+            INSERT INTO playbook_entries
+                (status, text, source_proposal_path, adopted_at, review_date,
+                 resolved_at, resolution_reason, created_at)
+            VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                status,
+                text,
+                source_proposal_path,
+                str(pd.Timestamp(adopted_at)) if adopted_at is not None else None,
+                str(pd.Timestamp(review_date)) if review_date is not None else None,
+                resolution_reason,
+                _now(),
+            ),
+        )
+        self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def get_playbook_entry(self, entry_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM playbook_entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def update_playbook_entry_status(
+        self, entry_id: int, status: str, resolved_at: pd.Timestamp, resolution_reason: str
+    ) -> None:
+        """Retires a currently-active entry in place (`intraday/playbook.py::
+        retire_entry`) -- same upsert-by-id shape `update_reflection` already uses."""
+        self._conn.execute(
+            """
+            UPDATE playbook_entries
+            SET status = ?, resolved_at = ?, resolution_reason = ?
+            WHERE id = ?
+            """,
+            (status, str(pd.Timestamp(resolved_at)), resolution_reason, entry_id),
+        )
+        self._conn.commit()
+
+    def active_playbook_entries(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM playbook_entries WHERE status = 'active' ORDER BY id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def all_playbook_entries(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute("SELECT * FROM playbook_entries ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+    def record_playbook_version(self, text: str, change_kind: str, entry_id: int) -> int:
+        """One row per change to `PLAYBOOK.md` as a whole (`intraday/playbook.py`) -- `id`
+        doubles as the version number a trade proposal stamps itself with
+        (`current_playbook_version`). `text` is a full snapshot, the same "snapshot per
+        change" idiom `snapshots` already uses for account equity, so a past version's
+        exact wording is always recoverable without replaying every entry's history."""
+        cursor = self._conn.execute(
+            """
+            INSERT INTO playbook_versions (text, change_kind, entry_id, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (text, change_kind, entry_id, _now()),
+        )
+        self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def current_playbook_version(self) -> int | None:
+        row = self._conn.execute("SELECT MAX(id) AS v FROM playbook_versions").fetchone()
+        return int(row["v"]) if row is not None and row["v"] is not None else None
+
+    def distinct_trading_days(self) -> list[str]:
+        """Every distinct calendar date (`YYYY-MM-DD`, normalized -- `as_of` is stored
+        with a `00:00:00` time component, `str(pd.Timestamp(...))`'s own default) S4 has
+        recorded any activity for, across `proposals`/`reflections`/`briefs` -- how many
+        days the loop has actually run, with no broker/market-calendar dependency
+        (`review.py::weekly_summary` wants this window without pulling in a `Broker`
+        just to count days)."""
+        rows = self._conn.execute(
+            """
+            SELECT as_of FROM proposals
+            UNION SELECT as_of FROM reflections
+            UNION SELECT as_of FROM briefs
+            """
+        ).fetchall()
+        return sorted({str(pd.Timestamp(row["as_of"]).date()) for row in rows})

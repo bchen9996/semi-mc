@@ -16,10 +16,18 @@ genuine per-trade regression against SOXX's return over that trade's own holding
 isn't buildable from data this project keeps today. See its own docstring for the
 day-level approximation used instead -- a labeled interpretation, not a fabricated
 number, the same honesty convention `eod_report.py`'s "pessimistic P&L" already uses.
+
+:func:`weekly_summary`/:func:`render_weekly_review_markdown` (Phase 10) extend the same
+"mechanical here, judgment elsewhere" split one level further: `weekly_review` has no
+named agent in the brief's schedule table at all (confirmed directly before designing
+it), so there is no judgment call to reserve -- these functions are the entire job, not
+a precursor to one. See `intraday/playbook.py`'s module docstring for where the actual
+accept/reject/retire decision lives instead.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -138,3 +146,105 @@ def day_attribution(
         sector += sign * qty * avg_entry_price * soxx_return
 
     return {"sector": sector, "stock_specific": pnl_net_total - sector, "options": 0.0}
+
+
+_WEEKLY_WINDOW_TRADING_DAYS = 5
+
+
+def weekly_summary(
+    ledger: IntradayLedger, config: IntradayConfig, as_of: pd.Timestamp
+) -> dict[str, Any]:
+    """Phase 10's `weekly_review` job: the most recent `_WEEKLY_WINDOW_TRADING_DAYS`
+    distinct trading days on record (`ledger.distinct_trading_days()`, not calendar
+    Mon-Fri) -- a disclosed simplification, same reasoning `day_attribution`'s own
+    module docstring already uses: a short week (a holiday) naturally pulls in one extra
+    prior day instead of under-reporting, and it needs no `Broker`/market-calendar
+    dependency `weekly_review` would otherwise be the only job to need. `as_of` bounds
+    the window from the future (only trading days on or before it count), so a report
+    generated for a specific date is reproducible regardless of when it's re-run.
+
+    Also reports two since-inception counters (total trading days, total reflections) --
+    not a window statistic, but what a human reviewing a pending proposal's own stated
+    evidence ("N trades over M days") needs to eyeball it against real totals, since
+    that stated evidence is freeform prose this module deliberately never parses (see
+    `intraday/playbook.py`'s module docstring).
+    """
+    today = pd.Timestamp(as_of).normalize()
+    all_days = [d for d in ledger.distinct_trading_days() if pd.Timestamp(d) <= today]
+    window_days = sorted(all_days)[-_WEEKLY_WINDOW_TRADING_DAYS:]
+
+    reflections: list[dict[str, Any]] = []
+    scorecards: list[dict[str, Any]] = []
+    for day in window_days:
+        reflections.extend(ledger.reflections_for(day))
+        scorecards.append(process_scorecard(ledger, config, day))
+
+    rejection_rates = [s["rejection_rate"] for s in scorecards]
+    incidents_count = sum(len(s["incidents"]) for s in scorecards)
+
+    return {
+        "window_trading_days": window_days,
+        "pnl_gross": sum(r["content"].get("pnl_gross") or 0.0 for r in reflections),
+        "pnl_net": sum(r["content"].get("pnl_net") or 0.0 for r in reflections),
+        "avg_rejection_rate": sum(rejection_rates) / len(rejection_rates)
+        if rejection_rates
+        else 0.0,
+        "incidents": incidents_count,
+        "calibration": confidence_calibration(ledger),
+        "total_trading_days": len(all_days),
+        "total_reflections": sum(
+            1 for r in ledger.all_reflections() if pd.Timestamp(r["as_of"]) <= today
+        ),
+    }
+
+
+def render_weekly_review_markdown(
+    summary: dict[str, Any],
+    pending: list[Path],
+    due_for_review: list[dict[str, Any]],
+    as_of: pd.Timestamp,
+) -> str:
+    """`reports/YYYY-MM-DD/weekly_review.md` -- surfaces pending playbook proposals and
+    entries due for re-review; never accepts/rejects/retires anything itself (that's
+    `intraday/playbook.py`'s own, separately human-invoked action -- see
+    `jobs.py::run_weekly_review`'s docstring for why)."""
+    lines = [f"# S4 weekly review: {pd.Timestamp(as_of).date()}", ""]
+
+    lines.append("## This week")
+    days = summary["window_trading_days"]
+    lines.append(f"- Trading days covered: {', '.join(days) if days else 'none yet'}")
+    lines.append(f"- P&L gross: {summary['pnl_gross']:,.2f}")
+    lines.append(f"- P&L net (of modeled cost): {summary['pnl_net']:,.2f}")
+    lines.append(f"- Average rejection rate: {summary['avg_rejection_rate']:.1%}")
+    lines.append(f"- Incidents: {summary['incidents']}")
+    if summary["calibration"]:
+        lines.append("- Calibration (all-time):")
+        for bucket in summary["calibration"]:
+            lo, hi = bucket["confidence_range"]
+            lines.append(
+                f"  - [{lo:.2f}, {hi:.2f}]: {bucket['win_rate']:.1%} win rate, n={bucket['n']}"
+            )
+
+    lines.append("")
+    lines.append("## Since inception")
+    lines.append(f"- Trading days run: {summary['total_trading_days']}")
+    lines.append(f"- Reflections recorded: {summary['total_reflections']}")
+
+    lines.append("")
+    lines.append("## Pending playbook proposals")
+    if pending:
+        for path in pending:
+            lines.append(f"- {path.name} -- `semimc intraday playbook accept/reject` to decide")
+    else:
+        lines.append("None pending.")
+
+    lines.append("")
+    lines.append("## Active entries due for re-review")
+    if due_for_review:
+        for row in due_for_review:
+            review_date = pd.Timestamp(row["review_date"]).date()
+            lines.append(f"- Entry {row['id']} (review date {review_date} has passed)")
+    else:
+        lines.append("None due.")
+
+    return "\n".join(lines) + "\n"

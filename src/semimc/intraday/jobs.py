@@ -1,13 +1,20 @@
 """S4's scheduled jobs (`BRIEF_INTRADAY.md`'s "Daily schedule"), Phases 5-6.
 
-Seven of the brief's eight named jobs, given the further split `tasks/todo.md`'s S4
+All eight of the brief's named jobs, given the further split `tasks/todo.md`'s S4
 addendum records: `preflight`, `research`, `preopen`, `open_batch`/`cycle` (one shared
 implementation, `run_cycle`, since they are the same operation -- `open_batch` is just
-the first `cycle` of the day), `carry`, and `eod_review` (Phase 9a/9b). `monitor` (not in
-the brief's original list, but matching its own separate `monitor.py` file) runs
-standalone on a tight, model-free cron and is also the first thing `run_cycle` calls.
-`weekly_review` is Phase 10's job, not built here -- see `tasks/todo.md`'s S4 addendum
-for why.
+the first `cycle` of the day), `carry`, `eod_review` (Phase 9a/9b), and `weekly_review`
+(Phase 10). `monitor` (not in the brief's original list, but matching its own separate
+`monitor.py` file) runs standalone on a tight, model-free cron and is also the first
+thing `run_cycle` calls.
+
+`run_weekly_review` calls no model at all -- confirmed directly against the brief before
+designing it: the schedule table names an agent for `research`/`eod_review` but not for
+`weekly_review`, and "Agent roles" lists exactly three model roles. Accepting/rejecting/
+retiring a playbook proposal is a human action (`intraday/playbook.py`, `cli.py`'s
+`intraday playbook` commands), never called from here -- the brief's own "Ask first:
+Accepting a playbook proposal" and "accepted or rejected by me... not automatically"
+both rule out a cron job doing it.
 
 Every `run_<verb>` function here is a plain function returning a result dataclass, never
 raising for a routine outcome -- the same shape `live/{decide,execute,mark}.py` already
@@ -162,6 +169,12 @@ class PreflightResult:
     passed: bool
     failures: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Phase 10: `ledger.current_playbook_version()`, `None` before any acceptance. Kept
+    # separate from `notes` deliberately -- every `notes` entry is logged as a `"warning"`
+    # incident below, and "playbook version 5 loaded" is routine information, not a
+    # warning worth polluting the incident log (and therefore every later eod_review's
+    # incident count) with on every single preflight run.
+    playbook_version: int | None = None
 
 
 def run_preflight(
@@ -190,8 +203,11 @@ def run_preflight(
     always a mismatch before the registration itself happens at go-live). Once
     `trading_enabled` flips `True`, those same findings (kill switch, account mismatch,
     account status) become real failures again -- by then none of them should still be
-    true, so if one is, it means something. "Playbook version loaded" (brief) is skipped
-    -- no `PLAYBOOK.md` exists before Phase 9.
+    true, so if one is, it means something. "Playbook version loaded" (brief) is
+    reported via `PreflightResult.playbook_version` (Phase 10, `ledger.
+    current_playbook_version()`) -- always informational, never a failure; an empty
+    playbook is normal for a long time, the same reasoning every other pre-go-live
+    finding here is already treated as routine.
     """
     pretrade_results = check_intraday_pretrade(
         IntradayPretradeContext(now=now, config=config, broker=broker)
@@ -223,7 +239,12 @@ def run_preflight(
     for failure in failures:
         ledger.record_incident("error", failure)
 
-    return PreflightResult(passed=not failures, failures=failures, notes=notes)
+    return PreflightResult(
+        passed=not failures,
+        failures=failures,
+        notes=notes,
+        playbook_version=ledger.current_playbook_version(),
+    )
 
 
 # -- research (Phase 6) ------------------------------------------------------------------
@@ -722,6 +743,12 @@ def run_cycle(
             status,
             payload=proposal.model_dump(),
             reason=reason,
+            # Phase 10: stamped mechanically, not asked of the Trader -- which playbook
+            # version was active is a fact about when this call happened, not a
+            # judgment call. Its own column, not folded into `payload` -- see
+            # `record_proposal`'s own docstring for why that would break
+            # `TradeProposal(**payload)` reconstruction elsewhere.
+            playbook_version=ledger.current_playbook_version(),
         )
         if failures:
             result.proposals_rejected += 1
@@ -1189,4 +1216,56 @@ def run_eod_review(
         report_path=str(out_path),
         reflections_updated=updated,
         playbook_proposal_written=proposal_written,
+    )
+
+
+@dataclass(frozen=True)
+class WeeklyReviewResult:
+    report_path: str | None = None
+    pending_proposals: int = 0
+    entries_due_for_review: int = 0
+
+
+def run_weekly_review(
+    config: Config, ledger: IntradayLedger, as_of: pd.Timestamp
+) -> WeeklyReviewResult:
+    """Friday 15:45: surfaces the week's numbers, any pending playbook proposals, and any
+    active entries whose review date has passed -- and nothing more. No broker, no LLM
+    client, no market data: confirmed directly against the brief before writing this
+    (see module docstring) that `weekly_review` names no agent, so there is no judgment
+    call for this function to make. Accepting/rejecting/retiring stays a separate,
+    human-invoked action (`intraday/playbook.py`) run whenever the user actually does
+    their weekly review -- never called from here, and not gated to Friday either.
+
+    No idempotency guard, unlike `run_eod_review` -- this only aggregates and renders; a
+    second same-day run just overwrites the same report file with the same numbers,
+    unlike `eod_review`'s reflection-grading side effects.
+    """
+    # Local imports: `review.py`/`playbook.py` both import *from* this module at their
+    # own top level in spirit (review.py imports `turnover_so_far_usd`), so importing
+    # them back at jobs.py's own top level risks the same circular import
+    # `run_eod_review`'s own comment already explains. Deferred to call time is safe
+    # for the identical reason.
+    from .playbook import pending_proposal_paths
+    from .review import render_weekly_review_markdown, weekly_summary
+
+    intraday = config.intraday
+    summary = weekly_summary(ledger, intraday, as_of)
+    pending = pending_proposal_paths(config, ledger)
+    today = pd.Timestamp(as_of).normalize()
+    due_for_review = [
+        row
+        for row in ledger.active_playbook_entries()
+        if row["review_date"] is not None and pd.Timestamp(row["review_date"]) <= today
+    ]
+
+    text = render_weekly_review_markdown(summary, pending, due_for_review, as_of)
+    out_path = config.path(intraday.reports_dir) / str(today.date()) / "weekly_review.md"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(text, encoding="utf-8")
+
+    return WeeklyReviewResult(
+        report_path=str(out_path),
+        pending_proposals=len(pending),
+        entries_due_for_review=len(due_for_review),
     )

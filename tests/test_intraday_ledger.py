@@ -451,4 +451,98 @@ def test_total_realized_cash_flow_is_zero_with_no_fills(tmp_path):
     ledger = _ledger(tmp_path)
     assert ledger.total_realized_cash_flow() == pytest.approx(0.0)
     ledger.close()
+
+
+# -- playbook (S4, Phase 10) --------------------------------------------------------------
+
+
+def test_record_playbook_decision_round_trips_an_acceptance(tmp_path):
+    ledger = _ledger(tmp_path)
+    entry_id = ledger.record_playbook_decision(
+        "active",
+        "size cap: never open a position over 10% of equity",
+        "proposals/2026-09-21.md",
+        adopted_at=AS_OF,
+        review_date=pd.Timestamp("2026-10-21"),
+    )
+    entry = ledger.get_playbook_entry(entry_id)
+    assert entry is not None
+    assert entry["status"] == "active"
+    assert entry["source_proposal_path"] == "proposals/2026-09-21.md"
+    assert entry["resolution_reason"] is None
+    ledger.close()
+
+
+def test_get_playbook_entry_is_none_for_an_unknown_id(tmp_path):
+    ledger = _ledger(tmp_path)
+    assert ledger.get_playbook_entry(999) is None
+    ledger.close()
+
+
+def test_active_playbook_entries_excludes_rejected_and_retired(tmp_path):
+    ledger = _ledger(tmp_path)
+    active_id = ledger.record_playbook_decision(
+        "active", "rule A", "proposals/a.md", adopted_at=AS_OF, review_date=AS_OF
+    )
+    ledger.record_playbook_decision(
+        "rejected", "rule B", "proposals/b.md", resolution_reason="not enough evidence"
+    )
+    retired_id = ledger.record_playbook_decision(
+        "active", "rule C", "proposals/c.md", adopted_at=AS_OF, review_date=AS_OF
+    )
+    ledger.update_playbook_entry_status(retired_id, "retired", AS_OF, "stopped holding")
+
+    active = ledger.active_playbook_entries()
+    assert [row["id"] for row in active] == [active_id]
+    assert len(ledger.all_playbook_entries()) == 3
+    ledger.close()
+
+
+def test_update_playbook_entry_status_sets_resolution_fields(tmp_path):
+    ledger = _ledger(tmp_path)
+    entry_id = ledger.record_playbook_decision(
+        "active", "rule A", "proposals/a.md", adopted_at=AS_OF, review_date=AS_OF
+    )
+    ledger.update_playbook_entry_status(entry_id, "retired", AS_OF, "stopped holding")
+    entry = ledger.get_playbook_entry(entry_id)
+    assert entry["status"] == "retired"
+    assert entry["resolution_reason"] == "stopped holding"
+    assert entry["resolved_at"] is not None
+    ledger.close()
+
+
+def test_current_playbook_version_is_none_before_any_version_recorded(tmp_path):
+    ledger = _ledger(tmp_path)
+    assert ledger.current_playbook_version() is None
+    ledger.close()
+
+
+def test_record_playbook_version_and_current_playbook_version(tmp_path):
+    ledger = _ledger(tmp_path)
+    entry_id = ledger.record_playbook_decision(
+        "active", "rule A", "proposals/a.md", adopted_at=AS_OF, review_date=AS_OF
+    )
+    v1 = ledger.record_playbook_version("# PLAYBOOK.md\n\nrule A", "accepted", entry_id)
+    assert ledger.current_playbook_version() == v1
+    v2 = ledger.record_playbook_version("# PLAYBOOK.md\n\n(empty)", "retired", entry_id)
+    assert v2 > v1
+    assert ledger.current_playbook_version() == v2
+    ledger.close()
+
+
+def test_distinct_trading_days_spans_proposals_reflections_and_briefs(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_brief(pd.Timestamp("2026-09-18"), {"summary": "quiet"})
+    ledger.record_proposal(
+        pd.Timestamp("2026-09-19"), "cycle_1", "NVDA", "open", "accepted", payload={}
+    )
+    ledger.record_reflection(pd.Timestamp("2026-09-21"), "NVDA", content={"pnl_net": 10.0})
+    assert ledger.distinct_trading_days() == ["2026-09-18", "2026-09-19", "2026-09-21"]
+    ledger.close()
+
+
+def test_distinct_trading_days_is_empty_with_no_activity(tmp_path):
+    ledger = _ledger(tmp_path)
+    assert ledger.distinct_trading_days() == []
+    ledger.close()
     ledger.close()

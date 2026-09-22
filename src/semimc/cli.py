@@ -1867,12 +1867,19 @@ def intraday_preflight(
     finally:
         ledger.close()
 
+    version_line = (
+        f"Playbook version: {result.playbook_version}"
+        if result.playbook_version is not None
+        else "Playbook version: none adopted yet"
+    )
     if result.passed:
         typer.echo("Preflight: passed")
+        typer.echo(f"  {version_line}")
         for note in result.notes:
             typer.echo(f"  (routine) {note}")
         return
     typer.secho("Preflight: failed", fg=typer.colors.RED)
+    typer.echo(f"  {version_line}")
     for failure in result.failures:
         typer.echo(f"  - {failure}")
     for note in result.notes:
@@ -2163,6 +2170,169 @@ def intraday_eod_review(
     typer.echo(f"Reflections graded: {result.reflections_updated}")
     if result.playbook_proposal_written:
         typer.echo("Playbook proposal written to proposals/")
+
+
+@intraday_app.command("weekly-review")
+def intraday_weekly_review(
+    as_of: IntradayAsOfOption = None,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Friday 15:45: writes `reports/YYYY-MM-DD/weekly_review.md` -- the week's numbers,
+    any pending playbook proposals, and any active entries due for re-review
+    (`run_weekly_review`, Phase 10). No model call; never accepts, rejects, or retires
+    anything itself -- see `intraday playbook`'s own commands for that.
+    """
+    cfg = _setup(config, set_, verbose)
+    from .intraday.jobs import run_weekly_review
+    from .intraday.ledger import IntradayLedger
+
+    as_of_ts = _intraday_as_of(as_of)
+    ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    try:
+        result = run_weekly_review(cfg, ledger, as_of_ts)
+    finally:
+        ledger.close()
+
+    typer.echo(f"Wrote {result.report_path}")
+    typer.echo(f"Pending playbook proposals: {result.pending_proposals}")
+    typer.echo(f"Entries due for re-review: {result.entries_due_for_review}")
+
+
+# -- S4's playbook: human accept/reject/retire actions (BRIEF_INTRADAY.md's
+# "Self-improvement rules", Phase 10). Deliberately never called from a cron job -- the
+# brief's own "Ask first: Accepting a playbook proposal" and "accepted or rejected by
+# me... not automatically" both rule that out. See intraday/playbook.py's own docstring.
+
+playbook_app = typer.Typer(help="Accept, reject, or retire a playbook proposal.")
+intraday_app.add_typer(playbook_app, name="playbook")
+
+
+@playbook_app.command("pending")
+def playbook_pending(
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """List playbook proposals not yet accepted or rejected."""
+    cfg = _setup(config, set_, verbose)
+    from .intraday.ledger import IntradayLedger
+    from .intraday.playbook import pending_proposal_paths
+
+    ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    try:
+        paths = pending_proposal_paths(cfg, ledger)
+    finally:
+        ledger.close()
+
+    if not paths:
+        typer.echo("No pending proposals.")
+        return
+    for path in paths:
+        typer.echo(str(path))
+
+
+@playbook_app.command("accept")
+def playbook_accept(
+    date: Annotated[
+        str, typer.Option("--date", help="Proposal date, YYYY-MM-DD (proposals/<date>.md).")
+    ],
+    evidence_trading_days: Annotated[
+        int | None,
+        typer.Option("--evidence-trading-days", help="Trading days of evidence behind it."),
+    ] = None,
+    evidence_trades: Annotated[
+        int | None, typer.Option("--evidence-trades", help="Relevant trades of evidence behind it.")
+    ] = None,
+    bug_fix: Annotated[
+        bool, typer.Option("--bug-fix", help="Exempt from the evidence bar (a bug or process fix).")
+    ] = False,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Accept `proposals/<date>.md`, writing a new `PLAYBOOK.md` version. Requires
+    `--bug-fix` or one of `--evidence-trading-days`/`--evidence-trades` to meet the
+    configured minimum (BRIEF_INTRADAY.md's own "at least 10 trading days or 20 relevant
+    trades... unless it is a bug or process fix") -- never inferred from the proposal's
+    own text.
+    """
+    cfg = _setup(config, set_, verbose)
+    from .intraday.ledger import IntradayLedger
+    from .intraday.playbook import PlaybookEvidenceError, accept_proposal
+
+    now = _intraday_now(cfg)
+    ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    try:
+        version = accept_proposal(
+            cfg,
+            ledger,
+            date,
+            evidence_trading_days=evidence_trading_days,
+            evidence_trades=evidence_trades,
+            bug_fix=bug_fix,
+            now=now,
+        )
+    except PlaybookEvidenceError as exc:
+        typer.secho(f"Not accepted: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from None
+    finally:
+        ledger.close()
+
+    typer.echo(f"Accepted. PLAYBOOK.md is now version {version}.")
+
+
+@playbook_app.command("reject")
+def playbook_reject(
+    date: Annotated[
+        str, typer.Option("--date", help="Proposal date, YYYY-MM-DD (proposals/<date>.md).")
+    ],
+    reason: Annotated[str, typer.Option("--reason", help="Why this proposal was rejected.")],
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Reject `proposals/<date>.md`. Never touches `PLAYBOOK.md`."""
+    cfg = _setup(config, set_, verbose)
+    from .intraday.ledger import IntradayLedger
+    from .intraday.playbook import reject_proposal
+
+    ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    try:
+        entry_id = reject_proposal(cfg, ledger, date, reason)
+    finally:
+        ledger.close()
+
+    typer.echo(f"Rejected (entry {entry_id}).")
+
+
+@playbook_app.command("retire")
+def playbook_retire(
+    entry_id: Annotated[
+        int, typer.Option("--entry-id", help="The active playbook_entries row id to retire.")
+    ],
+    reason: Annotated[str, typer.Option("--reason", help="Why this rule stopped holding.")],
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Retire a currently-active playbook entry, writing a new `PLAYBOOK.md` version."""
+    cfg = _setup(config, set_, verbose)
+    from .intraday.ledger import IntradayLedger
+    from .intraday.playbook import retire_entry
+
+    now = _intraday_now(cfg)
+    ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    try:
+        version = retire_entry(cfg, ledger, entry_id, reason, now)
+    except ValueError as exc:
+        typer.secho(f"Not retired: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from None
+    finally:
+        ledger.close()
+
+    typer.echo(f"Retired. PLAYBOOK.md is now version {version}.")
 
 
 # -- S4's placebo agent (BRIEF_INTRADAY.md's "Placebo agent", THESES.md's T6, Phase 7) ---
