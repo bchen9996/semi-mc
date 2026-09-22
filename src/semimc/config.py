@@ -481,6 +481,13 @@ class IntradayConfig(_Base):
     # is already separate from paper.ledger_path: its own git commits must never contend
     # with the real loop's commits on the same file.
     shadow_ledger_path: str = "ledger/intraday_shadow.sqlite3"
+    # `eod_review`'s report output (Phase 9a) -- config-relative, resolved via
+    # `Config.path()`, same as every path above. Deliberately not a hardcoded
+    # `"reports/..."` literal in cli.py: CLAUDE.md's own "Gotchas" already documents the
+    # exact failure this avoids -- `signals --holdout` once wrote into the real repo's
+    # research_log.md during a fixture-based CLI test because it resolved a path off
+    # `project_root` directly instead of through a `--set`-overridable config field.
+    reports_dir: str = "reports"
 
 
 class ReportingConfig(_Base):

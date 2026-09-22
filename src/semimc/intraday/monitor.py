@@ -25,6 +25,7 @@ from .orders import (
     find_and_cancel_resting_stop,
     submit_order_with_fault_isolation,
 )
+from .reflect import record_mechanical_reflection
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,10 @@ def check_invalidation_and_time_stops(
     safely, is left alone and logged as an incident rather than guessed at -- the same
     "never act on incomplete information" caution `execution/pretrade.py` uses
     elsewhere.
+
+    A confirmed close also records a mechanical reflection (`reflect.py`, Phase 9a) tagged
+    `"invalidation"` or `"time_stop"` -- the qualitative fields (category, process grade)
+    stay `None` until Phase 9b's `eod_review` batches them in.
 
     An invalidation-triggered close (never a time-stop close, which isn't necessarily a
     loss) also records an incident message prefixed ``"stopout:{symbol}"`` -- the brief's
@@ -117,11 +122,20 @@ def check_invalidation_and_time_stops(
 
         find_and_cancel_resting_stop(symbol, broker, ledger)
         close_request = build_close_order(position, as_of, cycle, price, config)
-        submit_order_with_fault_isolation(
+        submitted = submit_order_with_fault_isolation(
             close_request, broker, ledger, now, proposal_id=entry["proposal_id"], leg="exit"
         )
         if stopped_out:
             ledger.record_incident("warning", f"stopout:{symbol}")
+        if submitted is not None:
+            record_mechanical_reflection(
+                symbol,
+                submitted.client_order_id,
+                "invalidation" if stopped_out else "time_stop",
+                ledger,
+                config,
+                as_of,
+            )
         closed.append(symbol)
 
     return MonitorResult(closed=closed, still_open=still_open)

@@ -1409,6 +1409,110 @@ Built:
 - [x] No `.github/workflows/intraday_trading.yml` change and no `THESES.md` change -- this
       phase adds no job, no cron, and doesn't touch T6's claim or status.
 
+**Phase 9a -- mechanical reflections + the eod_review report skeleton, built
+2026-09-22.** The request was "go ahead to phase 9," the roadmap's own bucket for
+reflections, `eod_review`, `weekly_review`, and `PLAYBOOK.md`. Researching it directly
+found this was too large for one phase, the same way Phase 4/5's own buckets kept
+splitting once actually scoped -- so it split again: this phase builds everything that's
+pure computation; the Reviewer's actual model call moves to **9b**, `weekly_review`/
+`PLAYBOOK.md` to **10** (was the second half of "Phase 9"), and the rollout stages
+renumber **10 -> 11**.
+
+Two findings, both confirmed by reading the code rather than assumed, drove the split
+and the design:
+
+1. `BRIEF_INTRADAY.md`'s "Agent roles" section names exactly three model roles
+   (Researcher, Trader, Reviewer) -- no separate "Reflector" role exists, and Reviewer's
+   own description already says it "grades process." So a reflection's *qualitative*
+   fields (category, process grade, lesson) are the Reviewer's job, batched into its one
+   daily `eod_review` call (Phase 9b) -- not a new per-close call, which would also blow
+   past the brief's own "roughly 20 cycles a day plus two long jobs" cost shape. This
+   phase computes and stores everything that *doesn't* need that judgment call.
+2. Finding which entry a given close belongs to can't reliably use the closing order's
+   own `proposal_id`: `monitor.py`'s close reuses the *entry's* `proposal_id`, but
+   `run_cycle`'s Trader-issued close/trim attaches the *new* close-action proposal's own
+   id instead -- confirmed by reading both paths directly. `ledger.py::
+   latest_filled_entry_for(symbol)` (already built in Phase 5) is the one uniform way to
+   always find the entry, regardless of which path closed the position.
+
+Built:
+
+- [x] `intraday/reflect.py` (new) -- `record_mechanical_reflection`: P&L gross/net of
+      modeled cost (reusing `risk.equity_cost_bps_per_side`, the same figure
+      `validate_proposal`'s own min-edge gate already enforces), whether the invalidation
+      level was respected, and time in trade -- all from `orders`/`fills`/`proposals`
+      rows already in the ledger. Category/process_grade/lesson are left `None` for
+      Phase 9b. Sums every tranche of a tranched entry (`ledger.orders_for_proposal`,
+      new) rather than trusting `latest_filled_entry_for`'s own "most recent" row alone,
+      which would silently miss earlier tranches' fills.
+      **Found and fixed a real bug during implementation**: an invalidation-triggered
+      close's exit price is, by construction, at or through the invalidation level (that
+      is what fired it) -- an early version of "was invalidation respected" compared
+      exit price to the level unconditionally and scored every real stop-out as a
+      violation. Fixed: `close_reason == "invalidation"` is always `True` (the system did
+      its job and reacted); every other close reason checks whether the exit price ever
+      reached the level at all.
+- [x] `intraday/ledger.py`: `orders_for_proposal(proposal_id, leg=None)` (new, for the
+      tranche-summing above).
+- [x] Wired into all three close-producing paths: `intraday/monitor.py`'s own close,
+      `intraday/jobs.py::run_cycle`'s `trim`/`close` branches, and `run_carry`'s two close
+      points -- each tagged with its own `close_reason` (`"invalidation"`/`"time_stop"`/
+      `"trader_trim"`/`"trader_close"`/`"carry"`). `jobs.py::_original_proposal_payload`
+      is now a thin wrapper around `reflect.py`'s own entry-lookup -- one shared
+      implementation, not two independently-maintained copies of "find the entry that
+      opened this position."
+- [x] `intraday/eod_report.py` (new) -- `build_eod_report`/`render_eod_markdown`, mirroring
+      `live/report.py`'s own shape exactly (gathers everything through `IntradayLedger`'s
+      read methods, no SQL above this layer). Builds the blotter (proposals + reflections),
+      P&L gross/net/pessimistic (summed directly from each reflection's own already-
+      computed fields, so this can never drift out of sync with what each trade reports),
+      and best-effort benchmarks for the day (SOXX buy-and-hold, S0's own day return from
+      `live.Ledger`'s snapshots). "Pessimistic" has no existing convention to reuse --
+      `semis_paper_trading_brief.md` (what the brief cites for it) was never committed to
+      this repo (`CLAUDE.md`'s own dangling-citation note) -- so this treats it as net P&L
+      under double the modeled cost assumption, a labeled interpretation, not a fabricated
+      figure dressed up as the real thing. Closing market report, process scorecard, and
+      playbook changes render as an explicit "not yet built (Phase 9b)" placeholder.
+- [x] `config.py::IntradayConfig.reports_dir` (new, default `"reports"`) -- resolved via
+      `Config.path()`, not a literal `"reports/..."` string in `cli.py`: exactly the
+      failure mode `CLAUDE.md`'s own Gotchas section already documents (`signals
+      --holdout` once wrote into the real repo's `research_log.md` this same way).
+- [x] `cli.py`: `semimc intraday eod-review`, manual/testing use only -- **not** wired
+      into `.github/workflows/intraday_trading.yml`'s cron this phase, since the brief's
+      one `eod_review` slot combines this report with the Reviewer's own call, and
+      scheduling (and committing) a report missing half its sections isn't worth a cron
+      entry before Phase 9b completes it.
+- [x] `intraday/jobs.py::_premarket_moves` -> `premarket_moves` (dropped the leading
+      underscore, same reasoning Phase 7 already used renaming `_turnover_so_far_usd`) --
+      `eod_report.py`'s SOXX benchmark is a second real caller; the function's own logic
+      ("prior cached close to whatever quote is live right now") already gives a full
+      day's return when called near/after close, not just pre-market.
+      **Found and fixed a self-shadowing bug during the rename**: the local variable
+      inside `run_research` was also named `premarket_moves`, so after the rename it
+      would have shadowed the function itself in the very next line that used it (the
+      call into `build_researcher_context`) -- caught by re-running `run_research`'s own
+      tests immediately after the rename, before touching anything else, the same
+      discipline that caught the identical class of bug in Phase 7.
+- [x] Manually ran `semimc intraday eod-review --config config/paper.yaml` against the
+      real (still nearly-empty) ledger: rendered a sane, all-"not available"/"no activity"
+      report with no crash, including a real S0 benchmark computed from the real
+      `paper.sqlite3` and a graceful "SOXX benchmark unavailable" message when
+      `ALPACA_S4_API_KEY` wasn't set locally -- the generated file was a disposable
+      verification artifact, not committed.
+- [x] Tests: `tests/test_intraday_reflect.py` (new, 9 tests) -- gross/net P&L for a long
+      and a short, the invalidation-respected fix's own two cases (system-triggered vs.
+      discretionary), multi-tranche summing, finding the entry via `latest_filled_entry_for`
+      even when the close has a different `proposal_id`, and graceful `None` returns with
+      no traceable entry or no exit fill yet. `tests/test_intraday_eod_report.py` (new,
+      5 tests) -- empty-day sanity, P&L summed correctly from seeded reflections,
+      `s0_day_return`'s prior/today snapshot selection. Extended
+      `tests/test_intraday_monitor.py`/`tests/test_intraday_jobs.py` with a reflection
+      recorded (with the right `close_reason`) for a monitor close, a Trader close, a
+      Trader trim, and a carry close. Extended `tests/test_cli_intraday.py` with an
+      `eod-review` smoke test that explicitly redirects `intraday.reports_dir` and
+      `paper.ledger_path` to `tmp_path` -- the same gotcha-avoidance the new config field
+      itself exists for, verified in the test that would otherwise trip it.
+
 **Remaining prerequisites** -- what Phase 0 didn't (and couldn't) resolve:
 
 1. **The owner still needs to actually create the second Alpaca paper account** and add

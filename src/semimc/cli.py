@@ -38,7 +38,7 @@ intraday_app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
     help="S4 intraday agent jobs: preflight, research, preopen, monitor, open-batch, "
-    "cycle, carry (BRIEF_INTRADAY.md).",
+    "cycle, carry, eod-review (BRIEF_INTRADAY.md).",
 )
 app.add_typer(intraday_app, name="intraday")
 
@@ -2103,6 +2103,69 @@ def intraday_carry(
         typer.secho(
             f"Closed for overnight cap: {', '.join(result.closed_for_cap)}", fg=typer.colors.YELLOW
         )
+
+
+@intraday_app.command("eod-review")
+def intraday_eod_review(
+    as_of: IntradayAsOfOption = None,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """The reporting half of `eod_review` (Phase 9a) -- writes `reports/YYYY-MM-DD/
+    eod.md`: the day's blotter, P&L, and best-effort benchmarks (SOXX, S0's own day
+    return). The Reviewer's own synthesis (closing market report, process scorecard,
+    playbook-change proposals) isn't built yet (Phase 9b) and renders as an explicit
+    placeholder rather than a fabricated section.
+
+    Manual/testing use only -- not wired into `.github/workflows/intraday_trading.yml`'s
+    cron yet. The brief's schedule has one `eod_review` slot combining this report with
+    the Reviewer's own call; scheduling a report missing half its sections (and
+    restructuring it again next phase) isn't worth a cron entry until the full command
+    exists.
+    """
+    cfg = _setup(config, set_, verbose)
+    from .data import load_market_data
+    from .intraday.eod_report import DayBenchmarks, build_eod_report, render_eod_markdown
+    from .intraday.jobs import premarket_moves
+    from .intraday.ledger import IntradayLedger
+    from .live.ledger import Ledger as PaperLedger
+
+    as_of_ts = _intraday_as_of(as_of)
+    now = _intraday_now(cfg)
+    ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    try:
+        soxx_return = None
+        try:
+            market_data_pit = load_market_data(cfg, tickers=["SOXX"])
+            market_data = _intraday_market_data()
+            moves = premarket_moves(["SOXX"], market_data_pit, market_data, now)
+            soxx_return = moves.get("SOXX")
+        except Exception as exc:  # noqa: BLE001 -- a benchmark must never block the report
+            typer.secho(f"SOXX benchmark unavailable: {exc}", fg=typer.colors.YELLOW)
+
+        s0_return = None
+        try:
+            from .intraday.eod_report import s0_day_return
+
+            paper_ledger = PaperLedger(cfg.path(cfg.paper.ledger_path))
+            try:
+                s0_return = s0_day_return(paper_ledger, as_of_ts)
+            finally:
+                paper_ledger.close()
+        except Exception as exc:  # noqa: BLE001 -- same reasoning as the SOXX benchmark
+            typer.secho(f"S0 benchmark unavailable: {exc}", fg=typer.colors.YELLOW)
+
+        report = build_eod_report(
+            ledger, as_of_ts, benchmarks=DayBenchmarks(soxx_return=soxx_return, s0_return=s0_return)
+        )
+    finally:
+        ledger.close()
+
+    out_path = cfg.path(cfg.intraday.reports_dir) / str(as_of_ts.date()) / "eod.md"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(render_eod_markdown(report), encoding="utf-8")
+    typer.echo(f"Wrote {out_path}")
 
 
 # -- S4's placebo agent (BRIEF_INTRADAY.md's "Placebo agent", THESES.md's T6, Phase 7) ---

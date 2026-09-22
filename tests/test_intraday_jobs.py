@@ -586,6 +586,9 @@ def test_run_cycle_close_proposal_cancels_the_resting_stop_and_exits(config, tmp
     assert broker.list_positions() == []
     assert broker.get_order_by_client_id(resting_stop["client_order_id"]).status == "canceled"
     assert len(result.orders_submitted) == 1
+    reflections = ledger.reflections_for(AS_OF)
+    assert len(reflections) == 1
+    assert reflections[0]["content"]["close_reason"] == "trader_close"
     ledger.close()
 
 
@@ -611,6 +614,9 @@ def test_run_cycle_trim_proposal_reprotects_the_remainder_at_the_original_invali
     assert new_stop["broker_order_id"] is not None
     stop_order = broker.get_order_by_client_id(new_stop["client_order_id"])
     assert stop_order.status in ("new", "accepted")
+    reflections = ledger.reflections_for(AS_OF)
+    assert len(reflections) == 1
+    assert reflections[0]["content"]["close_reason"] == "trader_trim"
     ledger.close()
 
 
@@ -810,6 +816,9 @@ def test_run_carry_closes_an_intraday_horizon_position(config, tmp_path):
 
     assert result.closed == ["NVDA"]
     assert broker.list_positions() == []
+    reflections = ledger.reflections_for(AS_OF)
+    assert len(reflections) == 1
+    assert reflections[0]["content"]["close_reason"] == "carry"
     ledger.close()
 
 

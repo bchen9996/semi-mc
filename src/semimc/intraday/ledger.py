@@ -465,6 +465,25 @@ class IntradayLedger:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def orders_for_proposal(self, proposal_id: int, leg: str | None = None) -> list[dict[str, Any]]:
+        """Every order recorded against ``proposal_id``, optionally filtered to one
+        ``leg`` (S4, Phase 9a) -- needed because a single accepted proposal can produce
+        more than one ``leg='entry'`` order once `entry_tranches` > 1 (Phase 5): summing
+        a tranched entry's true filled qty/notional means reading every tranche's own
+        order row, not just the most recent one (`latest_filled_entry_for`'s own
+        "singular" convention is right for finding *the proposal*, since every tranche
+        shares the same `proposal_id`, but wrong for summing fills)."""
+        if leg is None:
+            rows = self._conn.execute(
+                "SELECT * FROM orders WHERE proposal_id = ? ORDER BY id", (proposal_id,)
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM orders WHERE proposal_id = ? AND leg = ? ORDER BY id",
+                (proposal_id, leg),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def record_fill(
         self, client_order_id: str, qty: float, price: float, filled_at: dt.datetime
     ) -> int:

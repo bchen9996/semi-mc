@@ -50,6 +50,7 @@ from .orders import (
 )
 from .pretrade import IntradayPretradeContext, check_intraday_pretrade, check_spread_gate
 from .proposals import OPEN_OR_ADD_ACTIONS, TradeProposal, ValidationContext, validate_proposal
+from .reflect import _entry_and_proposal, record_mechanical_reflection
 from .security import sanitize_and_log
 
 
@@ -113,12 +114,12 @@ def _apply_spread_gate(
 def _original_proposal_payload(ledger: IntradayLedger, symbol: str) -> dict[str, Any] | None:
     """The payload of the proposal that opened `symbol`'s currently-held position, if
     traceable -- what `run_cycle`'s trim path (the remainder's invalidation level) and
-    `run_carry` (a carried position's horizon/confidence) both read."""
-    entry = ledger.latest_filled_entry_for(symbol)
-    if entry is None or entry["proposal_id"] is None:
-        return None
-    proposal_row = ledger.get_proposal(entry["proposal_id"])
-    return proposal_row["payload"] if proposal_row is not None else None
+    `run_carry` (a carried position's horizon/confidence) both read. Thin wrapper around
+    `reflect.py::_entry_and_proposal`, the same lookup `record_mechanical_reflection`
+    uses (Phase 9a) -- one shared implementation, not two independently-maintained
+    copies of "find the entry that opened this position.\""""
+    found = _entry_and_proposal(ledger, symbol)
+    return found[1]["payload"] if found is not None else None
 
 
 def turnover_so_far_usd(ledger: IntradayLedger, as_of: pd.Timestamp, equity: float) -> float:
@@ -221,18 +222,25 @@ def run_preflight(
 # -- research (Phase 6) ------------------------------------------------------------------
 
 
-def _premarket_moves(
+def premarket_moves(
     tickers: list[str],
     market_data_pit: MarketData,
     market_data: AlpacaMarketDataClient,
     now: dt.datetime,
 ) -> dict[str, float]:
-    """Percent move from the last cached close to the latest Alpaca quote right now.
+    """Percent move from the last cached close to the latest Alpaca quote at `now`.
     `market_data_pit`'s cache is refreshed by the workflow's own `semimc fetch` step
     before `research` runs and today's session hasn't opened yet, so its most recent
     cached row already *is* the prior close -- no separate "yesterday" lookup needed. A
     ticker missing either side is simply absent, same "a single missing quote must not
-    crash a whole report" tolerance `quote_map` already uses."""
+    crash a whole report" tolerance `quote_map` already uses.
+
+    Despite the name, the same call also gives a full day's return when `now` is near or
+    after the close -- "prior cached close to whatever quote is live right now" doesn't
+    care what time of day it's called at. `eod_report.py`'s SOXX benchmark (Phase 9a)
+    reuses it exactly this way, which is also why this dropped its leading underscore --
+    a second real caller outside `jobs.py`, not `jobs.py`-private anymore (same reasoning
+    Phase 7 already used renaming `_turnover_so_far_usd`)."""
     prior_close = market_data_pit.spot(tickers)
     moves: dict[str, float] = {}
     for ticker in tickers:
@@ -379,7 +387,7 @@ def run_research(
         for article in capped_articles
     ]
 
-    premarket_moves = _premarket_moves(tickers, market_data_pit, market_data, now)
+    premarket_moves_today = premarket_moves(tickers, market_data_pit, market_data, now)
     upcoming_earnings = _upcoming_earnings(
         tickers, market_data_pit, as_of, research_cfg.earnings_lookahead_days
     )
@@ -387,7 +395,13 @@ def run_research(
 
     try:
         context = build_researcher_context(
-            as_of, cycle, intraday, news_sections, premarket_moves, upcoming_earnings, realized_vol
+            as_of,
+            cycle,
+            intraday,
+            news_sections,
+            premarket_moves_today,
+            upcoming_earnings,
+            realized_vol,
         )
         response = invoke_role(
             "researcher",
@@ -761,6 +775,9 @@ def run_cycle(
                 result.order_failures.append(f"{proposal.symbol}: trim order failed")
                 continue
             result.orders_submitted.append(submitted.client_order_id)
+            record_mechanical_reflection(
+                proposal.symbol, submitted.client_order_id, "trader_trim", ledger, intraday, as_of
+            )
 
             remaining_qty = abs(position.qty) - abs(trim_request.qty)
             original_payload = _original_proposal_payload(ledger, proposal.symbol) or {}
@@ -795,6 +812,14 @@ def run_cycle(
             )
             if submitted is not None:
                 result.orders_submitted.append(submitted.client_order_id)
+                record_mechanical_reflection(
+                    proposal.symbol,
+                    submitted.client_order_id,
+                    "trader_close",
+                    ledger,
+                    intraday,
+                    as_of,
+                )
             else:
                 result.order_failures.append(f"{proposal.symbol}: close order failed")
 
@@ -828,7 +853,8 @@ def run_carry(
     unless their aggregate notional exceeds `risk.overnight_gross_cap_pct * equity`, in
     which case the lowest-confidence ones are closed one at a time (a full close, not a
     partial trim -- simpler, and this is already an off-thesis risk-cap action, not a
-    sizing decision) until back under cap.
+    sizing decision) until back under cap. Every close here records a mechanical
+    reflection tagged `"carry"` (`reflect.py`, Phase 9a).
     """
     result = CarryResult()
     intraday = config.intraday
@@ -852,7 +878,13 @@ def run_carry(
             continue
         find_and_cancel_resting_stop(position.symbol, broker, ledger)
         close_request = build_close_order(position, as_of, "carry", price, intraday)
-        submit_order_with_fault_isolation(close_request, broker, ledger, now, leg="exit")
+        submitted = submit_order_with_fault_isolation(
+            close_request, broker, ledger, now, leg="exit"
+        )
+        if submitted is not None:
+            record_mechanical_reflection(
+                position.symbol, submitted.client_order_id, "carry", ledger, intraday, as_of
+            )
         result.closed.append(position.symbol)
 
     carried_candidates.sort(key=lambda item: item[1].get("confidence") or 0.0)
@@ -869,7 +901,13 @@ def run_carry(
             continue
         find_and_cancel_resting_stop(position.symbol, broker, ledger)
         close_request = build_close_order(position, as_of, "carry", price, intraday)
-        submit_order_with_fault_isolation(close_request, broker, ledger, now, leg="exit")
+        submitted = submit_order_with_fault_isolation(
+            close_request, broker, ledger, now, leg="exit"
+        )
+        if submitted is not None:
+            record_mechanical_reflection(
+                position.symbol, submitted.client_order_id, "carry", ledger, intraday, as_of
+            )
         overnight_notional -= abs(position.market_value)
         result.closed_for_cap.append(position.symbol)
 

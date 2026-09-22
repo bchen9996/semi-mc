@@ -201,6 +201,32 @@ def test_carry_runs_cleanly_with_no_positions(tmp_path, fake_intraday_env):
     assert "Carried: (none)" in result.output
 
 
+def test_eod_review_runs_cleanly_and_writes_a_report(tmp_path, fake_intraday_env):
+    """`intraday.reports_dir` and `paper.ledger_path` must both be redirected here --
+    otherwise this command would resolve them against the real project root and either
+    write into the real repo's `reports/` directory or open the real `paper.sqlite3`
+    (`CLAUDE.md`'s own `signals --holdout` gotcha, the exact reason `reports_dir` is a
+    `--set`-overridable config field rather than a literal in `cli.py`)."""
+    result = runner.invoke(
+        app,
+        ["intraday", "eod-review"]
+        + _intraday_overrides(
+            tmp_path,
+            **{
+                "intraday.reports_dir": (tmp_path / "reports").as_posix(),
+                "paper.ledger_path": (tmp_path / "paper.sqlite3").as_posix(),
+            },
+        ),
+    )
+    assert result.exit_code == 0, result.output
+    assert "Wrote" in result.output
+    report_files = list((tmp_path / "reports").rglob("eod.md"))
+    assert len(report_files) == 1
+    content = report_files[0].read_text(encoding="utf-8")
+    assert "No proposals today." in content
+    assert "not yet built (Phase 9b)" in content
+
+
 # -- placebo (T6's control group, Phase 7) -------------------------------------------------
 
 

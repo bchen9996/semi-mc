@@ -211,6 +211,30 @@ def test_a_position_with_no_traceable_entry_is_left_alone(tmp_path):
     ledger.close()
 
 
+def test_records_a_mechanical_reflection_when_closing_through_invalidation(tmp_path):
+    """Phase 9a: a confirmed close writes a reflection via `reflect.py`, tagged
+    `"invalidation"`. `FakeBroker(now=NOW)` -- not the bare default -- matters here
+    specifically because this test is the first to actually read the *closing* order's
+    own `filled_at`, which `submit_order_with_fault_isolation` derives from the broker's
+    clock when the SDK response carries none; the existing tests in this file never
+    cared, since none of them inspect a close's own fill timestamp."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _open_position(broker, ledger, side="buy", invalidation_price=185.0, price=190.0)
+
+    check_invalidation_and_time_stops(
+        IntradayConfig(), broker, ledger, {"NVDA": 184.0}, AS_OF, CYCLE, NOW
+    )
+
+    reflections = ledger.reflections_for(AS_OF)
+    assert len(reflections) == 1
+    content = reflections[0]["content"]
+    assert content["close_reason"] == "invalidation"
+    assert content["invalidation_respected"] is True
+    assert content["category"] is None  # Phase 9b's eod_review fills this in
+    ledger.close()
+
+
 def test_missing_a_current_price_leaves_the_position_open_and_logs_an_incident(tmp_path):
     ledger = _ledger(tmp_path)
     broker = FakeBroker()
