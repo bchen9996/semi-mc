@@ -1848,6 +1848,10 @@ def intraday_preflight(
     re-run their own gates fresh regardless of this command's result, so a missed or
     failed preflight never blocks trading by itself; it exists to surface a dead account
     or feed via GitHub's own failure email before the day's real jobs waste a cycle on it.
+    Exits 0 for a routine, by-design pretrade decline (not yet `trading_enabled`, market
+    not open yet) -- those are printed as "(routine)" notes, not failures, so this command
+    only fails the job (and fires that email) on something actually broken (kill switch,
+    account mismatch, a dead feed, a bad reconciliation). See `run_preflight`'s docstring.
     """
     cfg = _setup(config, set_, verbose)
     from .intraday.jobs import run_preflight
@@ -1865,10 +1869,14 @@ def intraday_preflight(
 
     if result.passed:
         typer.echo("Preflight: passed")
+        for note in result.notes:
+            typer.echo(f"  (routine) {note}")
         return
     typer.secho("Preflight: failed", fg=typer.colors.RED)
     for failure in result.failures:
         typer.echo(f"  - {failure}")
+    for note in result.notes:
+        typer.echo(f"  (routine) {note}")
     raise typer.Exit(code=1)
 
 

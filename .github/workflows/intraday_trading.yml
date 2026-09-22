@@ -38,6 +38,17 @@ name: Intraday trading (S4)
 # the placebo shares those three jobs' exact cadence already, needs no LLM call and no
 # real broker, and folding it in avoids doubling the job/concurrency-group count for a
 # control group that costs nothing extra to run alongside the real one.
+#
+# `research`/`open-batch`/`cycle` (the three jobs that actually call the model, i.e. the
+# ones with ANTHROPIC_API_KEY in their env below) install the `claude` CLI itself via
+# Anthropic's own native installer (code.claude.com/docs/en/setup's "Recommended" tab) --
+# a bare `ubuntu-latest` runner has no more claim to it than the S4 Alpaca/Anthropic
+# secrets did before those were added, and this went undiscovered until the first real
+# run actually tried to spawn `claude` as a subprocess (`intraday/llm.py`). The installer
+# has zero dependencies (unlike the alternative npm package, which needs Node.js 22+) and
+# places the binary at `~/.local/bin/claude`, so each install step also appends that to
+# `$GITHUB_PATH` for the rest of the job. `carry` needs no such step -- it never calls
+# `invoke_role` (run_carry/run_placebo_carry are deterministic, reused close-out logic).
 
 "on":
   workflow_dispatch: {}
@@ -78,8 +89,14 @@ jobs:
       - run: uv sync --locked
       - name: Preflight and commit the ledger
         # A failed preflight is a canary, not a blocker (intraday/jobs.py::run_preflight's
-        # own docstring) -- but `intraday preflight`'s CLI command still exits 1 on
-        # failure, on purpose, so GitHub's own failure email fires here specifically.
+        # own docstring) -- `intraday preflight`'s CLI command exits 1 on a genuine
+        # problem, on purpose, so GitHub's own failure email fires here specifically. A
+        # routine, by-design decline exits 0 and is only printed as a "(routine)" note:
+        # "market is closed" always is at preflight's own pre-market schedule, and every
+        # other pretrade finding (kill switch, account mismatch/status) is routine too
+        # while intraday.trading_enabled is still False, since none of it can be "wrong"
+        # before S4 actually launches. Once trading_enabled flips True, those same
+        # findings become real failures again.
         env:
           ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
           ALPACA_S4_SECRET_KEY: ${{ secrets.ALPACA_S4_SECRET_KEY }}
@@ -120,6 +137,10 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
+      - name: Install the claude CLI
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Research and commit the ledger
         # semimc fetch first -- research reads the shared price cache (realized-vol
         # snapshot, earnings calendar) and this is the first job of the day to need it.
@@ -249,6 +270,10 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
+      - name: Install the claude CLI
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Run the first Trader cycle and the placebo, then commit both ledgers
         env:
           ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
@@ -292,6 +317,10 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
+      - name: Install the claude CLI
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Run a Trader cycle and the placebo, then commit both ledgers
         env:
           ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}

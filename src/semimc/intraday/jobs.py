@@ -142,10 +142,18 @@ def turnover_so_far_usd(ledger: IntradayLedger, as_of: pd.Timestamp, equity: flo
 # -- preflight --------------------------------------------------------------------------
 
 
+# "market is closed" is permanently, unconditionally true for preflight specifically --
+# it runs on its own fixed ~06:45 Central schedule, before the market opens (~08:30) by
+# design, every single day regardless of anything else -- so it never carries information
+# worth a daily failure email and is always a routine note, not a failure.
+_ALWAYS_ROUTINE_PRETRADE_NOTE = "market is closed"
+
+
 @dataclass(frozen=True)
 class PreflightResult:
     passed: bool
     failures: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
 
 def run_preflight(
@@ -160,18 +168,33 @@ def run_preflight(
     `check_intraday_pretrade` (or an order-level check) itself fresh, the same "no job
     trusts a prior job" discipline s0/s3 already use. Exists so a 06:45 GitHub Actions
     failure email catches a dead account or feed before the day's real jobs waste a
-    cycle on it.
+    cycle on it -- which means it must not fire on conditions that are routine and
+    by-design, or the alert stops meaning anything.
 
     Checks: `check_intraday_pretrade` (kill switch, trading_enabled, registered account,
     account status, market open), yesterday's reconciliation status (if any), a
-    market-data smoke test, and (Phase 6) a news-feed smoke test -- `research` runs less
-    than an hour later and would otherwise be the first thing to discover a dead news
-    feed. "Playbook version loaded" (brief) is skipped -- no `PLAYBOOK.md` exists before
-    Phase 9.
+    market-data smoke test, and (Phase 6) a news-feed smoke test. Two kinds of routine
+    decline are logged as `"warning"` incidents in `notes` rather than counted toward
+    `passed`: `_ALWAYS_ROUTINE_PRETRADE_NOTE` (see its own comment), and -- while
+    `config.intraday.trading_enabled` is still `False` -- every other
+    `check_intraday_pretrade` finding, since nothing about an account that isn't live yet
+    can be "wrong" in a way worth an email (an unregistered account is definitionally
+    always a mismatch before the registration itself happens at go-live). Once
+    `trading_enabled` flips `True`, those same findings (kill switch, account mismatch,
+    account status) become real failures again -- by then none of them should still be
+    true, so if one is, it means something. "Playbook version loaded" (brief) is skipped
+    -- no `PLAYBOOK.md` exists before Phase 9.
     """
-    failures = list(
-        check_intraday_pretrade(IntradayPretradeContext(now=now, config=config, broker=broker))
+    pretrade_results = check_intraday_pretrade(
+        IntradayPretradeContext(now=now, config=config, broker=broker)
     )
+    notes = [r for r in pretrade_results if r == _ALWAYS_ROUTINE_PRETRADE_NOTE]
+    remaining = [r for r in pretrade_results if r != _ALWAYS_ROUTINE_PRETRADE_NOTE]
+    if config.intraday.trading_enabled:
+        failures = remaining
+    else:
+        failures = []
+        notes += remaining
 
     reconciliation = ledger.latest_reconciliation()
     if reconciliation is not None and reconciliation["status"] != "ok":
@@ -187,10 +210,12 @@ def run_preflight(
     except Exception as exc:
         failures.append(f"news feed unreachable: {exc}")
 
+    for note in notes:
+        ledger.record_incident("warning", note)
     for failure in failures:
         ledger.record_incident("error", failure)
 
-    return PreflightResult(passed=not failures, failures=failures)
+    return PreflightResult(passed=not failures, failures=failures, notes=notes)
 
 
 # -- research (Phase 6) ------------------------------------------------------------------

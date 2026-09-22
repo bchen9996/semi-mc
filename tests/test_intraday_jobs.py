@@ -201,6 +201,24 @@ def test_run_preflight_passes_when_everything_is_clear(config, tmp_path):
     ledger.close()
 
 
+def test_run_preflight_passes_with_routine_notes_when_not_yet_enabled(config, tmp_path):
+    """`trading_enabled=False` and a closed market are both true every single morning
+    before S4's own rollout -- neither should fail the job or fire a GitHub failure
+    email, unlike a genuine problem (kill switch, a dead feed)."""
+    ledger = _ledger(tmp_path)  # config.intraday.trading_enabled defaults to False
+    broker = FakeBroker(market_open=False)
+    market_data = _FakeMarketData(quotes={"SPY": _quote(500.0)})
+    result = run_preflight(config, broker, market_data, _FakeNewsClient(), ledger, NOW)
+    assert result.passed
+    assert result.failures == []
+    assert "intraday trading is not trading_enabled" in result.notes
+    assert "market is closed" in result.notes
+    incidents = ledger.incidents()
+    assert any(i["severity"] == "warning" and "trading_enabled" in i["message"] for i in incidents)
+    assert not any(i["severity"] == "error" for i in incidents)
+    ledger.close()
+
+
 def test_run_preflight_fails_on_the_kill_switch(config, tmp_path):
     cfg = _tradeable_config(config, tmp_path)
     (tmp_path / "KILL_SWITCH").write_text("stop", encoding="utf-8")
