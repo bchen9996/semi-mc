@@ -488,6 +488,11 @@ class IntradayConfig(_Base):
     # research_log.md during a fixture-based CLI test because it resolved a path off
     # `project_root` directly instead of through a `--set`-overridable config field.
     reports_dir: str = "reports"
+    # The Reviewer's own current playbook and its proposed changes (Phase 9b) -- same
+    # config-relative-via-`Config.path()` reasoning as `reports_dir` just above, not a
+    # `"PLAYBOOK.md"`/`"proposals"` literal in jobs.py.
+    playbook_path: str = "PLAYBOOK.md"
+    proposals_dir: str = "proposals"
 
 
 class ReportingConfig(_Base):

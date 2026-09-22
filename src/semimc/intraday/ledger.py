@@ -617,6 +617,30 @@ class IntradayLedger:
             out.append(data)
         return out
 
+    def update_reflection(self, reflection_id: int, content: dict[str, Any]) -> None:
+        """Overwrites a reflection's `content_json` in place (S4, Phase 9b) -- how
+        `eod_review` fills in `category`/`process_grade`/`lesson` on a row Phase 9a's
+        `reflect.py::record_mechanical_reflection` already created with those fields
+        `None`. Same upsert-by-id shape `save_shadow_broker_state` already uses for a
+        different table."""
+        self._conn.execute(
+            "UPDATE reflections SET content_json = ? WHERE id = ?",
+            (_dumps(content), reflection_id),
+        )
+        self._conn.commit()
+
+    def all_reflections(self) -> list[dict[str, Any]]:
+        """Every reflection ever recorded, across every trading day -- what
+        `review.py`'s running confidence-calibration curve needs (`reflections_for`
+        only ever returns one day at a time)."""
+        rows = self._conn.execute("SELECT * FROM reflections ORDER BY id").fetchall()
+        out = []
+        for row in rows:
+            data = dict(row)
+            data["content"] = json.loads(data.pop("content_json"))
+            out.append(data)
+        return out
+
     # -- model calls (what budget.py sums) -------------------------------------------------
 
     def record_model_call(
@@ -731,6 +755,21 @@ class IntradayLedger:
     def incidents(self) -> list[dict[str, Any]]:
         rows = self._conn.execute("SELECT * FROM incidents ORDER BY id").fetchall()
         return [dict(r) for r in rows]
+
+    def incidents_for(self, as_of: pd.Timestamp) -> list[dict[str, Any]]:
+        """`incidents` carries no `as_of` column (it's a plain timestamped log, not
+        scoped to a trading day) -- date-filtered here by comparing `created_at`'s own
+        UTC calendar date, the same normalize-and-compare pattern
+        `eod_report.py::s0_day_return` already uses for `snapshots`. `created_at` is
+        always UTC (`_now()`); a Central trading day's real hours (~07:00-16:00 Central)
+        never cross a UTC midnight, so this stays correct without a timezone conversion
+        beyond dropping the UTC offset itself."""
+        day = pd.Timestamp(as_of).normalize()
+        return [
+            row
+            for row in self.incidents()
+            if pd.Timestamp(row["created_at"]).tz_convert(None).normalize() == day
+        ]
 
     def last_stopout_times(self) -> dict[str, dt.datetime]:
         """symbol -> most recent invalidation-triggered stop-out time (S4, Phase 5),

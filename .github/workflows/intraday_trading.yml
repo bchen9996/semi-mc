@@ -13,13 +13,19 @@ name: Intraday trading (S4)
 # intraday.trading_enabled false and no registered_account. Both must be deliberately
 # edited before any of these jobs can do anything but decline at pretrade.
 #
-# Seven jobs (preflight/research/preopen/monitor/open-batch/cycle/carry) -- the five
-# Phase 5 builds, monitor's own frequent, model-free cron (BRIEF_INTRADAY.md's "minute
-# monitor", adapted to this project's cron architecture -- see the Phase 5 plan), and
-# Phase 6's `research`. `eod_review`/`weekly_review` aren't wired here -- they don't
-# exist yet (Phase 9). Every job shares one concurrency group: unlike paper_trading.yml's
-# two ledger-writing jobs, all seven of these touch the same ledger/intraday.sqlite3, so
-# all seven need to serialize their git commits, not just a pair of them.
+# Eight jobs (preflight/research/preopen/monitor/open-batch/cycle/carry/eod-review) --
+# the five Phase 5 builds, monitor's own frequent, model-free cron (BRIEF_INTRADAY.md's
+# "minute monitor", adapted to this project's cron architecture -- see the Phase 5 plan),
+# Phase 6's `research`, and Phase 9b's `eod-review`. `weekly_review` isn't wired here --
+# it doesn't exist yet (Phase 10). Every job shares one concurrency group: unlike
+# paper_trading.yml's two ledger-writing jobs, all eight of these touch the same
+# ledger/intraday.sqlite3, so all eight need to serialize their git commits, not just a
+# pair of them.
+#
+# `eod-review` also commits `reports/` (the day's `eod.md`) and, on a day with a
+# proposal, `proposals/` -- both new, untracked directories the first time either exists,
+# hence the `[ -d ... ] && git add ... || true` guard (a bare `git add nonexistent-dir`
+# would fail the pathspec match and trip `set -e`).
 #
 # `research` also runs `semimc fetch` before its own command, mirroring
 # paper_trading.yml's `decide` job -- it reads the shared price cache (OHLC for a
@@ -39,8 +45,9 @@ name: Intraday trading (S4)
 # real broker, and folding it in avoids doubling the job/concurrency-group count for a
 # control group that costs nothing extra to run alongside the real one.
 #
-# `research`/`open-batch`/`cycle` (the three jobs that actually call the model, i.e. the
-# ones with ANTHROPIC_API_KEY in their env below) install the `claude` CLI itself via
+# `research`/`open-batch`/`cycle`/`eod-review` (the jobs that actually call the model,
+# i.e. the ones with ANTHROPIC_API_KEY in their env below) install the `claude` CLI itself
+# via
 # Anthropic's own native installer (code.claude.com/docs/en/setup's "Recommended" tab) --
 # a bare `ubuntu-latest` runner has no more claim to it than the S4 Alpaca/Anthropic
 # secrets did before those were added, and this went undiscovered until the first real
@@ -76,6 +83,8 @@ name: Intraday trading (S4)
     - cron: "*/20 13-19 * * 1-5"
     # carry: ~14:45 Central.
     - cron: "45 19 * * 1-5"
+    # eod-review: ~15:15 Central.
+    - cron: "15 20 * * 1-5"
 
 permissions:
   contents: write
@@ -396,6 +405,57 @@ jobs:
               exit 0
             fi
             git commit -m "intraday carry: $(date -u +%F)"
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+          done
+          echo "failed to push after 3 attempts"
+          exit 1
+
+  eod-review:
+    if: github.event.schedule == '15 20 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: intraday-trading-ledger-write
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Install the claude CLI
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/claude" --version
+      - name: Review the day and commit the ledger, report, and any playbook proposal
+        # No `semimc fetch` here -- `research`'s own 07:30 fetch already refreshed the
+        # shared price cache SOXX's benchmark reads, and it doesn't change intraday.
+        env:
+          ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
+          ALPACA_S4_SECRET_KEY: ${{ secrets.ALPACA_S4_SECRET_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -e
+          git config user.name "semimc-bot"
+          git config user.email "semimc-bot@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            uv run semimc intraday eod-review --config config/paper.yaml
+            git add ledger/intraday.sqlite3
+            [ -d reports ] && git add reports/ || true
+            [ -d proposals ] && git add proposals/ || true
+            if git diff --cached --quiet; then
+              echo "nothing to commit"
+              exit 0
+            fi
+            git commit -m "intraday eod-review: $(date -u +%F)"
             if git push; then
               exit 0
             fi

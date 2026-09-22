@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from semimc.cli import app
 from semimc.execution.fake_broker import FakeBroker
+from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.llm import ClaudeCliClient
 
 runner = CliRunner()
@@ -201,12 +202,14 @@ def test_carry_runs_cleanly_with_no_positions(tmp_path, fake_intraday_env):
     assert "Carried: (none)" in result.output
 
 
-def test_eod_review_runs_cleanly_and_writes_a_report(tmp_path, fake_intraday_env):
+def test_eod_review_skips_cleanly_with_nothing_to_review(tmp_path, fake_intraday_env):
     """`intraday.reports_dir` and `paper.ledger_path` must both be redirected here --
     otherwise this command would resolve them against the real project root and either
     write into the real repo's `reports/` directory or open the real `paper.sqlite3`
     (`CLAUDE.md`'s own `signals --holdout` gotcha, the exact reason `reports_dir` is a
-    `--set`-overridable config field rather than a literal in `cli.py`)."""
+    `--set`-overridable config field rather than a literal in `cli.py`). An empty ledger
+    has nothing to review (`run_eod_review`'s own "nothing to review yet today" skip,
+    Phase 9b) -- no report is written and no model call is made."""
     result = runner.invoke(
         app,
         ["intraday", "eod-review"]
@@ -219,12 +222,122 @@ def test_eod_review_runs_cleanly_and_writes_a_report(tmp_path, fake_intraday_env
         ),
     )
     assert result.exit_code == 0, result.output
+    assert "Skipped: nothing to review yet today" in result.output
+    assert not (tmp_path / "reports").exists()
+
+
+def test_eod_review_grades_the_day_and_writes_a_full_report(
+    tmp_path, fake_intraday_env, monkeypatch
+):
+    """The full happy path (Phase 9b): a seeded proposal/reflection, a fake Reviewer
+    response shaped to the real output schema, and a real rendered report with the
+    Reviewer's own sections filled in (not the Phase 9a placeholders)."""
+    ledger_path = tmp_path / "intraday.sqlite3"
+    ledger = IntradayLedger(ledger_path)
+    proposal_id = ledger.record_proposal(
+        "2026-09-21",
+        "open_batch",
+        "NVDA",
+        "open",
+        "accepted",
+        payload={"action": "open", "symbol": "NVDA", "side": "buy", "thesis": "AI capex cycle"},
+    )
+    ledger.record_order(
+        client_order_id="entry-1",
+        symbol="NVDA",
+        side="buy",
+        status="filled",
+        qty=10,
+        notional=1000.0,
+        proposal_id=proposal_id,
+        leg="entry",
+    )
+    ledger.record_fill(
+        "entry-1", qty=10, price=100.0, filled_at=dt.datetime(2026, 9, 21, 14, 35, tzinfo=dt.UTC)
+    )
+    reflection_id = ledger.record_reflection(
+        "2026-09-21",
+        "NVDA",
+        {
+            "thesis": "AI capex cycle",
+            "confidence": 0.6,
+            "side": "buy",
+            "invalidation_price": 95.0,
+            "close_reason": "trader_close",
+            "qty": 10,
+            "avg_entry_price": 100.0,
+            "avg_exit_price": 110.0,
+            "pnl_gross": 100.0,
+            "pnl_net": 98.0,
+            "invalidation_respected": True,
+            "time_in_trade_minutes": 30.0,
+            "category": None,
+            "process_grade": None,
+            "lesson": None,
+        },
+        client_order_id="exit-1",
+    )
+    ledger.close()
+
+    def fake_run(argv, stdin_text, timeout_seconds):
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=_result_json(
+                structured_output={
+                    "reflection_updates": [
+                        {
+                            "reflection_id": reflection_id,
+                            "category": "thesis_right",
+                            "process_grade": 4,
+                            "lesson": None,
+                        }
+                    ],
+                    "closing_market_report": "Semis broadly higher into the close.",
+                    "attribution_narrative": "Most of today's gain was sector-driven.",
+                    "process_scorecard_narrative": "One trade, on-thesis, no violations.",
+                    "playbook_proposal": None,
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "semimc.intraday.llm.ClaudeCliClient.from_env",
+        classmethod(lambda cls: ClaudeCliClient(run=fake_run)),
+    )
+
+    result = runner.invoke(
+        app,
+        ["intraday", "eod-review", "--as-of", "2026-09-21"]
+        + _intraday_overrides(
+            tmp_path,
+            **{
+                "intraday.reports_dir": (tmp_path / "reports").as_posix(),
+                "intraday.playbook_path": (tmp_path / "PLAYBOOK.md").as_posix(),
+                "intraday.proposals_dir": (tmp_path / "proposals").as_posix(),
+                "paper.ledger_path": (tmp_path / "paper.sqlite3").as_posix(),
+            },
+        ),
+    )
+    assert result.exit_code == 0, result.output
     assert "Wrote" in result.output
+    assert "Reflections graded: 1" in result.output
+
     report_files = list((tmp_path / "reports").rglob("eod.md"))
     assert len(report_files) == 1
     content = report_files[0].read_text(encoding="utf-8")
-    assert "No proposals today." in content
-    assert "not yet built (Phase 9b)" in content
+    assert "Semis broadly higher into the close." in content
+    assert "Most of today's gain was sector-driven." in content
+    assert "One trade, on-thesis, no violations." in content
+    assert "None proposed today." in content
+
+    with IntradayLedger(ledger_path) as check_ledger:
+        graded = check_ledger.reflections_for("2026-09-21")[0]["content"]
+        assert graded["category"] == "thesis_right"
+        assert graded["process_grade"] == 4
+        # The mechanical fields Phase 9a already computed must survive the update.
+        assert graded["pnl_net"] == 98.0
 
 
 # -- placebo (T6's control group, Phase 7) -------------------------------------------------

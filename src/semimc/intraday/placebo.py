@@ -69,6 +69,36 @@ def _mark_to_market(
     shadow_broker.equity = cash + market_value
 
 
+def placebo_day_pnl(
+    shadow_ledger: IntradayLedger,
+    market_data: AlpacaMarketDataClient,
+    config: Config,
+    as_of: pd.Timestamp,
+    now: dt.datetime,
+) -> float | None:
+    """The placebo's day P&L -- one of `eod_report.py`'s "benchmarks for the day" (T6's
+    control group, Phase 7), added in Phase 9b: today's mark-to-market equity minus its
+    own recorded session-open equity, reusing `_mark_to_market` (the one place shadow
+    equity is ever computed) against a `FakeBroker` reconstructed from its persisted
+    state -- the same reconstruction every placebo job already does, not a second copy.
+    Lives here rather than in `eod_report.py`, which deliberately never reaches into a
+    client's or another module's own internals directly (see that module's docstring);
+    this is exactly that reach, so it belongs where `_mark_to_market`/`FakeBroker` already
+    do. `None` if the placebo never ran today (no session-open equity row yet) or never
+    ran at all (no persisted state)."""
+    state = shadow_ledger.load_shadow_broker_state()
+    if state is None:
+        return None
+    opening_equity = shadow_ledger.session_open_equity(as_of)
+    if opening_equity is None:
+        return None
+    shadow_broker = FakeBroker.from_state(state, now=now)
+    _mark_to_market(
+        shadow_broker, shadow_ledger, market_data, config.intraday.placebo.starting_equity, now
+    )
+    return shadow_broker.equity - opening_equity
+
+
 @dataclass(frozen=True)
 class PlaceboCycleResult:
     proposed_symbol: str | None = None

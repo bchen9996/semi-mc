@@ -32,7 +32,12 @@ import pandas as pd
 
 from ..config import IntradayConfig
 from .budget import ModelCallCost, check_budget, record_call_cost
-from .context import ContextBundle, context_hash, researcher_output_json_schema
+from .context import (
+    ContextBundle,
+    context_hash,
+    researcher_output_json_schema,
+    reviewer_output_json_schema,
+)
 from .ledger import IntradayLedger
 from .proposals import trader_output_json_schema
 
@@ -212,7 +217,7 @@ def invoke_role(
     elif role == "researcher":
         json_schema = researcher_output_json_schema()
     else:
-        json_schema = None
+        json_schema = reviewer_output_json_schema()
 
     response = client.call(
         role=role,

@@ -2108,64 +2108,61 @@ def intraday_carry(
 @intraday_app.command("eod-review")
 def intraday_eod_review(
     as_of: IntradayAsOfOption = None,
+    cycle: Annotated[
+        str, typer.Option("--cycle", help="Label recorded for this review's model call.")
+    ] = "eod_review",
     config: ConfigOption = None,
     set_: SetOption = None,
     verbose: VerboseOption = False,
 ) -> None:
-    """The reporting half of `eod_review` (Phase 9a) -- writes `reports/YYYY-MM-DD/
-    eod.md`: the day's blotter, P&L, and best-effort benchmarks (SOXX, S0's own day
-    return). The Reviewer's own synthesis (closing market report, process scorecard,
-    playbook-change proposals) isn't built yet (Phase 9b) and renders as an explicit
-    placeholder rather than a fabricated section.
-
-    Manual/testing use only -- not wired into `.github/workflows/intraday_trading.yml`'s
-    cron yet. The brief's schedule has one `eod_review` slot combining this report with
-    the Reviewer's own call; scheduling a report missing half its sections (and
-    restructuring it again next phase) isn't worth a cron entry until the full command
-    exists.
+    """The Reviewer: grades the day and writes `reports/YYYY-MM-DD/eod.md` -- the day's
+    blotter, P&L, attribution, benchmarks (SOXX, S0, the placebo, "do nothing"), closing
+    market report, process scorecard, and any playbook proposal (`run_eod_review`,
+    Phase 9b). Idempotent per trading day, and skips cleanly with nothing to review yet
+    (see `run_eod_review`'s docstring) -- same shape as `research`'s own idempotency.
     """
     cfg = _setup(config, set_, verbose)
     from .data import load_market_data
-    from .intraday.eod_report import DayBenchmarks, build_eod_report, render_eod_markdown
-    from .intraday.jobs import premarket_moves
+    from .intraday.jobs import run_eod_review
     from .intraday.ledger import IntradayLedger
+    from .intraday.llm import ClaudeCliClient
     from .live.ledger import Ledger as PaperLedger
 
     as_of_ts = _intraday_as_of(as_of)
     now = _intraday_now(cfg)
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    market_data = _intraday_market_data()
+    news_client = _intraday_news_client()
+    market_data_pit = load_market_data(cfg, tickers=["SOXX"])
+    paper_ledger = PaperLedger(cfg.path(cfg.paper.ledger_path))
+    shadow_ledger = IntradayLedger(cfg.path(cfg.intraday.shadow_ledger_path))
+    llm_client = ClaudeCliClient.from_env()
     try:
-        soxx_return = None
-        try:
-            market_data_pit = load_market_data(cfg, tickers=["SOXX"])
-            market_data = _intraday_market_data()
-            moves = premarket_moves(["SOXX"], market_data_pit, market_data, now)
-            soxx_return = moves.get("SOXX")
-        except Exception as exc:  # noqa: BLE001 -- a benchmark must never block the report
-            typer.secho(f"SOXX benchmark unavailable: {exc}", fg=typer.colors.YELLOW)
-
-        s0_return = None
-        try:
-            from .intraday.eod_report import s0_day_return
-
-            paper_ledger = PaperLedger(cfg.path(cfg.paper.ledger_path))
-            try:
-                s0_return = s0_day_return(paper_ledger, as_of_ts)
-            finally:
-                paper_ledger.close()
-        except Exception as exc:  # noqa: BLE001 -- same reasoning as the SOXX benchmark
-            typer.secho(f"S0 benchmark unavailable: {exc}", fg=typer.colors.YELLOW)
-
-        report = build_eod_report(
-            ledger, as_of_ts, benchmarks=DayBenchmarks(soxx_return=soxx_return, s0_return=s0_return)
+        result = run_eod_review(
+            cfg,
+            market_data,
+            news_client,
+            market_data_pit,
+            paper_ledger,
+            shadow_ledger,
+            ledger,
+            llm_client,
+            as_of_ts,
+            cycle,
+            now,
         )
     finally:
+        paper_ledger.close()
+        shadow_ledger.close()
         ledger.close()
 
-    out_path = cfg.path(cfg.intraday.reports_dir) / str(as_of_ts.date()) / "eod.md"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render_eod_markdown(report), encoding="utf-8")
-    typer.echo(f"Wrote {out_path}")
+    if result.skipped_reason is not None:
+        typer.echo(f"Skipped: {result.skipped_reason}")
+        return
+    typer.echo(f"Wrote {result.report_path}")
+    typer.echo(f"Reflections graded: {result.reflections_updated}")
+    if result.playbook_proposal_written:
+        typer.echo("Playbook proposal written to proposals/")
 
 
 # -- S4's placebo agent (BRIEF_INTRADAY.md's "Placebo agent", THESES.md's T6, Phase 7) ---

@@ -326,8 +326,8 @@ def test_invoke_role_records_an_incident_when_a_call_exceeds_the_per_call_cap(tm
 
 def test_invoke_role_uses_the_researcher_json_schema_for_the_researcher_role(tmp_path):
     """Phase 6: the Researcher gets its own schema (`researcher_output_json_schema`),
-    distinct from the Trader's -- both are schema-constrained now; only the Reviewer
-    (below), with no output contract built yet, gets none."""
+    distinct from the Trader's and the Reviewer's own (below) -- every role is
+    schema-constrained."""
     ledger = _ledger(tmp_path)
     config = IntradayConfig()
     calls, run = _recording_run(_result_json())
@@ -351,7 +351,9 @@ def test_invoke_role_uses_the_researcher_json_schema_for_the_researcher_role(tmp
     ledger.close()
 
 
-def test_invoke_role_omits_json_schema_for_the_reviewer_role(tmp_path):
+def test_invoke_role_uses_the_reviewer_json_schema_for_the_reviewer_role(tmp_path):
+    """Phase 9b: the Reviewer gets its own schema (`reviewer_output_json_schema`) -- a
+    stub in earlier phases (no output contract existed yet), fixed once one did."""
     ledger = _ledger(tmp_path)
     config = IntradayConfig()
     calls, run = _recording_run(_result_json())
@@ -368,5 +370,14 @@ def test_invoke_role_omits_json_schema_for_the_reviewer_role(tmp_path):
         context=context,
     )
 
-    assert "--json-schema" not in calls[0]["argv"]
+    argv = calls[0]["argv"]
+    assert "--json-schema" in argv
+    schema = json.loads(argv[argv.index("--json-schema") + 1])
+    assert schema["required"] == [
+        "reflection_updates",
+        "closing_market_report",
+        "attribution_narrative",
+        "process_scorecard_narrative",
+        "playbook_proposal",
+    ]
     ledger.close()

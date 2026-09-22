@@ -294,6 +294,35 @@ def test_reflection_round_trips(tmp_path):
     ledger.close()
 
 
+def test_update_reflection_overwrites_content_in_place(tmp_path):
+    """Phase 9b: `eod_review` fills in `category`/`process_grade`/`lesson` on a row
+    Phase 9a's `reflect.py` already created with those fields `None`."""
+    ledger = _ledger(tmp_path)
+    reflection_id = ledger.record_reflection(
+        AS_OF, "NVDA", {"pnl_net": 100.0, "category": None}, client_order_id="s4-nvda-1"
+    )
+    ledger.update_reflection(reflection_id, {"pnl_net": 100.0, "category": "thesis_right"})
+
+    reflections = ledger.reflections_for(AS_OF)
+    assert len(reflections) == 1
+    assert reflections[0]["content"] == {"pnl_net": 100.0, "category": "thesis_right"}
+    ledger.close()
+
+
+def test_all_reflections_spans_every_trading_day(tmp_path):
+    """`review.py`'s running confidence-calibration curve needs every reflection ever
+    recorded, not just one day's (`reflections_for`'s own scope)."""
+    ledger = _ledger(tmp_path)
+    ledger.record_reflection(pd.Timestamp("2026-09-20"), "NVDA", {"confidence": 0.6})
+    ledger.record_reflection(AS_OF, "AMD", {"confidence": 0.8})
+
+    all_rows = ledger.all_reflections()
+
+    assert len(all_rows) == 2
+    assert {row["symbol"] for row in all_rows} == {"NVDA", "AMD"}
+    ledger.close()
+
+
 def test_model_call_round_trips(tmp_path):
     ledger = _ledger(tmp_path)
     ledger.record_model_call(
@@ -364,6 +393,18 @@ def test_incidents_reused_from_the_same_shape_as_live_ledger(tmp_path):
     assert len(incidents) == 1
     assert incidents[0]["severity"] == "error"
     assert incidents[0]["message"] == "daily model-call budget exhausted"
+
+
+def test_incidents_for_filters_to_the_given_days_incidents(tmp_path):
+    """`incidents` has no `as_of` column -- `incidents_for` (Phase 9b, `review.py`'s
+    process scorecard) date-filters by `created_at`'s own UTC calendar date instead."""
+    ledger = _ledger(tmp_path)
+    ledger.record_incident("warning", "today's incident")
+    today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+
+    assert len(ledger.incidents_for(today)) == 1
+    assert ledger.incidents_for(pd.Timestamp("2000-01-01")) == []
+    ledger.close()
 
 
 # -- shadow broker state / realized cash flow (S4's placebo agent, Phase 7) ---------------

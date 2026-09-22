@@ -8,12 +8,15 @@ import pytest
 
 from semimc.config import IntradayConfig
 from semimc.intraday.context import (
+    ReflectionUpdate,
     WatchlistCandidate,
     build_context,
     build_researcher_context,
+    build_reviewer_context,
     build_trader_context,
     context_hash,
     researcher_output_json_schema,
+    reviewer_output_json_schema,
 )
 from semimc.intraday.ledger import IntradayLedger
 
@@ -213,3 +216,80 @@ def test_researcher_output_json_schema_requires_brief_and_watchlist():
     schema = researcher_output_json_schema()
     assert schema["required"] == ["morning_brief", "watchlist"]
     assert schema["properties"]["watchlist"]["type"] == "array"
+
+
+# -- build_reviewer_context / ReflectionUpdate / reviewer_output_json_schema (Phase 9b) --
+
+
+def test_build_reviewer_context_marks_blotter_and_news_as_untrusted():
+    config = IntradayConfig()
+    bundle = build_reviewer_context(
+        AS_OF,
+        "eod_review",
+        config,
+        blotter={"proposals": [], "reflections": []},
+        account={"session_open_equity": 100_000.0},
+        benchmarks={"soxx_return": 0.01},
+        process_metrics={"rejection_rate": 0.0},
+        news=[{"headline": "NVDA rallies"}],
+        playbook_current="no playbook exists yet",
+    )
+    assert set(bundle.payload["untrusted"]) == {"blotter", "news"}
+    assert "account" not in bundle.payload["untrusted"]
+    assert "process_metrics" not in bundle.payload["untrusted"]
+    assert bundle.role == "reviewer"
+
+
+def test_build_reviewer_context_passes_through_every_section():
+    config = IntradayConfig()
+    blotter = {"proposals": [{"symbol": "NVDA"}], "reflections": []}
+    account = {"session_open_equity": 100_000.0}
+    benchmarks = {"soxx_return": 0.01, "s0_return": None}
+    process_metrics = {"rejection_rate": 0.0, "attribution": {"sector": 10.0}}
+    news = [{"headline": "NVDA rallies"}]
+
+    bundle = build_reviewer_context(
+        AS_OF,
+        "eod_review",
+        config,
+        blotter,
+        account,
+        benchmarks,
+        process_metrics,
+        news,
+        "no playbook exists yet",
+    )
+
+    sections = bundle.payload["sections"]
+    assert sections["blotter"] == blotter
+    assert sections["account"] == account
+    assert sections["benchmarks"] == benchmarks
+    assert sections["process_metrics"] == process_metrics
+    assert sections["news"] == news
+    assert sections["playbook_current"] == "no playbook exists yet"
+
+
+def test_reflection_update_requires_a_valid_category_and_grade_range():
+    update = ReflectionUpdate(reflection_id=1, category="thesis_right", process_grade=4)
+    assert update.lesson is None
+    with pytest.raises(ValueError, match="category"):
+        ReflectionUpdate(reflection_id=1, category="not_a_category", process_grade=4)
+    with pytest.raises(ValueError, match="process_grade"):
+        ReflectionUpdate(reflection_id=1, category="thesis_right", process_grade=6)
+
+
+def test_reflection_update_rejects_an_unknown_field():
+    with pytest.raises(ValueError, match="pnl"):
+        ReflectionUpdate(reflection_id=1, category="thesis_right", process_grade=4, pnl=100.0)
+
+
+def test_reviewer_output_json_schema_requires_every_field():
+    schema = reviewer_output_json_schema()
+    assert schema["required"] == [
+        "reflection_updates",
+        "closing_market_report",
+        "attribution_narrative",
+        "process_scorecard_narrative",
+        "playbook_proposal",
+    ]
+    assert schema["properties"]["reflection_updates"]["type"] == "array"

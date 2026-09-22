@@ -1,12 +1,13 @@
 """S4's scheduled jobs (`BRIEF_INTRADAY.md`'s "Daily schedule"), Phases 5-6.
 
-Six of the brief's eight named jobs, given the further split `tasks/todo.md`'s S4
+Seven of the brief's eight named jobs, given the further split `tasks/todo.md`'s S4
 addendum records: `preflight`, `research`, `preopen`, `open_batch`/`cycle` (one shared
 implementation, `run_cycle`, since they are the same operation -- `open_batch` is just
-the first `cycle` of the day), and `carry`. `monitor` (not in the brief's original list,
-but matching its own separate `monitor.py` file) runs standalone on a tight, model-free
-cron and is also the first thing `run_cycle` calls. `eod_review`/`weekly_review` are
-Phase 9's jobs, not built here -- see `tasks/todo.md`'s S4 addendum for why.
+the first `cycle` of the day), `carry`, and `eod_review` (Phase 9a/9b). `monitor` (not in
+the brief's original list, but matching its own separate `monitor.py` file) runs
+standalone on a tight, model-free cron and is also the first thing `run_cycle` calls.
+`weekly_review` is Phase 10's job, not built here -- see `tasks/todo.md`'s S4 addendum
+for why.
 
 Every `run_<verb>` function here is a plain function returning a result dataclass, never
 raising for a routine outcome -- the same shape `live/{decide,execute,mark}.py` already
@@ -36,7 +37,13 @@ from ..data.realized import realized_variance
 from ..execution.broker import Broker, OrderSide, Position
 from ..execution.market_data import AlpacaMarketDataClient
 from ..execution.news import AlpacaNewsClient
-from .context import WatchlistCandidate, build_researcher_context, build_trader_context
+from .context import (
+    ReflectionUpdate,
+    WatchlistCandidate,
+    build_researcher_context,
+    build_reviewer_context,
+    build_trader_context,
+)
 from .ledger import IntradayLedger
 from .llm import ClaudeCliClient, DailyBudgetExhausted, invoke_role
 from .monitor import check_invalidation_and_time_stops
@@ -912,3 +919,274 @@ def run_carry(
         result.closed_for_cap.append(position.symbol)
 
     return result
+
+
+# -- eod_review (Phase 9b) ----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EodReviewResult:
+    report_path: str | None = None
+    reflections_updated: int = 0
+    playbook_proposal_written: bool = False
+    skipped_reason: str | None = None
+
+
+def run_eod_review(
+    config: Config,
+    market_data: AlpacaMarketDataClient,
+    news_client: AlpacaNewsClient,
+    market_data_pit: MarketData,
+    paper_ledger: Any,
+    shadow_ledger: IntradayLedger | None,
+    ledger: IntradayLedger,
+    llm_client: ClaudeCliClient,
+    as_of: pd.Timestamp,
+    cycle: str,
+    now: dt.datetime,
+) -> EodReviewResult:
+    """15:15: the Reviewer grades the day and writes `reports/YYYY-MM-DD/eod.md`
+    (`BRIEF_INTRADAY.md`'s `eod_review` row). Everything computable without judgment --
+    P&L, three of the four benchmarks, the process-scorecard numbers, day attribution --
+    was already built by Phase 9a/this phase's own `review.py`/`eod_report.py`; this
+    wires the Reviewer's one daily call on top of it: narration, grading (the
+    `category`/`process_grade`/`lesson` fields Phase 9a's `reflect.py` left `None`), the
+    closing market report, and a playbook proposal.
+
+    Skips without spending anything if there's nothing to review yet today (no proposals
+    and no reflections) -- there's nothing for the Reviewer to grade before the loop has
+    actually run a day, the same "nothing to do" shape `run_research`'s own idempotency
+    check has, just framed around emptiness rather than a prior run. Idempotent per
+    `as_of` for a real day: if today's reflections already carry a non-null `category`,
+    this already ran (mirrors `run_research`'s `watchlist_for(as_of)`-non-empty check).
+
+    `shadow_ledger` is optional -- `None` skips the placebo benchmark gracefully (Phase 7
+    might not be enabled in every deployment) rather than requiring a second ledger no
+    caller has to open.
+    """
+    proposals_today = ledger.proposals_for(as_of)
+    reflections_today = ledger.reflections_for(as_of)
+    if not proposals_today and not reflections_today:
+        return EodReviewResult(skipped_reason="nothing to review yet today")
+    if any(r["content"].get("category") is not None for r in reflections_today):
+        return EodReviewResult(skipped_reason=f"eod_review already ran for {as_of}")
+
+    # Local imports: `review.py` and `placebo.py` both import *from* this module at their
+    # own top level (`turnover_so_far_usd`, `run_carry`/`quote_map`/...), so importing
+    # them back at jobs.py's own top level would be a real circular import. Deferred to
+    # call time, after both modules have already fully loaded, this is safe -- the same
+    # reasoning `cli.py` already relies on for its own many function-local imports.
+    from .eod_report import (
+        DayBenchmarks,
+        build_eod_report,
+        do_nothing_return,
+        render_eod_markdown,
+        s0_day_return,
+    )
+    from .placebo import placebo_day_pnl
+    from .review import day_attribution, process_scorecard
+
+    intraday = config.intraday
+    research_cfg = intraday.research
+    tickers = config.universe.tickers
+
+    # `news_lookback_hours` (16h, tuned for the Researcher's overnight coverage) reaches
+    # well back past this session's own 08:30 open when called near the 15:15 close --
+    # already covers the whole trading day, so no separate lookback config is needed.
+    news_start = now - dt.timedelta(hours=research_cfg.news_lookback_hours)
+    articles = news_client.get_news(tickers, start=news_start, end=now)
+    clean_text = {
+        article.id: (
+            sanitize_and_log(
+                article.headline, ledger=ledger, source=article.source, context="eod_review news"
+            ),
+            sanitize_and_log(
+                article.summary, ledger=ledger, source=article.source, context="eod_review news"
+            ),
+        )
+        for article in articles
+    }
+    capped_articles = _cap_news_per_symbol(articles, research_cfg.max_headlines_per_symbol)
+    news_sections = [
+        {
+            "headline": clean_text[article.id][0],
+            "summary": clean_text[article.id][1],
+            "symbols": article.symbols,
+            "created_at": str(article.created_at),
+            "source": article.source,
+        }
+        for article in capped_articles
+    ]
+
+    soxx_return = None
+    try:
+        moves = premarket_moves(["SOXX"], market_data_pit, market_data, now)
+        soxx_return = moves.get("SOXX")
+    except Exception as exc:  # noqa: BLE001 -- a benchmark must never block the report
+        ledger.record_incident("warning", f"SOXX benchmark unavailable: {exc}")
+
+    s0_return = None
+    try:
+        s0_return = s0_day_return(paper_ledger, as_of)
+    except Exception as exc:  # noqa: BLE001 -- same reasoning as the SOXX benchmark
+        ledger.record_incident("warning", f"S0 benchmark unavailable: {exc}")
+
+    do_nothing = None
+    try:
+        do_nothing = do_nothing_return(ledger, market_data, as_of, now)
+    except Exception as exc:  # noqa: BLE001 -- same reasoning
+        ledger.record_incident("warning", f"'do nothing' benchmark unavailable: {exc}")
+
+    placebo_pnl = None
+    if shadow_ledger is not None:
+        try:
+            placebo_pnl = placebo_day_pnl(shadow_ledger, market_data, config, as_of, now)
+        except Exception as exc:  # noqa: BLE001 -- same reasoning
+            ledger.record_incident("warning", f"placebo benchmark unavailable: {exc}")
+
+    benchmarks = DayBenchmarks(
+        soxx_return=soxx_return,
+        s0_return=s0_return,
+        placebo_pnl=placebo_pnl,
+        do_nothing_return=do_nothing,
+    )
+
+    scorecard = process_scorecard(ledger, intraday, as_of)
+    attribution = day_attribution(reflections_today, soxx_return)
+
+    playbook_path = config.path(intraday.playbook_path)
+    playbook_current = (
+        playbook_path.read_text(encoding="utf-8")
+        if playbook_path.exists()
+        else "no playbook exists yet"
+    )
+    blotter = {"proposals": proposals_today, "reflections": reflections_today}
+    account = {
+        "session_open_equity": ledger.session_open_equity(as_of),
+        "latest_snapshot": ledger.latest_snapshot(),
+    }
+    benchmarks_section = {
+        "soxx_return": soxx_return,
+        "s0_return": s0_return,
+        "placebo_pnl": placebo_pnl,
+        "do_nothing_return": do_nothing,
+    }
+    process_metrics = {**scorecard, "attribution": attribution}
+
+    try:
+        context = build_reviewer_context(
+            as_of,
+            cycle,
+            intraday,
+            blotter,
+            account,
+            benchmarks_section,
+            process_metrics,
+            news_sections,
+            playbook_current,
+        )
+        response = invoke_role(
+            "reviewer",
+            as_of=as_of,
+            cycle=cycle,
+            config=intraday,
+            ledger=ledger,
+            client=llm_client,
+            context=context,
+        )
+    except DailyBudgetExhausted as exc:
+        return EodReviewResult(skipped_reason=str(exc))
+
+    payload = response.structured_output if isinstance(response.structured_output, dict) else None
+    required_keys = {
+        "reflection_updates",
+        "closing_market_report",
+        "attribution_narrative",
+        "process_scorecard_narrative",
+        "playbook_proposal",
+    }
+    if payload is None or not required_keys.issubset(payload):
+        ledger.record_incident("error", "malformed reviewer response: missing required keys")
+        return EodReviewResult(skipped_reason="malformed reviewer response")
+
+    reflections_by_id = {row["id"]: row for row in reflections_today}
+    updated = 0
+    for item in payload.get("reflection_updates", []):
+        try:
+            update = ReflectionUpdate(**item)
+        except (ValidationError, TypeError) as exc:
+            ledger.record_incident("error", f"malformed reflection update: {exc}")
+            continue
+        existing = reflections_by_id.get(update.reflection_id)
+        if existing is None:
+            ledger.record_incident(
+                "error", f"reviewer referenced unknown reflection_id {update.reflection_id}"
+            )
+            continue
+        lesson = sanitize_and_log(
+            update.lesson, ledger=ledger, source="reviewer", context="reflection lesson"
+        )
+        new_content = {
+            **existing["content"],
+            "category": update.category,
+            "process_grade": update.process_grade,
+            "lesson": lesson,
+        }
+        ledger.update_reflection(update.reflection_id, new_content)
+        updated += 1
+
+    closing_market_report = sanitize_and_log(
+        payload["closing_market_report"],
+        ledger=ledger,
+        source="reviewer",
+        context="closing market report",
+    )
+    attribution_narrative = sanitize_and_log(
+        payload["attribution_narrative"],
+        ledger=ledger,
+        source="reviewer",
+        context="attribution narrative",
+    )
+    process_scorecard_narrative = sanitize_and_log(
+        payload["process_scorecard_narrative"],
+        ledger=ledger,
+        source="reviewer",
+        context="process scorecard narrative",
+    )
+    raw_playbook_proposal = payload.get("playbook_proposal")
+    playbook_proposal = sanitize_and_log(
+        raw_playbook_proposal or "None proposed today.",
+        ledger=ledger,
+        source="reviewer",
+        context="playbook proposal",
+    )
+
+    proposal_written = False
+    if raw_playbook_proposal:
+        proposals_dir = config.path(intraday.proposals_dir)
+        proposals_dir.mkdir(parents=True, exist_ok=True)
+        (proposals_dir / f"{pd.Timestamp(as_of).date()}.md").write_text(
+            playbook_proposal, encoding="utf-8"
+        )
+        proposal_written = True
+
+    report = build_eod_report(
+        ledger,
+        as_of,
+        benchmarks=benchmarks,
+        process_scorecard=scorecard,
+        process_scorecard_narrative=process_scorecard_narrative,
+        attribution=attribution,
+        attribution_narrative=attribution_narrative,
+        closing_market_report=closing_market_report,
+        playbook_proposal=playbook_proposal,
+    )
+    out_path = config.path(intraday.reports_dir) / str(pd.Timestamp(as_of).date()) / "eod.md"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(render_eod_markdown(report), encoding="utf-8")
+
+    return EodReviewResult(
+        report_path=str(out_path),
+        reflections_updated=updated,
+        playbook_proposal_written=proposal_written,
+    )

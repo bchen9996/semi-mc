@@ -44,7 +44,10 @@ def test_render_eod_markdown_never_crashes_on_an_empty_day(tmp_path):
     assert "No proposals today." in rendered
     assert "No closed positions today." in rendered
     assert "not available" in rendered  # benchmarks with nothing supplied
-    assert "not yet built (Phase 9b)" in rendered
+    # Everything the Reviewer's own call would fill in (Phase 9b's `run_eod_review`)
+    # still renders an honest placeholder when `build_eod_report` is called directly,
+    # bypassing that call entirely, the way this test does.
+    assert "Not yet built (Phase 9b" in rendered
     ledger.close()
 
 

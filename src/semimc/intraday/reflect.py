@@ -159,6 +159,12 @@ def record_mechanical_reflection(
         "side": side,
         "invalidation_price": invalidation_price,
         "close_reason": close_reason,
+        # The qty *this event* exited -- not the entry's full size, so a trim's own
+        # reflection reports only the trimmed slice. `review.py::day_attribution` needs
+        # this (times `avg_entry_price`) for the exited slice's own signed exposure --
+        # not derivable after the fact from `pnl_gross` alone (division by a possibly-
+        # zero price move), so it's stored here at the one point it's known unambiguously.
+        "qty": exit_qty,
         "avg_entry_price": avg_entry_price,
         "avg_exit_price": avg_exit_price,
         "pnl_gross": pnl_gross,

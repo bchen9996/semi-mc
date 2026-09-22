@@ -16,10 +16,10 @@ missed.
 
 :func:`build_trader_context` is the Trader's per-cycle assembler (Phase 2).
 :func:`build_researcher_context` is the Researcher's own assembler (Phase 6, once
-`execution/news.py::AlpacaNewsClient` existed to feed it). The Reviewer's still needs real
-orders/fills/reflections history to synthesize (`eod_review`/`weekly_review`, Phase 9) --
-building it from fixtures pretending to be real data would be worse than not building it
-yet.
+`execution/news.py::AlpacaNewsClient` existed to feed it). :func:`build_reviewer_context`
+is the Reviewer's own once-a-day assembler (Phase 9b), once Phase 9a's reflections/
+`eod_report.py` existed to feed it real orders/fills/reflections history rather than
+fixtures pretending to be real data.
 
 :class:`WatchlistCandidate` and :func:`researcher_output_json_schema` are the Researcher's
 output contract, paired with :func:`build_researcher_context`'s input contract -- they live
@@ -180,6 +180,82 @@ def researcher_output_json_schema() -> dict:
         },
         "required": ["morning_brief", "watchlist"],
     }
+
+
+class ReflectionUpdate(BaseModel):
+    """One reflection's qualitative fields -- the Reviewer's own job per `reflect.py`'s
+    design note (Phase 9a: category/process_grade/lesson are left `None` by the
+    mechanical half, for this to fill in). Paired with `reviewer_output_json_schema`'s
+    `reflection_updates` list; `reflection_id` is the ledger row id from `blotter.
+    reflections` in the Reviewer's own context, so this always references a real row.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reflection_id: int
+    category: Literal["thesis_right", "thesis_wrong", "execution", "timing", "sizing", "noise"]
+    process_grade: int = Field(ge=1, le=5)
+    lesson: str | None = None
+
+
+def reviewer_output_json_schema() -> dict:
+    """The schema passed to `claude -p --json-schema` for the Reviewer role
+    (`intraday/llm.py::invoke_role`), mirroring `researcher_output_json_schema`'s own
+    reasoning: generated from :class:`ReflectionUpdate`, not hand-maintained."""
+    return {
+        "type": "object",
+        "properties": {
+            "reflection_updates": {
+                "type": "array",
+                "items": ReflectionUpdate.model_json_schema(),
+            },
+            "closing_market_report": {"type": "string"},
+            "attribution_narrative": {"type": "string"},
+            "process_scorecard_narrative": {"type": "string"},
+            "playbook_proposal": {"type": ["string", "null"]},
+        },
+        "required": [
+            "reflection_updates",
+            "closing_market_report",
+            "attribution_narrative",
+            "process_scorecard_narrative",
+            "playbook_proposal",
+        ],
+    }
+
+
+def build_reviewer_context(
+    as_of: pd.Timestamp,
+    cycle: str,
+    config: IntradayConfig,
+    blotter: dict[str, Any],
+    account: dict[str, Any],
+    benchmarks: dict[str, Any],
+    process_metrics: dict[str, Any],
+    news: list[dict[str, Any]],
+    playbook_current: str,
+) -> ContextBundle:
+    """The Reviewer's once-a-day payload (Phase 9b). `process_metrics` is `review.py`'s
+    own precomputed scoring/attribution output (`process_scorecard`/`day_attribution`,
+    merged by the caller) -- the Reviewer narrates and grades these numbers, it does not
+    recompute them itself (`prompts/reviewer.md` says so explicitly, updated this phase).
+
+    `blotter` and `news` are both untrusted -- unlike `build_researcher_context`'s
+    news-only labeling, `reviewer.md`'s own instructions call this out explicitly: "this
+    applies just as much to a fill, a headline, or a reflection note as it does to news
+    copy." A fill's or reflection's free-text fields (a thesis, a lesson) ultimately trace
+    back through an earlier model call, so the same defense-in-depth labeling applies to
+    them here, not only to fresh news copy.
+    """
+    sections = {
+        "blotter": blotter,
+        "account": account,
+        "benchmarks": benchmarks,
+        "process_metrics": process_metrics,
+        "news": news,
+        "playbook_current": playbook_current,
+    }
+    return build_context("reviewer", as_of, cycle, sections, untrusted_keys=["blotter", "news"])
 
 
 def build_researcher_context(

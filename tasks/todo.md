@@ -1513,6 +1513,152 @@ Built:
       `paper.ledger_path` to `tmp_path` -- the same gotcha-avoidance the new config field
       itself exists for, verified in the test that would otherwise trip it.
 
+**Phase 9b -- the Reviewer's real `eod_review` call, built 2026-09-21.** The request was
+"go ahead and push then move on," picking up immediately after Phase 9a's commit
+(`940613e`) landed. This phase gives the Reviewer (`BRIEF_INTRADAY.md`'s third named
+model role) its actual call: the qualitative reflection fields Phase 9a's `reflect.py`
+left `None` (`category`/`process_grade`/`lesson`), the closing market report, process
+scorecard, day attribution, and a playbook proposal -- everything Phase 9a's own
+`render_eod_markdown` rendered as an explicit "not yet built (Phase 9b)" placeholder --
+plus wiring `eod-review` into the real 15:15 Central cron.
+
+Two findings, both confirmed by reading the brief/code directly, shaped the design:
+
+1. `BRIEF_INTRADAY.md`'s Files section already names `intraday/review.py` ("scoring,
+   attribution, calibration") -- a planned file this project hadn't built yet. Rather
+   than fold scoring/attribution/calibration into `jobs.py` or `eod_report.py`, this
+   phase builds that file, matching the brief's own layout.
+2. Attribution and the process scorecard split the same way reflections did in Phase 9a:
+   the *numbers* (rejection rate, budget usage, invalidation adherence, a confidence-
+   calibration curve, a sector/stock-specific P&L split) are all computable mechanically
+   from ledger data already on hand -- no judgment call needed. `review.py` computes
+   them; the Reviewer's own call narrates and grades them (`prompts/reviewer.md` updated
+   to say so explicitly -- its earlier wording, written before this split existed, read
+   as if it did the arithmetic itself).
+
+**A disclosed simplification, stated up front rather than found mid-implementation**:
+the brief asks to "regress the day's returns on SOXX," but the ledger retains no
+intraday SOXX price *history* (only `latest_quote` at call time), so a genuine per-trade
+regression against SOXX's return over that trade's own holding window isn't buildable
+from data this project keeps today. `review.py::day_attribution` computes a coarser,
+honestly-labeled day-level split instead: a **sector** contribution equal to each closed
+position's signed entry-cost-basis notional times SOXX's whole-*day* return (a
+beta-of-1 approximation, not a fitted beta), and a **stock-specific** residual (`pnl_net`
+minus `sector`) that folds selection and timing into one bucket rather than fabricating a
+further split neither the ledger nor a market-data feed supports yet. **Options** is
+always 0.0 -- options remain off (rollout stages 4/5, not reached). Same honesty
+convention as Phase 9a's "pessimistic P&L": a labeled approximation, not a fabricated
+"real" number.
+
+Built:
+
+- [x] `intraday/review.py` (new) -- `process_scorecard` (rejection rate/reasons, budget
+      discipline against the configured caps reusing `jobs.py::turnover_so_far_usd`,
+      invalidation adherence, today's incidents, a running all-time confidence-
+      calibration curve) and `day_attribution` (the sector/stock-specific/options split
+      above).
+- [x] `intraday/reflect.py`: added a `"qty"` field to the reflection content dict (the
+      qty *this event* exited) -- a gap found while designing attribution: `pnl_gross`
+      alone can't recover the exited qty after the fact (division by a possibly-zero
+      price move), and `day_attribution` needs it times `avg_entry_price` for the
+      exited slice's own signed exposure. Stored at the one point it's known
+      unambiguously, the same reasoning every other reflection field already follows.
+- [x] `intraday/ledger.py`: `update_reflection` (upsert-by-id, the small addition
+      Phase 9a's own plan explicitly deferred here), `incidents_for` (date-filtered by
+      `created_at`'s own UTC calendar date, same normalize-and-compare pattern
+      `eod_report.py::s0_day_return` already uses), `all_reflections` (every reflection
+      ever recorded, for the calibration curve -- `reflections_for` only ever returns
+      one day).
+- [x] `intraday/context.py`: `ReflectionUpdate` (the Reviewer's per-reflection grading
+      output), `reviewer_output_json_schema`, `build_reviewer_context` -- mirrors
+      `build_researcher_context`'s own pattern, except `untrusted_keys` covers both
+      `blotter` and `news` (not just `news`), per `reviewer.md`'s own explicit
+      instruction that this applies "just as much to a fill... or a reflection note as
+      it does to news copy."
+- [x] `intraday/llm.py::invoke_role`: fixed a stub left over from before this phase --
+      the reviewer branch hardcoded `json_schema = None`; now calls
+      `reviewer_output_json_schema()`, the same shape the researcher/trader branches
+      already have.
+- [x] `intraday/placebo.py`: `placebo_day_pnl` (today's mark-to-market equity minus the
+      placebo's own recorded session-open equity, reusing `_mark_to_market` and a
+      `FakeBroker` reconstructed from persisted state -- the same reconstruction every
+      placebo job already does). Lives here, not in `eod_report.py`, which deliberately
+      never reaches into another module's own internals directly.
+- [x] `intraday/eod_report.py`: `do_nothing_return` (the fourth benchmark Phase 9a left
+      stubbed -- marks every `open_batch`-cycle entry to market against its own average
+      entry price, ignoring whatever happened afterward) plus `DayBenchmarks`/`EodReport`
+      gaining the new optional fields (`process_scorecard`, `attribution`, and their
+      narratives, `closing_market_report`, `playbook_proposal`) and `build_eod_report`
+      accepting them. `render_eod_markdown` reordered to match the brief's own listed
+      section order (Blotter, P&L, Attribution, Benchmarks, Closing market report,
+      Process scorecard, Playbook changes) and renders real content once available,
+      keeping Phase 9a's "not yet built (Phase 9b)" placeholder only when
+      `build_eod_report` is called without ever running the Reviewer.
+- [x] `intraday/jobs.py::run_eod_review` (new) -- the real job: skips without spending
+      anything with nothing to review yet (no proposals, no reflections), idempotent per
+      `as_of` (a non-null `category` on today's reflections means it already ran),
+      fetches and sanitizes today's news, gathers all four benchmarks and `review.py`'s
+      precomputed numbers, calls `invoke_role("reviewer", ...)`, applies
+      `reflection_updates` via `update_reflection`, sanitizes every Reviewer-authored
+      narrative/report/proposal string before storing or rendering it (`reviewer.md`'s
+      same fill/reflection-note callout, applied to the Reviewer's own outputs this
+      time), writes a non-null playbook proposal to `proposals/YYYY-MM-DD.md` (plain
+      file, matching the brief's own Files section -- diffs *awaiting* weekly review,
+      not a DB table), and writes the completed `reports/YYYY-MM-DD/eod.md`.
+      `review.py`/`placebo.py` are imported locally inside this function, not at
+      `jobs.py`'s own top level -- both modules already import *from* `jobs.py` at
+      their own top level, so a top-level import back would be a real circular import;
+      deferred to call time (after both are already fully loaded) is the standard, safe
+      way around it.
+- [x] `config.py::IntradayConfig`: `playbook_path` (default `"PLAYBOOK.md"`) and
+      `proposals_dir` (default `"proposals"`) -- same config-relative-via-`Config.path()`
+      reasoning as `reports_dir` (Phase 9a), not literals in `jobs.py`. Added to both
+      `config/default.yaml` and `config/paper.yaml`.
+- [x] `cli.py`: upgraded `intraday eod-review` (Phase 9a's report-only command) to call
+      `run_eod_review` -- constructs the LLM client, news client, the paper ledger, and
+      the shadow ledger the same way every other credentialed intraday command already
+      does, per Phase 9a's own plan note ("9b adds the real cron job once the full
+      command exists").
+- [x] `.github/workflows/intraday_trading.yml`: added the `eod-review` job (~15:15
+      Central, `"15 20 * * 1-5"`), structured exactly like `research`'s (claude CLI
+      install step, secrets, the shared `intraday-trading-ledger-write` concurrency
+      group). Also commits `reports/`/`proposals/` alongside the ledger -- both new,
+      possibly-still-untracked directories, guarded with `[ -d ... ] && git add ... ||
+      true` so a quiet day (nothing under either yet) doesn't trip `set -e`.
+- [x] `prompts/reviewer.md`: rewrote "What you return" as the real structured-output
+      contract (`reflection_updates`/`closing_market_report`/`attribution_narrative`/
+      `process_scorecard_narrative`/`playbook_proposal`), and added an explicit
+      "`process_metrics` is already computed for you -- narrate and grade these numbers,
+      do not recompute them" instruction.
+- [x] Manually ran `semimc intraday eod-review --config config/paper.yaml`: confirmed the
+      command wires up correctly through Typer (`--help` renders) and fails at exactly
+      the same point every other credentialed S4 command already does locally --
+      constructing `AlpacaMarketDataClient.from_env` without `ALPACA_S4_API_KEY`/
+      `ALPACA_S4_SECRET_KEY` set (this machine never has them, by design -- see the
+      "Remaining prerequisites" list below). Confirmed via `git status` that nothing
+      leaked into the real repo's `reports/`/`proposals/`/`PLAYBOOK.md`. The full,
+      credential-free code path is what the test suite below actually exercises end to
+      end, the same reasoning every other credentialed command's own manual-verification
+      note in this file already relies on.
+- [x] Tests: `tests/test_intraday_review.py` (new, 14 tests) -- `process_scorecard`'s
+      rejection rate/reasons, budget discipline against configured caps, invalidation
+      adherence, today's-incidents filtering, and `confidence_calibration`'s bucketing
+      and multi-day span; `day_attribution`'s sector/stock-specific split for both a long
+      and a short, and its graceful `None`s with no SOXX benchmark or no trades. Extended
+      `tests/test_intraday_ledger.py` (`update_reflection`, `all_reflections`,
+      `incidents_for`), `tests/test_intraday_context.py` (`build_reviewer_context`,
+      `ReflectionUpdate`, `reviewer_output_json_schema`), `tests/test_intraday_llm.py`
+      (rewrote the old "reviewer omits json_schema" stub test into one asserting the
+      real schema now applies), `tests/test_intraday_eod_report.py` (updated the
+      empty-day placeholder assertion now that "do nothing" renders real content), and
+      `tests/test_intraday_jobs.py` (5 new `run_eod_review` tests: skip-with-nothing-to-
+      review, idempotent re-run, malformed-response handling, the full happy path
+      seeded via `_seed_open_position` + `run_carry` so the reflection being graded is a
+      real one, and a playbook-proposal-written case). Extended
+      `tests/test_cli_intraday.py`: replaced the Phase 9a placeholder-report smoke test
+      with a skip-on-empty-ledger test plus a full happy-path test asserting the
+      Reviewer's real sections render and the graded reflection persists.
+
 **Remaining prerequisites** -- what Phase 0 didn't (and couldn't) resolve:
 
 1. **The owner still needs to actually create the second Alpaca paper account** and add

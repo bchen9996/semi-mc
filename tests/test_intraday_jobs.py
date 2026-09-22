@@ -21,6 +21,7 @@ from semimc.execution.fake_broker import FakeBroker
 from semimc.intraday.jobs import (
     run_carry,
     run_cycle,
+    run_eod_review,
     run_preflight,
     run_preopen,
     run_research,
@@ -29,6 +30,7 @@ from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.llm import ClaudeCliClient
 from semimc.intraday.orders import build_entry_order, submit_order_with_fault_isolation
 from semimc.intraday.proposals import TradeProposal
+from semimc.live.ledger import Ledger as PaperLedger
 
 AS_OF = pd.Timestamp("2026-09-21")
 NOW = dt.datetime(2026, 9, 21, 8, 35)
@@ -854,4 +856,203 @@ def test_run_carry_closes_the_lowest_confidence_position_over_the_overnight_cap(
     assert "AMD" in result.closed_for_cap  # lowest confidence closed first
     remaining_symbols = {p.symbol for p in broker.list_positions()}
     assert "AMD" not in remaining_symbols
+
+
+# -- run_eod_review (Phase 9b) ------------------------------------------------------------
+
+
+def _eod_review_config(config, tmp_path):
+    """`reports_dir`/`playbook_path`/`proposals_dir` must all be redirected to `tmp_path`
+    -- the `config` fixture leaves `project_root` at the real repo (only `_setup`'s own
+    `--set` handling redirects it in a CLI-level test), and these three are exactly the
+    config-relative-via-`Config.path()` fields `CLAUDE.md`'s own gotcha exists for."""
+    cfg = _tradeable_config(config, tmp_path)
+    intraday = cfg.intraday.model_copy(
+        update={
+            "reports_dir": str(tmp_path / "reports"),
+            "playbook_path": str(tmp_path / "PLAYBOOK.md"),
+            "proposals_dir": str(tmp_path / "proposals"),
+        }
+    )
+    return cfg.model_copy(update={"intraday": intraday})
+
+
+def _reviewer_response(reflection_id: int, playbook_proposal: str | None = None) -> str:
+    return _result_json(
+        structured_output={
+            "reflection_updates": [
+                {
+                    "reflection_id": reflection_id,
+                    "category": "thesis_right",
+                    "process_grade": 4,
+                    "lesson": None,
+                }
+            ],
+            "closing_market_report": "Semis broadly higher into the close.",
+            "attribution_narrative": "Most of today's gain was sector-driven.",
+            "process_scorecard_narrative": "One trade, on-thesis, no violations.",
+            "playbook_proposal": playbook_proposal,
+        }
+    )
+
+
+def test_run_eod_review_skips_with_nothing_to_review_yet(config, tmp_path, market):
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+    client = _sequenced_llm_client(_result_json())
+
+    result = run_eod_review(
+        cfg,
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        market,
+        paper_ledger,
+        None,
+        ledger,
+        client,
+        AS_OF,
+        "eod_review",
+        NOW,
+    )
+
+    assert result.skipped_reason == "nothing to review yet today"
+    assert not (tmp_path / "reports").exists()
+    paper_ledger.close()
+    ledger.close()
+
+
+def test_run_eod_review_is_idempotent_once_a_reflection_is_already_graded(config, tmp_path, market):
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_reflection(AS_OF, "NVDA", {"category": "thesis_right", "pnl_net": 10.0})
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+    client = _sequenced_llm_client(_result_json())
+
+    result = run_eod_review(
+        cfg,
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        market,
+        paper_ledger,
+        None,
+        ledger,
+        client,
+        AS_OF,
+        "eod_review",
+        NOW,
+    )
+
+    assert result.skipped_reason == f"eod_review already ran for {AS_OF}"
+    assert ledger.model_calls_for(AS_OF) == []
+    paper_ledger.close()
+    ledger.close()
+
+
+def test_run_eod_review_handles_a_malformed_response_without_crashing(config, tmp_path, market):
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday")
+    run_carry(cfg, broker, ledger, _FakeMarketData(quotes={"NVDA": _quote(190.0)}), AS_OF, NOW)
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+    client = _sequenced_llm_client(_result_json(structured_output={"not": "the right shape"}))
+
+    result = run_eod_review(
+        cfg,
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        market,
+        paper_ledger,
+        None,
+        ledger,
+        client,
+        AS_OF,
+        "eod_review",
+        NOW,
+    )
+
+    assert result.skipped_reason == "malformed reviewer response"
+    assert any("malformed reviewer response" in i["message"] for i in ledger.incidents())
+    paper_ledger.close()
+    ledger.close()
+
+
+def test_run_eod_review_grades_reflections_and_writes_a_full_report(config, tmp_path, market):
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday")
+    run_carry(cfg, broker, ledger, _FakeMarketData(quotes={"NVDA": _quote(190.0)}), AS_OF, NOW)
+    reflection_id = ledger.reflections_for(AS_OF)[0]["id"]
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+    client = _sequenced_llm_client(_reviewer_response(reflection_id))
+
+    result = run_eod_review(
+        cfg,
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        market,
+        paper_ledger,
+        None,
+        ledger,
+        client,
+        AS_OF,
+        "eod_review",
+        NOW,
+    )
+
+    assert result.skipped_reason is None
+    assert result.reflections_updated == 1
+    assert result.playbook_proposal_written is False
+
+    graded = ledger.reflections_for(AS_OF)[0]["content"]
+    assert graded["category"] == "thesis_right"
+    assert graded["process_grade"] == 4
+    assert graded["close_reason"] == "carry"  # the mechanical field survives the update
+
+    with open(result.report_path, encoding="utf-8") as handle:
+        content = handle.read()
+    assert "Semis broadly higher into the close." in content
+    assert "Most of today's gain was sector-driven." in content
+    assert "None proposed today." in content
+    paper_ledger.close()
+    ledger.close()
+
+
+def test_run_eod_review_writes_a_playbook_proposal_when_the_reviewer_makes_one(
+    config, tmp_path, market
+):
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday")
+    run_carry(cfg, broker, ledger, _FakeMarketData(quotes={"NVDA": _quote(190.0)}), AS_OF, NOW)
+    reflection_id = ledger.reflections_for(AS_OF)[0]["id"]
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+    proposal_text = "## Proposed change\nRaise the spread gate from 20bps to 25bps."
+    client = _sequenced_llm_client(
+        _reviewer_response(reflection_id, playbook_proposal=proposal_text)
+    )
+
+    result = run_eod_review(
+        cfg,
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        market,
+        paper_ledger,
+        None,
+        ledger,
+        client,
+        AS_OF,
+        "eod_review",
+        NOW,
+    )
+
+    assert result.playbook_proposal_written is True
+    proposal_files = list((tmp_path / "proposals").glob("*.md"))
+    assert len(proposal_files) == 1
+    assert proposal_text in proposal_files[0].read_text(encoding="utf-8")
+    paper_ledger.close()
+    ledger.close()
     ledger.close()

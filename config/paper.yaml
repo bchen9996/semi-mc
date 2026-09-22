@@ -233,3 +233,5 @@ intraday:
   ledger_path: ledger/intraday.sqlite3
   shadow_ledger_path: ledger/intraday_shadow.sqlite3
   reports_dir: reports
+  playbook_path: PLAYBOOK.md
+  proposals_dir: proposals
