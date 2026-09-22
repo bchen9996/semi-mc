@@ -47,8 +47,17 @@ name: Intraday trading (S4)
 # run actually tried to spawn `claude` as a subprocess (`intraday/llm.py`). The installer
 # has zero dependencies (unlike the alternative npm package, which needs Node.js 22+) and
 # places the binary at `~/.local/bin/claude`, so each install step also appends that to
-# `$GITHUB_PATH` for the rest of the job. `carry` needs no such step -- it never calls
-# `invoke_role` (run_carry/run_placebo_carry are deterministic, reused close-out logic).
+# `$GITHUB_PATH` for the rest of the job (that append only affects later steps, which is
+# why the install step's own final line calls the binary by its full path -- `$GITHUB_PATH`
+# isn't live yet within the script that just wrote it) and prints `claude --version`, so a
+# broken install shows up immediately in this step's own log instead of surfacing later as
+# an opaque subprocess failure inside `intraday/llm.py` -- this exact class of problem is
+# what went undiscovered until the first real run. `carry` needs no such step -- it never
+# calls `invoke_role` (run_carry/run_placebo_carry are deterministic, reused close-out
+# logic). Also worth knowing: `config.intraday.trading_enabled` being `False` means
+# `research`/`cycle`/`open-batch`'s own pretrade check declines before ever reaching
+# `invoke_role` regardless of this install step -- so this version print, not a full
+# `research`/`cycle` run, is what actually verifies the CLI itself works pre-go-live.
 
 "on":
   workflow_dispatch: {}
@@ -141,6 +150,7 @@ jobs:
         run: |
           curl -fsSL https://claude.ai/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/claude" --version
       - name: Research and commit the ledger
         # semimc fetch first -- research reads the shared price cache (realized-vol
         # snapshot, earnings calendar) and this is the first job of the day to need it.
@@ -274,6 +284,7 @@ jobs:
         run: |
           curl -fsSL https://claude.ai/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/claude" --version
       - name: Run the first Trader cycle and the placebo, then commit both ledgers
         env:
           ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
@@ -321,6 +332,7 @@ jobs:
         run: |
           curl -fsSL https://claude.ai/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/claude" --version
       - name: Run a Trader cycle and the placebo, then commit both ledgers
         env:
           ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
