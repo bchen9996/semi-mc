@@ -1768,6 +1768,118 @@ Built:
       failure exiting 1). Full suite green (`uv run pytest`), `ruff check`/`format`
       clean.
 
+**Phase 11 -- shadow-mode infrastructure (Rollout Stage 1), built 2026-09-22.** The
+request was "go ahead to phase 11," the rollout-stages bucket below. Offered a choice
+between building this infrastructure or scoping the phase down to an operational audit
+(Phase 8's own precedent for paper trading -- dry run, failure injection, a go-live
+checklist, with the owner's own later action to actually flip flags); the owner chose
+to build the infrastructure.
+
+**Two real gaps found by reading the code directly, not assumed, before designing
+anything**:
+
+1. Stage 1 ("everything runs on schedule; no orders are submitted; proposals are filled
+   against the cost model") could not run at all: `run_research` and `run_cycle` both
+   call `check_intraday_pretrade`, which fails outright unless `trading_enabled=True`
+   *and* the broker's real account matches `registered_account`. There was no state
+   between "the whole loop is inert" and "submits real orders to Alpaca."
+2. **A second, blocking bug**: `check_intraday_pretrade` also fails whenever the market
+   isn't open *right now*, and `run_research` calls the identical check -- but research
+   runs at 07:30 Central, before the 08:30 open. Once `trading_enabled=True`, research
+   would have failed pretrade with "market is closed" on *every single call*, live or
+   shadow. Every existing `run_research` test happened to use `FakeBroker()`'s default
+   `market_open=True`, which is exactly why this went uncaught until now.
+
+Design, closely mirroring `intraday/placebo.py` (which already solves the identical
+"run the real risk/execution primitives against a `FakeBroker`, no real broker at all"
+problem for T6's control group):
+
+- [x] `intraday/pretrade.py::check_intraday_pretrade` gained two independent, default-
+      preserving parameters: `shadow: bool = False` (skips the account-identity/status
+      checks -- meaningless against a `FakeBroker`'s placeholder identity; kill switch
+      and `trading_enabled` are never skipped) and `check_market_open: bool = True`
+      (skips the closed-market check -- `run_research` passes `False`, the bug fix).
+- [x] `intraday/jobs.py`: `run_research` passes `check_market_open=False`; `run_cycle`
+      passes `shadow=config.intraday.shadow_mode` (no new parameter on `run_cycle`
+      itself -- it already has the full `Config`). `run_preflight` diffs two
+      `check_intraday_pretrade` calls (`shadow=False` vs `shadow=True`) to find exactly
+      which findings `shadow_mode` would suppress, and routes those to `notes` (routine)
+      rather than `failures` -- preflight's own broker is always the real one (it's the
+      one command shadow mode doesn't touch), so an account mismatch there is still real
+      infrastructure information worth surfacing, just not worth a failure email while
+      no real order was ever going to be placed against it. Kill switch/`trading_enabled`
+      are untouched by this and keep flowing through the pre-existing, unchanged
+      trading_enabled-based routine/failure split. `PreflightResult` gained a
+      `shadow_mode: bool` field, mirroring Phase 10's `playbook_version` field.
+- [x] **Promoted `placebo.py::_mark_to_market` to `jobs.py::mark_broker_to_market`**
+      (same signature, unprefixed) -- the identical "second caller needs the identical
+      computation" reasoning `turnover_so_far_usd` was already promoted for once;
+      Stage 1's own shadow broker needs the exact recompute-from-ledger-history
+      mark-to-market the placebo already built. `placebo.py` now imports it from
+      `.jobs`; nothing about the logic itself was placebo-specific.
+- [x] `config.py` + both YAML files: `IntradayConfig` gained `shadow_mode: bool = True`
+      (safe by default, matching `trading_enabled`'s own safety-first default -- flipping
+      `trading_enabled` alone must never be enough to place a real order) and
+      `shadow_starting_equity: float = 100_000.0` (the real loop's own Stage-1 book size,
+      the same role `IntradayPlaceboConfig.starting_equity` plays for the placebo's book,
+      kept as a separate field since the two shadow books are logically distinct).
+- [x] `cli.py`: new `_intraday_execution_broker(cfg, ledger, market_data, now)` --
+      `_intraday_broker()` (real Alpaca) unless `cfg.intraday.shadow_mode`, in which case
+      a `FakeBroker` reconstructed from the *real* ledger's own persisted
+      `shadow_broker_state` row (the same generic table/methods the placebo already uses
+      on its own separate ledger file) and marked to market. `open-batch`/`cycle`/
+      `carry`/`monitor` all switch to this and save state back afterward when in shadow
+      mode, mirroring the placebo commands' own explicit load/run/save shape.
+      `research`/`preflight` are untouched -- both stay on the real broker always, since
+      neither manages simulated positions and both benefit from checking real
+      infrastructure health regardless of rollout stage. No workflow-file changes --
+      every command's invocation is identical either way; the branch is invisible to
+      `.github/workflows/intraday_trading.yml`, and `ALPACA_S4_API_KEY`/`SECRET_KEY` stay
+      required regardless of `shadow_mode` (still needed for real market data/news so the
+      shadow book marks against real prices).
+- [x] **A real test-suite blast radius found while implementing, not just a design
+      question**: `shadow_mode` defaulting to `True` meant every existing "tradeable"
+      test helper across `test_intraday_jobs.py`/`test_intraday_pretrade.py`/
+      `test_cli_intraday.py` would have silently started exercising the *shadow* pretrade
+      path (or, for the CLI tests, a freshly-constructed shadow `FakeBroker` instead of
+      the test fixture's real-broker patch) instead of what each was actually written to
+      test. Fixed by adding `shadow_mode: False` to each shared "tradeable" config
+      helper, keeping every existing test's original real-broker behavior intact, with
+      shadow mode itself getting new, separately-labeled tests instead.
+- [x] **A second, separate real bug found and fixed while wiring `run_preflight`'s own
+      shadow-aware split**: an early version widened preflight's routine-vs-failure
+      condition to `trading_enabled and not shadow_mode`, which incorrectly routed a
+      genuine kill-switch failure to a routine note whenever `shadow_mode=True` (the new
+      default) -- caught by a test written for exactly this case
+      (`test_run_preflight_still_fails_the_kill_switch_under_shadow_mode`) before it
+      shipped. Fixed with the diff-based approach described above, which only ever
+      affects the account-identity findings `shadow` actually suppresses.
+- [x] **Found mid-verification**: local `main` was 11 real commits behind `origin/main`
+      -- the live GitHub Actions workflows (`intraday_trading.yml`'s preflight/research/
+      open-batch/cycle/carry, and `paper_trading.yml`'s own decide/execute/mark) had been
+      running unattended on schedule since Phase 10 was pushed, exactly as designed
+      (`intraday.trading_enabled` stayed `false` throughout, so every S4 job declined
+      harmlessly). Fast-forwarded local `main` onto `origin/main` before committing this
+      phase, after first discarding a local, unintended `ledger/intraday.sqlite3` diff
+      (SQLite's own idempotent `CREATE TABLE IF NOT EXISTS` schema bytes shifting from
+      local manual-verification runs against a stale base -- confirmed via row counts
+      that no real data was involved before discarding it).
+- [x] Manually confirmed `open-batch`/`monitor`/`carry`/`preflight` each reach the
+      expected local credential wall (`AlpacaMarketDataClient.from_env`/
+      `AlpacaPaperBroker.from_env`) rather than crashing inside the new shadow-broker
+      logic itself, and that `git status` stayed clean afterward.
+- [x] Tests: `tests/test_intraday_pretrade.py` (+7: `shadow`/`check_market_open` on and
+      off, defaults unchanged). `tests/test_intraday_jobs.py` (+9: the market-open fix
+      proven directly, shadow-mode account-mismatch pass-through vs. non-shadow
+      rejection, preflight's routine-under-shadow and still-fails-kill-switch cases,
+      plus 4 `mark_broker_to_market` tests moved here from `test_intraday_placebo.py`
+      since that's where the function now lives). `tests/test_cli_intraday.py` (+6:
+      `open-batch`/`cycle`/`carry`/`monitor` in shadow mode with `AlpacaPaperBroker.
+      from_env` patched to raise if ever called, plus shadow state persisting across two
+      separate CLI invocations -- proving state survives what a real cron job's fresh
+      process boundary would impose). `tests/test_config_intraday.py` (+1: the new
+      fields' defaults). Full suite green (`uv run pytest`), `ruff check`/`format` clean.
+
 **Remaining prerequisites** -- what Phase 0 didn't (and couldn't) resolve:
 
 1. **The owner still needs to actually create the second Alpaca paper account** and add
@@ -1794,11 +1906,18 @@ Built:
    unverified is the CLI's *actual* JSON output field names against one of this
    project's real calls -- that's blocked on prerequisite 1 below, not on more code.
 
-**Rollout stages from the brief** (none started; each gated on the owner, never automatic):
+**Rollout stages from the brief** (each gated on the owner, never automatic):
 
-- [ ] Stage 1 -- shadow, 2 weeks. Full schedule, no orders submitted, proposals filled
-      against the cost model, playbook frozen for a clean baseline.
-- [ ] Stage 2 -- equities, half budget, 2 weeks.
+- [ ] Stage 1 -- shadow, 2 weeks. **Runnable as of Phase 11** (`intraday.shadow_mode:
+      true`, already the default, plus flipping `intraday.trading_enabled: true` and
+      registering a real S4 Alpaca *paper* account -- free, no capital risk). "Runnable"
+      is not "run": actually starting the 2-week clock is the owner's own separate
+      action, same "built vs. executed" distinction Phase 8 drew for enabling s0/s3.
+      Full schedule, no orders submitted, proposals filled against the cost model,
+      playbook frozen for a clean baseline.
+- [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
+      Stage 1's evidence looks good; "half budget" is a plain edit to `intraday.risk`'s
+      existing fields (no code needed -- every field is already `--set`/YAML-overridable).
 - [ ] Stage 3 -- equities, full budget.
 - [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded).
 - [ ] Stage 5 -- options enabled, only if the shadow results and both options gates pass,

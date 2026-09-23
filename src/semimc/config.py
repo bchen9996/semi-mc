@@ -476,6 +476,18 @@ class IntradayConfig(_Base):
     # guards. execution/alpaca_broker.py::AlpacaPaperBroker.from_env reads a distinct
     # ALPACA_S4_API_KEY/ALPACA_S4_SECRET_KEY pair for this sleeve.
     registered_account: str | None = None
+    # Rollout Stage 1 (Phase 11, BRIEF_INTRADAY.md's "Shadow, 2 weeks"): `True` (the
+    # safe default, matching every other go-live flag here) means the real loop may run
+    # and propose/validate for real, but fills against a `FakeBroker` (cli.py) rather
+    # than submitting to Alpaca -- never flip this off in the same action as
+    # `trading_enabled`; they're deliberately independent switches (see
+    # `intraday/pretrade.py::check_intraday_pretrade`'s own `shadow` parameter).
+    shadow_mode: bool = True
+    # The real loop's own Stage-1 shadow book size -- the same role
+    # `IntradayPlaceboConfig.starting_equity` plays for the placebo's book. A separate
+    # field, not reused, since the two shadow books are logically distinct even though
+    # both happen to default to the same figure.
+    shadow_starting_equity: float = 100_000.0
     budget: IntradayBudgetConfig = Field(default_factory=IntradayBudgetConfig)
     risk: IntradayRiskConfig = Field(default_factory=IntradayRiskConfig)
     schedule: IntradayScheduleConfig = Field(default_factory=IntradayScheduleConfig)

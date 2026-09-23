@@ -19,10 +19,14 @@ ACCOUNT = "FAKE-PAPER-0001"
 
 
 def _tradeable_config(config, tmp_path, account_number=ACCOUNT):
+    """`shadow_mode: False` (Phase 11's default is `True`) -- these tests exercise the
+    real-account-identity path; shadow mode's own bypass gets separate, explicit tests
+    below."""
     intraday = config.intraday.model_copy(
         update={
             "trading_enabled": True,
             "registered_account": account_number,
+            "shadow_mode": False,
             "kill_switch_path": str(tmp_path / "KILL_SWITCH"),
         }
     )
@@ -80,6 +84,70 @@ def test_check_intraday_pretrade_reports_every_failure_at_once(config, tmp_path)
     context = IntradayPretradeContext(now=NOW, config=config, broker=broker)
     failures = check_intraday_pretrade(context)
     assert any("not trading_enabled" in f for f in failures)
+    assert any("market is closed" in f for f in failures)
+
+
+# -- shadow / check_market_open (Phase 11, Rollout Stage 1) ------------------------------
+
+
+def test_check_intraday_pretrade_shadow_skips_the_account_mismatch_check(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path, account_number="SOME-OTHER-ACCOUNT")
+    context = IntradayPretradeContext(now=NOW, config=cfg, broker=FakeBroker())
+    failures = check_intraday_pretrade(context, shadow=True)
+    assert not any("registered_account" in f for f in failures)
+
+
+def test_check_intraday_pretrade_shadow_skips_the_blocked_account_check(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    broker = FakeBroker(account_status="ACCOUNT_BLOCKED")
+    context = IntradayPretradeContext(now=NOW, config=cfg, broker=broker)
+    failures = check_intraday_pretrade(context, shadow=True)
+    assert not any("ACCOUNT_BLOCKED" in f for f in failures)
+
+
+def test_check_intraday_pretrade_shadow_still_flags_the_kill_switch(config, tmp_path):
+    """Shadow mode is still something the owner must deliberately turn on -- an
+    emergency halt must stop it exactly like the real loop."""
+    cfg = _tradeable_config(config, tmp_path)
+    (tmp_path / "KILL_SWITCH").write_text("stop", encoding="utf-8")
+    context = IntradayPretradeContext(now=NOW, config=cfg, broker=FakeBroker())
+    failures = check_intraday_pretrade(context, shadow=True)
+    assert any("kill switch" in f for f in failures)
+
+
+def test_check_intraday_pretrade_shadow_still_flags_trading_disabled(config, tmp_path):
+    context = IntradayPretradeContext(now=NOW, config=config, broker=FakeBroker())
+    failures = check_intraday_pretrade(context, shadow=True)
+    assert any("not trading_enabled" in f for f in failures)
+
+
+def test_check_intraday_pretrade_defaults_shadow_to_false(config, tmp_path):
+    """No `shadow=` argument reproduces today's exact behavior -- an account mismatch
+    still fails."""
+    cfg = _tradeable_config(config, tmp_path, account_number="SOME-OTHER-ACCOUNT")
+    context = IntradayPretradeContext(now=NOW, config=cfg, broker=FakeBroker())
+    failures = check_intraday_pretrade(context)
+    assert any("registered_account" in f for f in failures)
+
+
+def test_check_intraday_pretrade_check_market_open_false_skips_the_closed_market_check(
+    config, tmp_path
+):
+    """`run_research` passes this -- it runs at 07:30 Central, before the 08:30 open, by
+    design (found while building Phase 11's shadow mode: the default `True` would
+    otherwise fail research every single call, live or shadow)."""
+    cfg = _tradeable_config(config, tmp_path)
+    broker = FakeBroker(market_open=False)
+    context = IntradayPretradeContext(now=NOW, config=cfg, broker=broker)
+    failures = check_intraday_pretrade(context, check_market_open=False)
+    assert not any("market is closed" in f for f in failures)
+
+
+def test_check_intraday_pretrade_defaults_check_market_open_to_true(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    broker = FakeBroker(market_open=False)
+    context = IntradayPretradeContext(now=NOW, config=cfg, broker=broker)
+    failures = check_intraday_pretrade(context)
     assert any("market is closed" in f for f in failures)
 
 

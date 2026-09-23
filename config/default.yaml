@@ -221,6 +221,8 @@ paper:
 intraday:
   trading_enabled: false
   registered_account: null
+  shadow_mode: true
+  shadow_starting_equity: 100000.0
   budget:
     max_cost_usd_per_call: 1.0
     max_cost_usd_per_day: 10.0   # placeholder -- recalibrate from real shadow-mode logging

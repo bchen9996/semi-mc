@@ -42,6 +42,7 @@ from ..config import Config, IntradayConfig
 from ..data import MarketData
 from ..data.realized import realized_variance
 from ..execution.broker import Broker, OrderSide, Position
+from ..execution.fake_broker import FakeBroker
 from ..execution.market_data import AlpacaMarketDataClient
 from ..execution.news import AlpacaNewsClient
 from .context import (
@@ -154,6 +155,44 @@ def turnover_so_far_usd(ledger: IntradayLedger, as_of: pd.Timestamp, equity: flo
     return total
 
 
+def mark_broker_to_market(
+    shadow_broker: FakeBroker,
+    shadow_ledger: IntradayLedger,
+    market_data: AlpacaMarketDataClient,
+    starting_equity: float,
+    now: dt.datetime,
+) -> None:
+    """Sets a `FakeBroker`'s `.cash`/`.equity` fresh, every call, from `starting_equity`
+    plus `shadow_ledger.total_realized_cash_flow()` (every fill this ledger has ever
+    recorded) plus a live mark of whatever's currently held. A missing quote for a held
+    symbol falls back to its own `avg_entry_price` -- never crashes on one bad quote, same
+    tolerance `quote_map` already uses.
+
+    Deliberately recomputed from scratch rather than incrementally maintained: this is
+    the one place equity/cash truth lives, so it can never drift out of sync with a
+    persisted running total, and it stays correct no matter which code path produced a
+    fill.
+
+    Promoted here from `intraday/placebo.py::_mark_to_market` (Phase 7) in Phase 11 --
+    same "second caller needs the identical computation" reasoning `turnover_so_far_usd`
+    just above was already promoted for: Stage 1's shadow mode needs the exact same
+    recompute-from-ledger-history mark-to-market the placebo already built, against its
+    own real-loop shadow broker/ledger rather than the placebo's. Nothing about the logic
+    itself is placebo-specific -- only which `FakeBroker` instance and which
+    `IntradayLedger` get passed in differs between the two callers.
+    """
+    cash = starting_equity + shadow_ledger.total_realized_cash_flow()
+    market_value = 0.0
+    for position in shadow_broker.list_positions():
+        quote = market_data.latest_quote(position.symbol, at=now)
+        price = midpoint_price(quote)
+        if price is None:
+            price = position.avg_entry_price
+        market_value += position.qty * price
+    shadow_broker.cash = cash
+    shadow_broker.equity = cash + market_value
+
+
 # -- preflight --------------------------------------------------------------------------
 
 
@@ -175,6 +214,10 @@ class PreflightResult:
     # warning worth polluting the incident log (and therefore every later eod_review's
     # incident count) with on every single preflight run.
     playbook_version: int | None = None
+    # Phase 11: which mode preflight actually checked under -- surfaced for the same
+    # reason `playbook_version` is: informational context for reading the CLI output,
+    # not a pass/fail input.
+    shadow_mode: bool = True
 
 
 def run_preflight(
@@ -208,12 +251,31 @@ def run_preflight(
     current_playbook_version()`) -- always informational, never a failure; an empty
     playbook is normal for a long time, the same reasoning every other pre-go-live
     finding here is already treated as routine.
+
+    Phase 11: this command's own broker is always the real one (unlike `open-batch`/
+    `cycle`/`carry`/`monitor`, which switch to a shadow `FakeBroker` under `cfg.intraday.
+    shadow_mode` -- see `cli.py`), so an account mismatch/status finding here is still
+    real, useful infrastructure information -- worth surfacing, just not worth a failure
+    email while `shadow_mode=True` means no real order was ever going to be placed
+    against it anyway. Found by diffing two `check_intraday_pretrade` calls (`shadow=
+    False` -- the full set -- against `shadow=True`) rather than hardcoding which
+    message strings are "account-related" a second time here: whatever `shadow=True`
+    would have suppressed becomes an extra routine note, on top of `_ALWAYS_ROUTINE_
+    PRETRADE_NOTE`, exactly when `config.intraday.shadow_mode` is set. The kill switch
+    and `trading_enabled` are never in that suppressed set (`shadow` only ever affects
+    the account-identity checks), so they're untouched by this and keep flowing through
+    the unchanged trading_enabled-based split below.
     """
-    pretrade_results = check_intraday_pretrade(
-        IntradayPretradeContext(now=now, config=config, broker=broker)
-    )
-    notes = [r for r in pretrade_results if r == _ALWAYS_ROUTINE_PRETRADE_NOTE]
-    remaining = [r for r in pretrade_results if r != _ALWAYS_ROUTINE_PRETRADE_NOTE]
+    context = IntradayPretradeContext(now=now, config=config, broker=broker)
+    pretrade_results = check_intraday_pretrade(context)
+    shadow_suppressed = set(pretrade_results) - set(check_intraday_pretrade(context, shadow=True))
+    notes = [
+        r
+        for r in pretrade_results
+        if r == _ALWAYS_ROUTINE_PRETRADE_NOTE
+        or (config.intraday.shadow_mode and r in shadow_suppressed)
+    ]
+    remaining = [r for r in pretrade_results if r not in notes]
     if config.intraday.trading_enabled:
         failures = remaining
     else:
@@ -244,6 +306,7 @@ def run_preflight(
         failures=failures,
         notes=notes,
         playbook_version=ledger.current_playbook_version(),
+        shadow_mode=config.intraday.shadow_mode,
     )
 
 
@@ -369,9 +432,15 @@ def run_research(
     a repeat call (most likely a retried GitHub Actions attempt) and returns immediately
     without spending anything -- the same `ON CONFLICT DO NOTHING` reasoning
     `record_session_open_equity` already uses, generalized to "don't re-call the model."
+
+    Passes `check_market_open=False` (Phase 11) -- research runs at 07:30 Central, before
+    the 08:30 open, so the default market-open check would otherwise fail every single
+    call regardless of `trading_enabled`, a real bug found while building Stage 1's
+    shadow mode (every existing test happened to use `FakeBroker()`'s default
+    `market_open=True`, which is why it went uncaught).
     """
     pretrade_failures = check_intraday_pretrade(
-        IntradayPretradeContext(now=now, config=config, broker=broker)
+        IntradayPretradeContext(now=now, config=config, broker=broker), check_market_open=False
     )
     if pretrade_failures:
         for failure in pretrade_failures:
@@ -595,12 +664,21 @@ def run_cycle(
     builders (`build_entry_order`/`build_close_order`/`build_trim_order`/
     `build_replacement_stop_order`) and Phase 2's context/LLM wrapper
     (`build_trader_context`/`invoke_role`). This function only sequences them.
+
+    Passes `shadow=config.intraday.shadow_mode` (Phase 11) -- in Stage 1, `broker` is a
+    `FakeBroker` with no real account identity to match, so the pretrade gate skips that
+    check the same way `intraday/placebo.py::run_placebo_cycle` already does. Everything
+    else about this function is unchanged by shadow mode: the same model call, the same
+    `validate_proposal` risk controls, the same order-construction primitives -- only
+    which broker actually receives the resulting `submit_order` call differs, decided by
+    the caller (`cli.py`), not here.
     """
     result = CycleResult()
     intraday = config.intraday
 
     pretrade_failures = check_intraday_pretrade(
-        IntradayPretradeContext(now=now, config=config, broker=broker)
+        IntradayPretradeContext(now=now, config=config, broker=broker),
+        shadow=intraday.shadow_mode,
     )
     if pretrade_failures:
         for failure in pretrade_failures:

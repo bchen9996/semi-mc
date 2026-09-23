@@ -1830,6 +1830,29 @@ def _intraday_news_client():  # noqa: ANN001 -- returns AlpacaNewsClient
     return AlpacaNewsClient.from_env()
 
 
+def _intraday_execution_broker(cfg, ledger, market_data, now):  # noqa: ANN001 -- Broker
+    """The broker `open-batch`/`cycle`/`carry`/`monitor` actually submit orders to --
+    `_intraday_broker()` (real Alpaca) unless `cfg.intraday.shadow_mode` (Phase 11,
+    Rollout Stage 1), in which case a `FakeBroker` reconstructed from `ledger`'s own
+    persisted state (mirroring `_load_shadow_broker`'s exact shape, but against the real
+    ledger rather than the placebo's separate one) and marked to market fresh. The caller
+    is responsible for saving state back afterward with `ledger.save_shadow_broker_state
+    (broker.to_state())` when `cfg.intraday.shadow_mode` -- mirroring every placebo
+    command's own explicit load/run/save shape rather than hiding it in a context
+    manager.
+
+    `research`/`preflight` deliberately never call this -- both stay on the real broker
+    always (see `intraday/jobs.py`'s Phase 11 docstring additions for why)."""
+    if not cfg.intraday.shadow_mode:
+        return _intraday_broker()
+    from .execution.fake_broker import FakeBroker
+    from .intraday.jobs import mark_broker_to_market
+
+    broker = FakeBroker.from_state(ledger.load_shadow_broker_state(), now=now)
+    mark_broker_to_market(broker, ledger, market_data, cfg.intraday.shadow_starting_equity, now)
+    return broker
+
+
 IntradayAsOfOption = Annotated[
     str | None, typer.Option("--as-of", help="Trading day, YYYY-MM-DD. Defaults to today.")
 ]
@@ -1872,13 +1895,16 @@ def intraday_preflight(
         if result.playbook_version is not None
         else "Playbook version: none adopted yet"
     )
+    mode_line = f"Mode: {'shadow' if result.shadow_mode else 'live'}"
     if result.passed:
         typer.echo("Preflight: passed")
+        typer.echo(f"  {mode_line}")
         typer.echo(f"  {version_line}")
         for note in result.notes:
             typer.echo(f"  (routine) {note}")
         return
     typer.secho("Preflight: failed", fg=typer.colors.RED)
+    typer.echo(f"  {mode_line}")
     typer.echo(f"  {version_line}")
     for failure in result.failures:
         typer.echo(f"  - {failure}")
@@ -1996,8 +2022,8 @@ def intraday_monitor(
     as_of_ts = _intraday_as_of(as_of)
     now = _intraday_now(cfg)
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
-    broker = _intraday_broker()
     market_data = _intraday_market_data()
+    broker = _intraday_execution_broker(cfg, ledger, market_data, now)
     try:
         positions = broker.list_positions()
         quotes = quote_map({p.symbol for p in positions}, market_data, now)
@@ -2005,6 +2031,8 @@ def intraday_monitor(
         result = check_invalidation_and_time_stops(
             cfg.intraday, broker, ledger, prices, as_of_ts, cycle, now
         )
+        if cfg.intraday.shadow_mode:
+            ledger.save_shadow_broker_state(broker.to_state())
     finally:
         ledger.close()
 
@@ -2027,11 +2055,13 @@ def _run_intraday_cycle(
     as_of_ts = _intraday_as_of(as_of)
     now = _intraday_now(cfg)
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
-    broker = _intraday_broker()
     market_data = _intraday_market_data()
+    broker = _intraday_execution_broker(cfg, ledger, market_data, now)
     llm_client = ClaudeCliClient.from_env()
     try:
         result = run_cycle(cycle, cfg, broker, ledger, market_data, llm_client, as_of_ts, now)
+        if cfg.intraday.shadow_mode:
+            ledger.save_shadow_broker_state(broker.to_state())
     finally:
         ledger.close()
 
@@ -2095,10 +2125,12 @@ def intraday_carry(
     as_of_ts = _intraday_as_of(as_of)
     now = _intraday_now(cfg)
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
-    broker = _intraday_broker()
     market_data = _intraday_market_data()
+    broker = _intraday_execution_broker(cfg, ledger, market_data, now)
     try:
         result = run_carry(cfg, broker, ledger, market_data, as_of_ts, now)
+        if cfg.intraday.shadow_mode:
+            ledger.save_shadow_broker_state(broker.to_state())
     finally:
         ledger.close()
 

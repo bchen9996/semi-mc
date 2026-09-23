@@ -26,6 +26,12 @@ runner = CliRunner()
 
 
 def _intraday_overrides(tmp_path: Path, **extra) -> list[str]:
+    """`intraday.shadow_mode: false` (Phase 11's own default is `true`) -- every existing
+    test in this file was written against `fake_intraday_env`'s real-`AlpacaPaperBroker`
+    patch (`open-batch`/`cycle`/`carry`/`monitor` all now branch on `shadow_mode` to pick
+    a broker, `cli.py::_intraday_execution_broker`), and this keeps every one of them
+    exercising exactly that path rather than silently switching to a shadow `FakeBroker`
+    none of them expect. Shadow mode itself gets separate, explicitly-labeled tests."""
     overrides = [
         "--set",
         f"intraday.ledger_path={(tmp_path / 'intraday.sqlite3').as_posix()}",
@@ -33,6 +39,8 @@ def _intraday_overrides(tmp_path: Path, **extra) -> list[str]:
         f"intraday.shadow_ledger_path={(tmp_path / 'intraday_shadow.sqlite3').as_posix()}",
         "--set",
         f"intraday.kill_switch_path={(tmp_path / 'KILL_SWITCH').as_posix()}",
+        "--set",
+        "intraday.shadow_mode=false",
     ]
     for key, value in extra.items():
         overrides += ["--set", f"{key}={value}"]
@@ -200,6 +208,143 @@ def test_carry_runs_cleanly_with_no_positions(tmp_path, fake_intraday_env):
     result = runner.invoke(app, ["intraday", "carry"] + _tradeable_overrides(tmp_path))
     assert result.exit_code == 0, result.output
     assert "Carried: (none)" in result.output
+
+
+# -- shadow mode (Phase 11, Rollout Stage 1) -----------------------------------------------
+
+
+def _shadow_tradeable_overrides(tmp_path: Path) -> list[str]:
+    return _intraday_overrides(
+        tmp_path,
+        **{
+            "intraday.trading_enabled": "true",
+            "intraday.registered_account": "FAKE-PAPER-0001",
+            "intraday.shadow_mode": "true",
+        },
+    )
+
+
+@pytest.fixture
+def fake_intraday_shadow_env(monkeypatch):
+    """Shadow mode: `open-batch`/`cycle`/`carry`/`monitor` must never construct a real
+    `AlpacaPaperBroker` at all (`cli.py::_intraday_execution_broker` builds a shadow
+    `FakeBroker` from the ledger's own persisted state instead) -- patched to raise, not
+    just a benign fake, to prove that structurally, mirroring `fake_placebo_env`'s own
+    assertion style for the identical claim about the placebo."""
+    market_data = _FakeMarketData()
+    news_client = _FakeNewsClient()
+
+    def fake_run(argv, stdin_text, timeout_seconds):
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=_result_json(), stderr="")
+
+    def _must_not_be_called(*_args, **_kwargs):
+        raise AssertionError("shadow mode must never construct a real AlpacaPaperBroker")
+
+    monkeypatch.setattr(
+        "semimc.execution.alpaca_broker.AlpacaPaperBroker.from_env",
+        classmethod(lambda cls, **kwargs: _must_not_be_called()),
+    )
+    monkeypatch.setattr(
+        "semimc.execution.market_data.AlpacaMarketDataClient.from_env",
+        classmethod(lambda cls, **kwargs: market_data),
+    )
+    monkeypatch.setattr(
+        "semimc.execution.news.AlpacaNewsClient.from_env",
+        classmethod(lambda cls, **kwargs: news_client),
+    )
+    monkeypatch.setattr(
+        "semimc.intraday.llm.ClaudeCliClient.from_env",
+        classmethod(lambda cls: ClaudeCliClient(run=fake_run)),
+    )
+    monkeypatch.setattr("semimc.data.load_market_data", lambda *a, **k: _FakePitMarketData())
+    return market_data, news_client
+
+
+def test_open_batch_runs_cleanly_in_shadow_mode_without_a_real_broker(
+    tmp_path, fake_intraday_shadow_env
+):
+    result = runner.invoke(app, ["intraday", "open-batch"] + _shadow_tradeable_overrides(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "Proposals: 0 seen" in result.output
+
+
+def test_cycle_runs_cleanly_in_shadow_mode_without_a_real_broker(
+    tmp_path, fake_intraday_shadow_env
+):
+    result = runner.invoke(app, ["intraday", "cycle"] + _shadow_tradeable_overrides(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "Proposals: 0 seen" in result.output
+
+
+def test_carry_runs_cleanly_in_shadow_mode_without_a_real_broker(
+    tmp_path, fake_intraday_shadow_env
+):
+    result = runner.invoke(app, ["intraday", "carry"] + _shadow_tradeable_overrides(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "Carried: (none)" in result.output
+
+
+def test_monitor_runs_cleanly_in_shadow_mode_without_a_real_broker(
+    tmp_path, fake_intraday_shadow_env
+):
+    result = runner.invoke(app, ["intraday", "monitor"] + _shadow_tradeable_overrides(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "Closed: (none)" in result.output
+
+
+def test_shadow_broker_state_persists_across_two_separate_invocations(
+    tmp_path, fake_intraday_shadow_env, monkeypatch
+):
+    """Each cron-triggered CLI call is a fresh process -- Stage 1's shadow book must
+    survive that the same way the placebo's own shadow ledger already does."""
+    market_data, _news_client = fake_intraday_shadow_env
+    market_data._quotes["NVDA"] = 190.0
+
+    ledger_path = tmp_path / "intraday.sqlite3"
+    with IntradayLedger(ledger_path) as ledger:
+        ledger.record_watchlist_item("2026-09-21", "NVDA", thesis="test")
+
+    def fake_run(argv, stdin_text, timeout_seconds):
+        proposal = {
+            "action": "open",
+            "symbol": "NVDA",
+            "side": "buy",
+            "size_pct": 0.05,
+            "limit_price": 190.0,
+            "thesis": "AI capex",
+            "invalidation_price": 185.0,
+            "time_stop_minutes": 60,
+        }
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=_result_json(structured_output={"proposals": [proposal]}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "semimc.intraday.llm.ClaudeCliClient.from_env",
+        classmethod(lambda cls: ClaudeCliClient(run=fake_run)),
+    )
+
+    first = runner.invoke(
+        app,
+        ["intraday", "open-batch", "--as-of", "2026-09-21"] + _shadow_tradeable_overrides(tmp_path),
+    )
+    assert first.exit_code == 0, first.output
+    assert "Orders submitted" in first.output
+
+    with IntradayLedger(ledger_path) as ledger:
+        state = ledger.load_shadow_broker_state()
+    assert state is not None
+    assert "NVDA" in state["positions"]
+
+    second = runner.invoke(
+        app,
+        ["intraday", "monitor", "--as-of", "2026-09-21"] + _shadow_tradeable_overrides(tmp_path),
+    )
+    assert second.exit_code == 0, second.output
+    assert "NVDA" in second.output
 
 
 def test_eod_review_skips_cleanly_with_nothing_to_review(tmp_path, fake_intraday_env):

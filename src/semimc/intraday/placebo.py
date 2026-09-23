@@ -10,8 +10,11 @@ primitive here is reused unmodified from Phases 3-5 (`proposals.py::validate_pro
 placebo-only `IntradayLedger` and a `FakeBroker` reconstructed from that ledger's own
 persisted state -- this is what makes the risk controls *identical*, not a parallel
 reimplementation of them. The only genuinely new logic this phase adds is
-`_mark_to_market`: nothing else keeps a `FakeBroker`'s `.cash`/`.equity` correct the way a
-real broker automatically would.
+`_mark_to_market` -- since promoted to `jobs.py::mark_broker_to_market` in Phase 11, once
+Stage 1's own shadow mode for the *real* loop needed the identical computation (same
+"second caller needs the identical computation" reasoning `turnover_so_far_usd` was
+already promoted for): nothing else keeps a `FakeBroker`'s `.cash`/`.equity` correct the
+way a real broker automatically would.
 
 No LLM call, no news, no `AlpacaPaperBroker` -- confirmed in code, not just by convention,
 since this module never imports either.
@@ -30,43 +33,20 @@ from ..execution.broker import OrderSide
 from ..execution.fake_broker import FakeBroker
 from ..execution.market_data import AlpacaMarketDataClient
 from ..execution.pretrade import KillSwitchActive, check_kill_switch
-from .jobs import CarryResult, midpoint_price, quote_map, run_carry, turnover_so_far_usd
+from .jobs import (
+    CarryResult,
+    mark_broker_to_market,
+    midpoint_price,
+    quote_map,
+    run_carry,
+    turnover_so_far_usd,
+)
 from .ledger import IntradayLedger
 from .monitor import check_invalidation_and_time_stops
 from .orders import build_entry_order, submit_order_with_fault_isolation
 from .proposals import TradeProposal, ValidationContext, validate_proposal
 
 _THESIS = "placebo: random draw from watchlist -- see THESES.md's T6"
-
-
-def _mark_to_market(
-    shadow_broker: FakeBroker,
-    shadow_ledger: IntradayLedger,
-    market_data: AlpacaMarketDataClient,
-    starting_equity: float,
-    now: dt.datetime,
-) -> None:
-    """Sets `shadow_broker.cash`/`.equity` fresh, every call, from `starting_equity` plus
-    `shadow_ledger.total_realized_cash_flow()` (every fill this ledger has ever recorded)
-    plus a live mark of whatever's currently held. A missing quote for a held symbol falls
-    back to its own `avg_entry_price` -- never crashes on one bad quote, same tolerance
-    `jobs.py::quote_map` already uses.
-
-    Deliberately recomputed from scratch rather than incrementally maintained: this is
-    the one place equity/cash truth lives, so it can never drift out of sync with a
-    persisted running total, and it stays correct no matter which code path produced a
-    fill (this module's own entry, or `monitor.py`/`run_carry` closing one out).
-    """
-    cash = starting_equity + shadow_ledger.total_realized_cash_flow()
-    market_value = 0.0
-    for position in shadow_broker.list_positions():
-        quote = market_data.latest_quote(position.symbol, at=now)
-        price = midpoint_price(quote)
-        if price is None:
-            price = position.avg_entry_price
-        market_value += position.qty * price
-    shadow_broker.cash = cash
-    shadow_broker.equity = cash + market_value
 
 
 def placebo_day_pnl(
@@ -78,14 +58,14 @@ def placebo_day_pnl(
 ) -> float | None:
     """The placebo's day P&L -- one of `eod_report.py`'s "benchmarks for the day" (T6's
     control group, Phase 7), added in Phase 9b: today's mark-to-market equity minus its
-    own recorded session-open equity, reusing `_mark_to_market` (the one place shadow
-    equity is ever computed) against a `FakeBroker` reconstructed from its persisted
-    state -- the same reconstruction every placebo job already does, not a second copy.
-    Lives here rather than in `eod_report.py`, which deliberately never reaches into a
-    client's or another module's own internals directly (see that module's docstring);
-    this is exactly that reach, so it belongs where `_mark_to_market`/`FakeBroker` already
-    do. `None` if the placebo never ran today (no session-open equity row yet) or never
-    ran at all (no persisted state)."""
+    own recorded session-open equity, reusing `mark_broker_to_market` (the one place
+    shadow equity is ever computed) against a `FakeBroker` reconstructed from its
+    persisted state -- the same reconstruction every placebo job already does, not a
+    second copy. Lives here rather than in `eod_report.py`, which deliberately never
+    reaches into a client's or another module's own internals directly (see that
+    module's docstring); this is exactly that reach, so it belongs where
+    `mark_broker_to_market`/`FakeBroker` already do. `None` if the placebo never ran
+    today (no session-open equity row yet) or never ran at all (no persisted state)."""
     state = shadow_ledger.load_shadow_broker_state()
     if state is None:
         return None
@@ -93,7 +73,7 @@ def placebo_day_pnl(
     if opening_equity is None:
         return None
     shadow_broker = FakeBroker.from_state(state, now=now)
-    _mark_to_market(
+    mark_broker_to_market(
         shadow_broker, shadow_ledger, market_data, config.intraday.placebo.starting_equity, now
     )
     return shadow_broker.equity - opening_equity
@@ -144,7 +124,7 @@ def run_placebo_cycle(
     )
 
     starting_equity = intraday.placebo.starting_equity
-    _mark_to_market(shadow_broker, shadow_ledger, market_data, starting_equity, now)
+    mark_broker_to_market(shadow_broker, shadow_ledger, market_data, starting_equity, now)
     shadow_ledger.record_session_open_equity(as_of, shadow_broker.equity)
     equity_at_session_open = shadow_ledger.session_open_equity(as_of) or shadow_broker.equity
 
@@ -247,7 +227,7 @@ def run_placebo_carry(
     "no written multi-day thesis -> safe default, close it" already makes every placebo
     position intraday-only -- no placebo-specific carry rule needed.
     """
-    _mark_to_market(
+    mark_broker_to_market(
         shadow_broker, shadow_ledger, market_data, config.intraday.placebo.starting_equity, now
     )
     return run_carry(config, shadow_broker, shadow_ledger, market_data, as_of, now)

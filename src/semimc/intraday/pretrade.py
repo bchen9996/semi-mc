@@ -30,13 +30,29 @@ class IntradayPretradeContext:
     broker: Broker
 
 
-def check_intraday_pretrade(context: IntradayPretradeContext) -> list[str]:
+def check_intraday_pretrade(
+    context: IntradayPretradeContext, *, shadow: bool = False, check_market_open: bool = True
+) -> list[str]:
     """Every gate that must clear before submitting *any* S4 order today.
 
     Returns every failure found, not just the first, same as `execution/pretrade.py::
     check_pretrade`. No configured start/cutoff execution window the way paper's has --
     S4's time-of-day gating is the job schedule itself (Phase 5), not a second,
     overlapping window check here.
+
+    ``shadow`` (Phase 11, Rollout Stage 1) skips the account-identity/account-status
+    checks -- `context.broker` is a `FakeBroker` with placeholder identity fields in
+    shadow mode, and matching those against `registered_account` would be theater, not a
+    real check (`intraday/placebo.py::run_placebo_cycle` already makes the identical
+    choice, checking only the kill switch). Kill switch and `trading_enabled` are still
+    checked either way -- shadow mode is still something the owner must deliberately
+    turn on.
+
+    ``check_market_open`` (Phase 11) defaults to `True` (today's exact behavior) but
+    `run_research` passes `False`: research runs at 07:30 Central, before the market
+    opens, so this check would otherwise *always* fail there, live or shadow -- exactly
+    the kind of second, overlapping time check this function's own docstring already
+    says it isn't meant to impose (timing is the job schedule's job).
     """
     failures: list[str] = []
 
@@ -49,19 +65,21 @@ def check_intraday_pretrade(context: IntradayPretradeContext) -> list[str]:
         failures.append("intraday trading is not trading_enabled")
 
     account = context.broker.get_account()
-    if account.account_number != context.config.intraday.registered_account:
-        # Never interpolate the account number itself into this message -- it is recorded
-        # verbatim as a ledger incident that this project deliberately git-tracks, the
-        # same rule execution/pretrade.py already follows and for the same reason (found
-        # the hard way once already, 2026-09-19: see that module's docstring).
-        failures.append(
-            "account does not match intraday.registered_account -- refusing to trade "
-            "against an unregistered account"
-        )
-    if account.status != "ACTIVE":
-        failures.append(f"account status is {account.status}")
+    if not shadow:
+        if account.account_number != context.config.intraday.registered_account:
+            # Never interpolate the account number itself into this message -- it is
+            # recorded verbatim as a ledger incident that this project deliberately
+            # git-tracks, the same rule execution/pretrade.py already follows and for
+            # the same reason (found the hard way once already, 2026-09-19: see that
+            # module's docstring).
+            failures.append(
+                "account does not match intraday.registered_account -- refusing to trade "
+                "against an unregistered account"
+            )
+        if account.status != "ACTIVE":
+            failures.append(f"account status is {account.status}")
 
-    if not context.broker.get_clock().is_open:
+    if check_market_open and not context.broker.get_clock().is_open:
         failures.append("market is closed")
 
     return failures

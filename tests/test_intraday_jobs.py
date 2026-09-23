@@ -15,10 +15,12 @@ import subprocess
 from dataclasses import dataclass, field
 
 import pandas as pd
+import pytest
 from fixtures.injection_corpus import INJECTION_CORPUS
 
 from semimc.execution.fake_broker import FakeBroker
 from semimc.intraday.jobs import (
+    mark_broker_to_market,
     run_carry,
     run_cycle,
     run_eod_review,
@@ -42,10 +44,16 @@ ACCOUNT = "FAKE-PAPER-0001"
 
 
 def _tradeable_config(config, tmp_path, **risk_overrides):
+    """`shadow_mode: False` (Phase 11's default is `True`) -- every existing test in this
+    file exercises the *real*-broker pretrade path (a `FakeBroker` standing in for
+    `AlpacaPaperBroker`, matched by account identity), not Stage 1's shadow path. Shadow
+    mode gets its own, explicitly-labeled tests instead of silently changing what every
+    other test here already verifies."""
     intraday = config.intraday.model_copy(
         update={
             "trading_enabled": True,
             "registered_account": ACCOUNT,
+            "shadow_mode": False,
             "kill_switch_path": str(tmp_path / "KILL_SWITCH"),
             **(
                 {"risk": config.intraday.risk.model_copy(update=risk_overrides)}
@@ -191,6 +199,65 @@ def _seed_open_position(
     return proposal_id
 
 
+# -- mark_broker_to_market (promoted from placebo.py, Phase 11) -------------------------
+
+
+def test_mark_broker_to_market_starting_equity_with_no_history_or_positions(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    mark_broker_to_market(broker, ledger, _FakeMarketData(), starting_equity=100_000.0, now=NOW)
+    assert broker.cash == pytest.approx(100_000.0)
+    assert broker.equity == pytest.approx(100_000.0)
+    ledger.close()
+
+
+def test_mark_broker_to_market_reflects_realized_fills_and_live_marks(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_order("s4-nvda-1", "NVDA", "buy", status="filled", leg="entry")
+    ledger.record_fill("s4-nvda-1", qty=10, price=100.0, filled_at=NOW)
+    broker = FakeBroker()  # no position on the broker itself -- only the ledger has the fill
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(110.0)})
+
+    # cash = 100_000 - 10*100 = 99_000; no live position on the broker itself here, so
+    # equity == cash (this test only checks the cash-flow half; the next test adds a
+    # position via a real fill so both halves are exercised together).
+    mark_broker_to_market(broker, ledger, market_data, starting_equity=100_000.0, now=NOW)
+    assert broker.cash == pytest.approx(99_000.0)
+    assert broker.equity == pytest.approx(99_000.0)
+    ledger.close()
+
+
+def test_mark_broker_to_market_values_a_held_position_at_the_live_quote(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, price=190.0)
+    held_qty = broker.list_positions()[0].qty
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(200.0)})
+
+    mark_broker_to_market(broker, ledger, market_data, starting_equity=100_000.0, now=NOW)
+
+    cash_flow = ledger.total_realized_cash_flow()
+    assert broker.cash == pytest.approx(100_000.0 + cash_flow)
+    assert broker.equity == pytest.approx(broker.cash + held_qty * 200.0)
+    ledger.close()
+
+
+def test_mark_broker_to_market_falls_back_to_avg_entry_price_on_a_missing_quote(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, price=190.0)
+    position = broker.list_positions()[0]
+
+    mark_broker_to_market(broker, ledger, _FakeMarketData(), starting_equity=100_000.0, now=NOW)
+
+    cash_flow = ledger.total_realized_cash_flow()
+    assert broker.equity == pytest.approx(broker.cash + position.qty * position.avg_entry_price)
+    assert broker.cash == pytest.approx(100_000.0 + cash_flow)
+    ledger.close()
+
+
 # -- run_preflight --------------------------------------------------------------------------
 
 
@@ -310,6 +377,65 @@ def test_run_preflight_reports_the_current_playbook_version(config, tmp_path):
     ledger.close()
 
 
+def test_run_preflight_keeps_an_account_mismatch_routine_under_shadow_mode(config, tmp_path):
+    """(Phase 11) Once Stage 1 flips `trading_enabled=True`, an account mismatch would
+    normally become a real failure -- but preflight's own broker is always the real one
+    (unlike `open-batch`/`cycle`/`carry`/`monitor`), so while `shadow_mode=True` this
+    finding must stay routine: no real order was ever going to be placed against it."""
+    intraday = config.intraday.model_copy(
+        update={
+            "trading_enabled": True,
+            "registered_account": "SOME-REAL-ACCOUNT-NOT-THIS-ONE",
+            "shadow_mode": True,
+        }
+    )
+    cfg = config.model_copy(update={"intraday": intraday})
+    ledger = _ledger(tmp_path)
+
+    result = run_preflight(
+        cfg,
+        FakeBroker(),
+        _FakeMarketData(quotes={"SPY": _quote(500.0)}),
+        _FakeNewsClient(),
+        ledger,
+        NOW,
+    )
+
+    assert result.passed
+    assert result.shadow_mode is True
+    assert any("registered_account" in n for n in result.notes)
+    ledger.close()
+
+
+def test_run_preflight_still_fails_the_kill_switch_under_shadow_mode(config, tmp_path):
+    """The one finding `shadow_mode` must never make routine -- an emergency halt stops
+    everything, shadow included."""
+    intraday = config.intraday.model_copy(
+        update={
+            "trading_enabled": True,
+            "registered_account": "FAKE-PAPER-0001",
+            "shadow_mode": True,
+            "kill_switch_path": str(tmp_path / "KILL_SWITCH"),
+        }
+    )
+    cfg = config.model_copy(update={"intraday": intraday})
+    (tmp_path / "KILL_SWITCH").write_text("stop", encoding="utf-8")
+    ledger = _ledger(tmp_path)
+
+    result = run_preflight(
+        cfg,
+        FakeBroker(),
+        _FakeMarketData(quotes={"SPY": _quote(500.0)}),
+        _FakeNewsClient(),
+        ledger,
+        NOW,
+    )
+
+    assert not result.passed
+    assert any("kill switch" in f for f in result.failures)
+    ledger.close()
+
+
 # -- run_preopen ----------------------------------------------------------------------------
 
 
@@ -422,6 +548,67 @@ def test_run_cycle_is_skipped_when_trading_is_disabled(config, tmp_path):
     assert result.skipped_reason is not None
     assert result.proposals_seen == 0
     ledger.close()
+
+
+# -- run_cycle: shadow mode (Phase 11, Rollout Stage 1) ----------------------------------
+
+
+def test_run_cycle_shadow_mode_lets_a_proposal_through_despite_an_account_mismatch(
+    config, tmp_path
+):
+    """`shadow_mode=True` (Stage 1's own default) means `broker` is a `FakeBroker` with no
+    real account to match -- `run_cycle` must not reject on that mismatch the way it
+    would for a real, live account."""
+    intraday = config.intraday.model_copy(
+        update={
+            "trading_enabled": True,
+            "registered_account": "SOME-REAL-ACCOUNT-NOT-THIS-ONE",
+            "shadow_mode": True,
+            "kill_switch_path": str(tmp_path / "KILL_SWITCH"),
+        }
+    )
+    cfg = config.model_copy(update={"intraday": intraday})
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    proposal = {
+        "action": "open",
+        "symbol": "NVDA",
+        "side": "buy",
+        "size_pct": 0.05,
+        "limit_price": 190.0,
+        "thesis": "AI capex",
+        "invalidation_price": 185.0,
+        "time_stop_minutes": 60,
+    }
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
+    broker = FakeBroker()  # account_number="FAKE-PAPER-0001" -- never matches registered_account
+
+    result = run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+
+    assert result.skipped_reason is None
+    assert result.proposals_accepted == 1
+
+
+def test_run_cycle_non_shadow_mode_still_rejects_an_account_mismatch(config, tmp_path):
+    """The exact opposite of the test above, with `shadow_mode=False` -- confirms shadow
+    mode is what changed this, not some other regression."""
+    intraday = config.intraday.model_copy(
+        update={
+            "trading_enabled": True,
+            "registered_account": "SOME-REAL-ACCOUNT-NOT-THIS-ONE",
+            "shadow_mode": False,
+            "kill_switch_path": str(tmp_path / "KILL_SWITCH"),
+        }
+    )
+    cfg = config.model_copy(update={"intraday": intraday})
+    ledger = _ledger(tmp_path)
+    client = _sequenced_llm_client(_result_json())
+
+    result = run_cycle("cycle_1", cfg, FakeBroker(), ledger, _FakeMarketData(), client, AS_OF, NOW)
+
+    assert result.skipped_reason is not None
+    assert "registered_account" in result.skipped_reason
 
 
 # -- run_cycle: opening and tranche-splitting -------------------------------------------------
@@ -782,6 +969,36 @@ def test_run_research_records_a_brief_and_watchlist(config, tmp_path, market):
     assert ledger.latest_brief()["content"] == {"text": "quiet morning"}
     assert [row["symbol"] for row in ledger.watchlist_for(AS_OF)] == ["NVDA"]
     assert ledger.headline_already_seen("alpaca_news", "a1")
+    ledger.close()
+
+
+def test_run_research_succeeds_before_the_market_opens(config, tmp_path, market):
+    """(Phase 11) A real bug found while building Stage 1's shadow mode: research runs
+    at 07:30 Central, before the 08:30 open, so `check_intraday_pretrade`'s default
+    market-open check would otherwise fail this every single call, live or shadow. Every
+    other `run_research` test happens to use `FakeBroker()`'s default `market_open=True`,
+    which is exactly why this went uncaught until now."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"morning_brief": "quiet morning", "watchlist": []})
+    )
+
+    result = run_research(
+        cfg,
+        FakeBroker(market_open=False),
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        market,
+        ledger,
+        client,
+        AS_OF,
+        "research",
+        NOW,
+    )
+
+    assert result.brief_recorded
+    assert result.skipped_reason is None
     ledger.close()
 
 

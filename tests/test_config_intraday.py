@@ -20,6 +20,15 @@ def test_intraday_defaults_to_disabled_with_no_registered_account():
     assert cfg.intraday.registered_account is None
 
 
+def test_intraday_defaults_to_shadow_mode():
+    """Rollout Stage 1 (Phase 11) -- safe by default, same reasoning `trading_enabled`
+    defaults `False`: flipping `trading_enabled` alone must not be enough to place a real
+    order, `shadow_mode` also has to be deliberately turned off."""
+    cfg = load_config()
+    assert cfg.intraday.shadow_mode is True
+    assert cfg.intraday.shadow_starting_equity == pytest.approx(100_000.0)
+
+
 def test_intraday_section_matches_the_briefs_defaults_table():
     cfg = load_config()
     assert cfg.intraday.budget.max_cost_usd_per_call == pytest.approx(1.0)
@@ -81,3 +90,4 @@ def test_paper_yaml_loads_intraday_at_defaults():
     assert cfg.intraday.trading_enabled is False
     assert cfg.intraday.registered_account is None
     assert cfg.intraday.options.enabled is False
+    assert cfg.intraday.shadow_mode is True
