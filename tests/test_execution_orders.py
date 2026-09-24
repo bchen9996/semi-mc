@@ -110,6 +110,19 @@ def test_build_orders_rounds_to_whole_shares_when_not_fractionable(config):
     assert orders[0].qty == pytest.approx(303.0)
 
 
+def test_build_orders_rounds_a_fractionable_qty_to_six_decimal_places(config):
+    """Found 2026-09-23 auditing for more of the same defect class as
+    collared_limit_price's sub-penny rejection: Alpaca accepts at most 9 decimal places
+    on `qty`, and a raw division can produce far more (`5000.0 / 190.0 ==
+    26.31578947368421`, 14 places) for any fractionable symbol -- the default when
+    `fractionable` says nothing about a symbol."""
+    decision = _decision({"NVDA": 0.5})
+    prices = pd.Series({"NVDA": 190.0})  # 5000 / 190 = 26.31578947368421...
+    orders = build_orders(decision, {}, prices, equity=10_000.0, config=config)
+    assert orders[0].qty == pytest.approx(26.315789)
+    assert len(str(orders[0].qty).split(".")[-1]) <= 6
+
+
 def test_build_orders_ignores_a_symbol_with_no_usable_price(config):
     decision = _decision({"NVDA": 0.5, "AMD": 0.5})
     prices = pd.Series({"NVDA": 100.0})  # AMD price missing

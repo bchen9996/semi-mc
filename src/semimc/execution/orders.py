@@ -130,8 +130,12 @@ def build_orders(
 
         side: OrderSide = "buy" if delta_notional > 0 else "sell"
         qty = abs(delta_notional) / price
-        if not fractionable.get(symbol, True):
-            qty = math.floor(qty)
+        # Alpaca accepts at most 9 decimal places on `qty`; a raw division can produce
+        # far more (`docs/alpaca_notes.md`'s "Fractional and notional orders" -- found
+        # 2026-09-23, the same defect class as collared_limit_price's own sub-penny
+        # rejection). 6 decimals is comfortably inside that limit with no measurable
+        # effect on notional; a non-fractionable symbol still floors to a whole share.
+        qty = math.floor(qty) if not fractionable.get(symbol, True) else round(qty, 6)
         if side == "sell":
             qty = min(qty, current_qty)
         if qty <= 0:

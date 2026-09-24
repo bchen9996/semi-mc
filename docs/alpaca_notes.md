@@ -80,6 +80,16 @@ real account is flagged as such, not guessed at.
 - **No fractional short sales** -- "all fractional sell orders are marked long."
 - Requires the asset's `fractionable` flag; a non-fractionable symbol rejects with
   "requested asset is not fractionable."
+- **`qty` precision: up to 9 decimal places.** Found while auditing for more instances of
+  the same defect class as the `limit_price` sub-penny rejection (2026-09-23,
+  `execution/orders.py::round_to_tick`): `build_orders`'s own `qty = abs(delta_notional) /
+  price` is a raw float division with no rounding at all for a fractionable symbol (only
+  non-fractionable symbols get `math.floor`'d), so it can produce far more than 9 decimal
+  digits (`5000.0 / 190.0 == 26.31578947368421`, 14 places) -- never yet triggered in
+  production because s3 (the only `trading_enabled` sleeve) hadn't reached its first
+  monthly rebalance since go-live, so `run_execute` had never actually submitted a real
+  order to hit this. Fixed by rounding to 6 decimal places, comfortably inside the limit
+  with no measurable effect on the traded notional.
   Source: <https://docs.alpaca.markets/us/docs/fractional-trading.md>
 
 ## Market data plans
