@@ -445,8 +445,12 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/claude" --version
       - name: Review the day and commit the ledger, report, and any playbook proposal
-        # No `semimc fetch` here -- `research`'s own 07:30 fetch already refreshed the
-        # shared price cache SOXX's benchmark reads, and it doesn't change intraday.
+        # `semimc fetch` first -- found the hard way (a real failed run, 2026-09-23):
+        # `data_cache/` is gitignored ("reproducible outputs, not source"), and each job
+        # in this workflow gets its own fresh, ephemeral runner. `research`'s own 07:30
+        # fetch runs on a *different* VM, hours earlier, and never persists here --
+        # `intraday_eod_review`'s `load_market_data(cfg, tickers=["SOXX"])` call
+        # (cli.py) needs this job's own fetch, same as `research`'s job already does.
         env:
           ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
           ALPACA_S4_SECRET_KEY: ${{ secrets.ALPACA_S4_SECRET_KEY }}
@@ -458,6 +462,7 @@ jobs:
           for attempt in 1 2 3; do
             git fetch origin main
             git reset --hard origin/main
+            uv run semimc fetch --config config/paper.yaml
             uv run semimc intraday eod-review --config config/paper.yaml
             git add ledger/intraday.sqlite3
             [ -d reports ] && git add reports/ || true
