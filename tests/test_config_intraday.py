@@ -83,11 +83,15 @@ def test_intraday_settings_are_overridable_with_set():
     assert cfg.intraday.budget.max_cost_usd_per_day == pytest.approx(5.0)
 
 
-def test_paper_yaml_loads_intraday_at_defaults():
-    """`config/paper.yaml` is the shared config root for both s0/s3 and S4 -- S4 stays at
-    its conservative defaults there, same as s0/s3 did before go-live."""
+def test_paper_yaml_loads_intraday_at_rollout_stage_1():
+    """`config/paper.yaml` is the shared config root for both s0/s3 and S4. Rollout Stage
+    1 started 2026-09-23 (owner's deliberate action, mirroring s3's own two-step go-live --
+    `test_paper_yaml_loads_and_keeps_runs_separate_from_research_runs`'s docstring):
+    `trading_enabled: true` lets the real loop run for real, but `shadow_mode: true`
+    (unchanged, still the safe default) means every fill still goes through `FakeBroker`,
+    never Alpaca -- see `tasks/todo.md`'s "Rollout stages from the brief" entry."""
     cfg = load_config(PROJECT_ROOT / "config" / "paper.yaml")
-    assert cfg.intraday.trading_enabled is False
-    assert cfg.intraday.registered_account is None
+    assert cfg.intraday.trading_enabled is True
+    assert cfg.intraday.registered_account == "PA33HJGNHLI7"
     assert cfg.intraday.options.enabled is False
     assert cfg.intraday.shadow_mode is True

@@ -186,9 +186,12 @@ paper:
 
 intraday:
   # S4 (BRIEF_INTRADAY.md): its own sleeve, its own Alpaca paper account, never s0/s3's.
-  # Every default below stays off/conservative until Phase 1+ actually builds the loop.
-  trading_enabled: false
-  registered_account: null
+  # Rollout Stage 1 ("shadow, 2 weeks") started 2026-09-23, owner's deliberate action --
+  # trading_enabled: true lets the real loop run and propose/risk-validate for real, but
+  # shadow_mode: true (still the default) means every fill is against FakeBroker, never
+  # submitted to Alpaca -- see tasks/todo.md's "Rollout stages from the brief" entry.
+  trading_enabled: true
+  registered_account: PA33HJGNHLI7
   shadow_mode: true
   shadow_starting_equity: 100000.0
   budget:

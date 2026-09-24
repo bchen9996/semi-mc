@@ -1882,13 +1882,21 @@ problem for T6's control group):
 
 **Remaining prerequisites** -- what Phase 0 didn't (and couldn't) resolve:
 
-1. **The owner still needs to actually create the second Alpaca paper account** and add
-   `ALPACA_S4_API_KEY`/`ALPACA_S4_SECRET_KEY` as GitHub repo secrets, and a new
-   `ANTHROPIC_API_KEY` (Console/metered, per the `--bare` decision below) scoped *only* to
-   the CI environment -- confirmed in `code.claude.com/docs/en/authentication` that
-   setting it locally would silently flip the owner's own interactive Claude Code usage to
-   metered billing too. The code side (parameterized `from_env`) is done; these are
-   real-world owner actions, not code.
+1. ~~The owner still needs to actually create the second Alpaca paper account~~ --
+   **resolved by 2026-09-23**: `ALPACA_S4_API_KEY`/`ALPACA_S4_SECRET_KEY` were already live
+   as GitHub repo secrets before this was even checked (inferred, not owner-stated --
+   every S4 job since 2026-09-22 has declined with a clean "account does not match
+   intraday.registered_account" ledger incident rather than crashing, which only happens
+   if `AlpacaPaperBroker.get_account()` itself succeeded first; `from_env` raises
+   `RuntimeError` immediately on a missing key pair, which would have shown up as a failed
+   job, not a routine decline). The owner then gave the account's own number
+   (`PA33HJGNHLI7`), now `intraday.registered_account` in `config/paper.yaml`. **Still
+   unconfirmed**: whether `ANTHROPIC_API_KEY` (Console/metered, per the `--bare` decision
+   below, scoped *only* to the CI environment -- confirmed in `code.claude.com/docs/en/
+   authentication` that setting it locally would silently flip the owner's own interactive
+   Claude Code usage to metered billing too) is genuinely valid -- every run so far has
+   declined at pretrade before ever reaching `invoke_role`, so the first real `research`
+   run under Stage 1 is the first actual test of it.
 2. ~~Where the loop runs~~ -- **resolved**, see the correction above.
 3. **A per-day model-call spend cap** -- the mechanism is built (`intraday/budget.py`), but
    the $10 default is a placeholder. Recalibrate from real Stage-1 shadow-mode logging.
@@ -1908,13 +1916,15 @@ problem for T6's control group):
 
 **Rollout stages from the brief** (each gated on the owner, never automatic):
 
-- [ ] Stage 1 -- shadow, 2 weeks. **Runnable as of Phase 11** (`intraday.shadow_mode:
-      true`, already the default, plus flipping `intraday.trading_enabled: true` and
-      registering a real S4 Alpaca *paper* account -- free, no capital risk). "Runnable"
-      is not "run": actually starting the 2-week clock is the owner's own separate
-      action, same "built vs. executed" distinction Phase 8 drew for enabling s0/s3.
-      Full schedule, no orders submitted, proposals filled against the cost model,
-      playbook frozen for a clean baseline.
+- [x] Stage 1 -- shadow, 2 weeks. **Started 2026-09-23** (owner's deliberate action,
+      `docs/go_live_checklist.md` item 6's own two-step pattern: register the account,
+      then separately flip the switch). `config/paper.yaml`: `intraday.registered_account:
+      PA33HJGNHLI7`, `intraday.trading_enabled: true`, `intraday.shadow_mode: true`
+      (unchanged, still the default). Full schedule, no real orders submitted, proposals
+      filled against the cost model (`FakeBroker`), playbook frozen for a clean baseline.
+      Runs through roughly 2026-10-07. Unconfirmed going in: whether `ANTHROPIC_API_KEY`
+      is a valid GitHub secret -- see "Remaining prerequisites" item 1; the first
+      `research` run under this stage is the first real test of it.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's evidence looks good; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).
