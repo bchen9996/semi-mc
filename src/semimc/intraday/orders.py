@@ -32,7 +32,7 @@ from ..execution.broker import (
     RateLimitError,
     WashTradeError,
 )
-from ..execution.orders import collared_limit_price
+from ..execution.orders import collared_limit_price, round_to_tick
 from ..execution.pretrade import check_order_tradable
 from .ledger import IntradayLedger
 from .proposals import OPEN_OR_ADD_ACTIONS, TradeProposal
@@ -109,7 +109,12 @@ def build_entry_order(
         # A plain stop, not a stop-limit: the point of this leg is a guaranteed exit at
         # the invalidation level, and a stop-limit can fail to fill in exactly the
         # fast-moving market a stop is meant to protect against.
-        stop_loss_price=proposal.invalidation_price,
+        #
+        # round_to_tick: invalidation_price is the LLM's own free-form float and has no
+        # guarantee of landing on a valid Alpaca price increment (see that function's
+        # docstring) -- unrounded, this would 422 the same way collared_limit_price's
+        # output did before this fix.
+        stop_loss_price=round_to_tick(proposal.invalidation_price),
     )
 
 
@@ -228,6 +233,10 @@ def build_replacement_stop_order(
     `client_order_id` is suffixed the same way `FakeBroker`'s synthesized OTO leg is
     (`"...::stop"`), for the same reason: this isn't another attempt at the same order,
     it's a different kind of order for the same symbol/cycle.
+
+    `stop_price` is rounded via `round_to_tick` -- callers pass the original entry's
+    stored `invalidation_price` straight from the ledger, an LLM-set float with the same
+    sub-penny risk `build_entry_order`'s own `stop_loss_price` has.
     """
     return OrderRequest(
         symbol=symbol,
@@ -236,7 +245,7 @@ def build_replacement_stop_order(
         time_in_force="day",
         client_order_id=f"{intraday_client_order_id(as_of, cycle, symbol, attempt)}::stop",
         qty=qty,
-        stop_price=stop_price,
+        stop_price=round_to_tick(stop_price),
     )
 
 

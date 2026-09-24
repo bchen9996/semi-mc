@@ -119,14 +119,16 @@ def test_build_entry_order_uses_a_collared_limit_price_past_the_quote_for_a_buy(
     proposal = _proposal(side="buy")
     config = IntradayConfig(risk={"equity_cost_bps_per_side": 8.0})
     order = build_entry_order(proposal, AS_OF, CYCLE, price=190.0, equity=100_000.0, config=config)
-    assert order.limit_price == pytest.approx(190.0 * (1 + 8.0 / 10_000))
+    # round_to_tick: 190.0 * 1.0008 = 190.152, rounded to Alpaca's $0.01 increment.
+    assert order.limit_price == pytest.approx(190.15)
 
 
 def test_build_entry_order_collars_the_other_direction_for_a_sell():
     proposal = _proposal(side="sell")
     config = IntradayConfig(risk={"equity_cost_bps_per_side": 8.0})
     order = build_entry_order(proposal, AS_OF, CYCLE, price=190.0, equity=100_000.0, config=config)
-    assert order.limit_price == pytest.approx(190.0 * (1 - 8.0 / 10_000))
+    # round_to_tick: 190.0 * 0.9992 = 189.848, rounded to Alpaca's $0.01 increment.
+    assert order.limit_price == pytest.approx(189.85)
 
 
 def test_build_entry_order_attaches_a_real_stop_at_the_invalidation_price():

@@ -9,7 +9,14 @@ import pandas as pd
 import pytest
 
 from semimc.execution.broker import OrderRequest, Position
-from semimc.execution.orders import build_orders, client_order_id, sequence_orders, target_notional
+from semimc.execution.orders import (
+    build_orders,
+    client_order_id,
+    collared_limit_price,
+    round_to_tick,
+    sequence_orders,
+    target_notional,
+)
 from semimc.strategy.decide import Decision
 
 
@@ -125,6 +132,34 @@ def test_build_orders_never_shorts_even_from_a_malformed_negative_weight(config)
     assert len(orders) == 1
     assert orders[0].side == "sell"
     assert orders[0].qty == pytest.approx(10.0)  # capped at the held quantity, not 60
+
+
+# -- round_to_tick / collared_limit_price (found via a real 422, 2026-09-23) -------------
+
+
+def test_round_to_tick_rounds_to_the_nearest_cent_at_or_above_a_dollar():
+    assert round_to_tick(384.3332332763672) == pytest.approx(384.33)
+
+
+def test_round_to_tick_uses_a_finer_increment_below_a_dollar():
+    """Alpaca's own rule is $0.0001 below $1, not $0.01 -- rounding a sub-dollar price to
+    the cent would be needlessly coarse for penny stocks."""
+    assert round_to_tick(0.123456) == pytest.approx(0.1235)
+
+
+def test_round_to_tick_is_idempotent_on_an_already_valid_price():
+    assert round_to_tick(190.15) == pytest.approx(190.15)
+    assert round_to_tick(0.1234) == pytest.approx(0.1234)
+
+
+def test_collared_limit_price_never_returns_a_sub_penny_price():
+    """The real failure this fixes: `execution/alpaca_broker.py:submit_order` rejected a
+    real order with `limit_price 384.3332332763672` (`APIError` 42210000, "sub-penny
+    increment does not fulfill minimum pricing criteria") -- collar_bps applied to an
+    arbitrary quote produces exactly this kind of arbitrary-precision float."""
+    price = collared_limit_price(384.3332332763672, "buy", collar_bps=0.0)
+    assert price == pytest.approx(384.33)
+    assert round(price, 2) == price
 
 
 def test_sequence_orders_puts_sells_before_buys():

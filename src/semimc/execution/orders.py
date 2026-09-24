@@ -61,13 +61,25 @@ def target_notional(decision: Decision, equity: float) -> pd.Series:
     return decision.weights * equity
 
 
+def round_to_tick(price: float) -> float:
+    """Alpaca's own minimum-pricing-increment rule: $0.01 at or above $1, $0.0001 below
+    it -- anything finer is rejected outright (``invalid limit_price ... sub-penny
+    increment does not fulfill minimum pricing criteria``, a real 422 this project hit on
+    2026-09-23 from a plain ``price + collar_bps`` offset with no guarantee of landing on
+    a valid increment). Public: also applied to ``intraday/orders.py``'s LLM-proposed
+    ``invalidation_price``, which has the identical problem for the same reason -- an
+    arbitrary-precision float with nothing rounding it before it reaches the broker."""
+    return round(price, 2) if price >= 1.0 else round(price, 4)
+
+
 def collared_limit_price(price: float, side: OrderSide, collar_bps: float) -> float:
     """A marketable limit: priced past the quote by ``collar_bps``, in the direction that
     makes it likely to fill, bounded so a fast-moving market can't fill it arbitrarily far
     from the last known price. Public: ``intraday/orders.py`` (S4, Phase 3) reuses this
     exact formula rather than a second copy."""
     offset = price * collar_bps / 10_000
-    return price + offset if side == "buy" else price - offset
+    raw = price + offset if side == "buy" else price - offset
+    return round_to_tick(raw)
 
 
 def sequence_orders(orders: list[OrderRequest]) -> list[OrderRequest]:
