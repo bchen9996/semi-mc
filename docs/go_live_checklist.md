@@ -65,6 +65,11 @@ pretrade for every sleeve. To resume, delete the file and commit that. Deliberat
 automated (e.g. auto-engaging on repeated incidents) -- see `tasks/todo.md`'s Phase 7 entry
 for why that's a Phase 8+ rollout-policy decision, not alerting plumbing.
 
+**Gotcha, found 2026-09-23 (S4's own `runs/intraday/KILL_SWITCH`, same mechanism):**
+`runs/` is gitignored (`git check-ignore -v` confirms it) -- a plain `git add` on either
+kill-switch path silently stages nothing, no error. Use `git add -f` for both engaging and
+resuming, or the commit never actually contains the file/deletion the workflow needs.
+
 ## 6. Enable a sleeve -- the owner's explicit action, not automatic
 
 Two edits to `config/paper.yaml`, committed together as one deliberate, reviewable diff
