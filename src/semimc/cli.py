@@ -2038,6 +2038,8 @@ def intraday_monitor(
 
     typer.echo(f"Closed: {', '.join(result.closed) if result.closed else '(none)'}")
     typer.echo(f"Still open: {', '.join(result.still_open) if result.still_open else '(none)'}")
+    if result.gap_seconds is not None:
+        typer.echo(f"Gap since last check: {result.gap_seconds / 60.0:.1f}m")
 
 
 def _run_intraday_cycle(

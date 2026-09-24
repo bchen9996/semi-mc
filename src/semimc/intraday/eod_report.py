@@ -48,6 +48,19 @@ class DayBenchmarks:
 
 
 @dataclass(frozen=True)
+class MonitorCadence:
+    """How often `check_invalidation_and_time_stops` actually ran today
+    (`ledger.monitor_checks_for`), not how often the cron was configured to fire --
+    found 2026-09-23 that these are very different numbers on this repo. Purely
+    mechanical, computed unconditionally in `build_eod_report` like `proposals`/
+    `reflections`, never optional/Reviewer-supplied the way `process_scorecard` is."""
+
+    checks: int
+    avg_gap_minutes: float | None
+    max_gap_minutes: float | None
+
+
+@dataclass(frozen=True)
 class EodReport:
     as_of: pd.Timestamp
     proposals: list[dict[str, Any]]
@@ -56,6 +69,7 @@ class EodReport:
     pnl_net: float
     pnl_pessimistic: float
     benchmarks: DayBenchmarks
+    monitor_cadence: MonitorCadence
     process_scorecard: dict[str, Any] | None = None
     process_scorecard_narrative: str | None = None
     attribution: dict[str, Any] | None = None
@@ -151,6 +165,15 @@ def build_eod_report(
     pnl_net = sum(r["content"].get("pnl_net") or 0.0 for r in reflections)
     modeled_cost = pnl_gross - pnl_net
     pnl_pessimistic = pnl_gross - 2 * modeled_cost
+
+    checks = ledger.monitor_checks_for(as_of)
+    gaps_minutes = [c["gap_seconds"] / 60.0 for c in checks if c["gap_seconds"] is not None]
+    monitor_cadence = MonitorCadence(
+        checks=len(checks),
+        avg_gap_minutes=sum(gaps_minutes) / len(gaps_minutes) if gaps_minutes else None,
+        max_gap_minutes=max(gaps_minutes) if gaps_minutes else None,
+    )
+
     return EodReport(
         as_of=pd.Timestamp(as_of),
         proposals=proposals,
@@ -159,6 +182,7 @@ def build_eod_report(
         pnl_net=pnl_net,
         pnl_pessimistic=pnl_pessimistic,
         benchmarks=benchmarks or DayBenchmarks(),
+        monitor_cadence=monitor_cadence,
         process_scorecard=process_scorecard,
         process_scorecard_narrative=process_scorecard_narrative,
         attribution=attribution,
@@ -273,6 +297,16 @@ def render_eod_markdown(report: EodReport) -> str:
             lines.append(report.process_scorecard_narrative)
     else:
         lines.append("Not yet built (Phase 9b -- needs the Reviewer's own reflection grading).")
+
+    lines.append("")
+    lines.append("## Monitor cadence")
+    cadence = report.monitor_cadence
+    lines.append(f"- Checks today: {cadence.checks}")
+    if cadence.avg_gap_minutes is not None:
+        lines.append(f"- Average gap between checks: {cadence.avg_gap_minutes:.1f}m")
+        lines.append(f"- Longest gap between checks: {cadence.max_gap_minutes:.1f}m")
+    else:
+        lines.append("- Not enough checks today to measure a gap.")
 
     lines.append("")
     lines.append("## Proposed playbook changes")

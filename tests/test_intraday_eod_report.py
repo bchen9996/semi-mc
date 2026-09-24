@@ -10,6 +10,7 @@ import pytest
 
 from semimc.intraday.eod_report import (
     DayBenchmarks,
+    MonitorCadence,
     build_eod_report,
     render_eod_markdown,
     s0_day_return,
@@ -33,6 +34,9 @@ def test_build_eod_report_is_empty_but_sane_with_no_activity(tmp_path):
     assert report.pnl_net == 0.0
     assert report.pnl_pessimistic == 0.0
     assert report.benchmarks == DayBenchmarks()
+    assert report.monitor_cadence == MonitorCadence(
+        checks=0, avg_gap_minutes=None, max_gap_minutes=None
+    )
     ledger.close()
 
 
@@ -44,10 +48,42 @@ def test_render_eod_markdown_never_crashes_on_an_empty_day(tmp_path):
     assert "No proposals today." in rendered
     assert "No closed positions today." in rendered
     assert "not available" in rendered  # benchmarks with nothing supplied
+    assert "Not enough checks today to measure a gap." in rendered
     # Everything the Reviewer's own call would fill in (Phase 9b's `run_eod_review`)
     # still renders an honest placeholder when `build_eod_report` is called directly,
     # bypassing that call entirely, the way this test does.
     assert "Not yet built (Phase 9b" in rendered
+    ledger.close()
+
+
+# -- monitor cadence (found 2026-09-23) ----------------------------------------------------
+
+
+def test_build_eod_report_computes_the_average_and_max_gap_from_todays_checks(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_monitor_check(AS_OF, "cycle_1", pd.Timestamp("2026-09-21 13:30").to_pydatetime())
+    ledger.record_monitor_check(AS_OF, "cycle_2", pd.Timestamp("2026-09-21 13:50").to_pydatetime())
+    ledger.record_monitor_check(AS_OF, "cycle_3", pd.Timestamp("2026-09-21 15:50").to_pydatetime())
+
+    report = build_eod_report(ledger, AS_OF)
+
+    assert report.monitor_cadence.checks == 3
+    # gaps: 20m, 120m -> avg 70m, max 120m
+    assert report.monitor_cadence.avg_gap_minutes == pytest.approx(70.0)
+    assert report.monitor_cadence.max_gap_minutes == pytest.approx(120.0)
+    ledger.close()
+
+
+def test_render_eod_markdown_reports_the_cadence_numbers(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_monitor_check(AS_OF, "cycle_1", pd.Timestamp("2026-09-21 13:30").to_pydatetime())
+    ledger.record_monitor_check(AS_OF, "cycle_2", pd.Timestamp("2026-09-21 13:50").to_pydatetime())
+
+    rendered = render_eod_markdown(build_eod_report(ledger, AS_OF))
+
+    assert "## Monitor cadence" in rendered
+    assert "Checks today: 2" in rendered
+    assert "Average gap between checks: 20.0m" in rendered
     ledger.close()
 
 

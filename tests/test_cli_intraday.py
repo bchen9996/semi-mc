@@ -192,6 +192,22 @@ def test_monitor_runs_cleanly_with_no_open_positions(tmp_path, fake_intraday_env
     assert "Closed: (none)" in result.output
 
 
+def test_monitor_omits_the_gap_line_on_the_days_first_call(tmp_path, fake_intraday_env):
+    result = runner.invoke(app, ["intraday", "monitor"] + _intraday_overrides(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "Gap since last check" not in result.output
+
+
+def test_monitor_prints_the_gap_since_the_previous_call(tmp_path, fake_intraday_env):
+    """Found 2026-09-23 -- two separate CLI invocations against the same ledger, the same
+    way two separate scheduled GitHub Actions runs would, mirroring
+    `test_shadow_broker_state_persists_across_two_separate_invocations`'s own shape."""
+    runner.invoke(app, ["intraday", "monitor"] + _intraday_overrides(tmp_path))
+    result = runner.invoke(app, ["intraday", "monitor"] + _intraday_overrides(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "Gap since last check:" in result.output
+
+
 def test_open_batch_declines_cleanly_when_trading_is_disabled(tmp_path, fake_intraday_env):
     result = runner.invoke(app, ["intraday", "open-batch"] + _intraday_overrides(tmp_path))
     assert result.exit_code == 0, result.output

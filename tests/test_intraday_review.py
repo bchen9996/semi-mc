@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 
 import pandas as pd
@@ -232,6 +233,28 @@ def test_weekly_summary_is_empty_with_no_activity(tmp_path):
     assert summary["pnl_gross"] == 0.0
     assert summary["avg_rejection_rate"] == 0.0
     assert summary["total_trading_days"] == 0
+    assert summary["monitor_checks"] == 0
+    assert summary["monitor_avg_gap_minutes"] is None
+    ledger.close()
+
+
+def test_weekly_summary_aggregates_monitor_cadence_across_the_window(tmp_path):
+    """Found 2026-09-23: this is what actually feeds the "was Stage 1's cadence real"
+    question -- summed and averaged across every day in the window, not just one."""
+    ledger = _ledger(tmp_path)
+    day1, day2 = pd.Timestamp("2026-09-21"), pd.Timestamp("2026-09-22")
+    ledger.record_reflection(day1, "NVDA", {"pnl_net": 1.0})  # gives both days a window slot
+    ledger.record_reflection(day2, "NVDA", {"pnl_net": 1.0})
+    ledger.record_monitor_check(day1, "cycle_1", dt.datetime(2026, 9, 21, 13, 30))
+    ledger.record_monitor_check(day1, "cycle_2", dt.datetime(2026, 9, 21, 13, 50))  # +20m
+    ledger.record_monitor_check(day2, "cycle_1", dt.datetime(2026, 9, 22, 13, 30))
+    ledger.record_monitor_check(day2, "cycle_2", dt.datetime(2026, 9, 22, 15, 30))  # +120m
+
+    summary = weekly_summary(ledger, IntradayConfig(), day2)
+
+    assert summary["monitor_checks"] == 4
+    assert summary["monitor_avg_gap_minutes"] == pytest.approx(70.0)  # (20 + 120) / 2
+    assert summary["monitor_max_gap_minutes"] == pytest.approx(120.0)
     ledger.close()
 
 
@@ -248,6 +271,9 @@ def _summary_stub() -> dict:
         "calibration": [],
         "total_trading_days": 1,
         "total_reflections": 3,
+        "monitor_checks": 12,
+        "monitor_avg_gap_minutes": 22.5,
+        "monitor_max_gap_minutes": 187.0,
     }
 
 
@@ -275,3 +301,20 @@ def test_render_weekly_review_markdown_never_crashes_on_an_empty_week():
     text = render_weekly_review_markdown(_summary_stub(), [], [], AS_OF)
     assert "None pending." in text
     assert "None due." in text
+
+
+def test_render_weekly_review_markdown_reports_the_cadence_numbers():
+    text = render_weekly_review_markdown(_summary_stub(), [], [], AS_OF)
+    assert "## Monitor cadence" in text
+    assert "Checks this week: 12" in text
+    assert "Average gap between checks: 22.5m" in text
+    assert "Longest gap between checks: 187.0m" in text
+
+
+def test_render_weekly_review_markdown_reports_no_gap_measured_yet():
+    stub = _summary_stub()
+    stub["monitor_checks"] = 0
+    stub["monitor_avg_gap_minutes"] = None
+    stub["monitor_max_gap_minutes"] = None
+    text = render_weekly_review_markdown(stub, [], [], AS_OF)
+    assert "Not enough checks this week to measure a gap." in text

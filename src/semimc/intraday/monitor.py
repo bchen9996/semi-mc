@@ -8,6 +8,14 @@ that can run on its own tight cron (every few minutes, no LLM cost) *and* is the
 thing `jobs.py::run_cycle` calls, so the Trader is never asked about a position that
 should already be gone. Code decides this, never the model, per the brief's "the model
 is asked what to do only when there's a real decision."
+
+Every call also records its own cadence (`ledger.record_monitor_check`, found 2026-09-23):
+GitHub's `schedule` event delivery for this repo turned out far less reliable than the
+configured cron intervals imply, and in shadow mode there is no real resting stop order
+enforcing anything between calls (`FakeBroker` never auto-triggers one) -- so how often
+this function actually runs *is* the shadow book's real protection latency, not just an
+operational curiosity. This doesn't fix the delay; it stops Stage 1's own reports from
+silently assuming a cadence that didn't happen.
 """
 
 from __future__ import annotations
@@ -32,6 +40,10 @@ from .reflect import record_mechanical_reflection
 class MonitorResult:
     closed: list[str] = field(default_factory=list)
     still_open: list[str] = field(default_factory=list)
+    # Seconds since this same trading day's previous recorded check, `None` for the day's
+    # first (`ledger.record_monitor_check`) -- surfaced here so the CLI can print it
+    # immediately, not just eod-review/weekly-review after the fact.
+    gap_seconds: float | None = None
 
 
 def check_invalidation_and_time_stops(
@@ -67,6 +79,8 @@ def check_invalidation_and_time_stops(
     level specifically, and `IntradayLedger.last_stopout_times` (Phase 5) reads this
     prefix back out to feed `ValidationContext.last_stopout_at`.
     """
+    gap_seconds = ledger.record_monitor_check(as_of, cycle, now)
+
     closed: list[str] = []
     still_open: list[str] = []
 
@@ -138,4 +152,4 @@ def check_invalidation_and_time_stops(
             )
         closed.append(symbol)
 
-    return MonitorResult(closed=closed, still_open=still_open)
+    return MonitorResult(closed=closed, still_open=still_open, gap_seconds=gap_seconds)

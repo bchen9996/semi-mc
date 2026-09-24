@@ -1925,6 +1925,26 @@ problem for T6's control group):
       Runs through roughly 2026-10-07. Unconfirmed going in: whether `ANTHROPIC_API_KEY`
       is a valid GitHub secret -- see "Remaining prerequisites" item 1; the first
       `research` run under this stage is the first real test of it.
+
+      **Found 2026-09-23, before any real activity under this stage**: GitHub's own
+      `schedule` event delivery for this repo is far less reliable than the configured
+      cron intervals suggest -- confirmed against both `intraday_trading.yml` and the much
+      lighter, separately-grouped `paper_trading.yml`, both showing the same multi-hour
+      delay and most `monitor`/`cycle` ticks never firing at all, ruling out this
+      project's own shared concurrency group as the cause. This matters specifically for
+      shadow mode: `FakeBroker` never auto-triggers a resting stop the way a real Alpaca
+      order would (confirmed directly against its own module docstring), so an
+      invalidated shadow position's actual protection is only as prompt as this gap --
+      Stage 2+ is unaffected, since a real broker's own resting stop enforces regardless
+      of cron reliability. Mitigated, not fixed: `check_invalidation_and_time_stops` now
+      records every call's own cadence (`IntradayLedger.record_monitor_check`, a new
+      `monitor_checks` table) and both `reports/.../eod.md` and `weekly_review.md` report
+      the actual average/max gap between checks, so Stage 1's own numbers stay honest
+      about the cadence that actually happened rather than the cadence that was
+      configured. A real fix (e.g. a self-looping `monitor` job instead of relying on
+      GitHub's cron for sub-15-minute cadence) is still open -- deliberately not built yet,
+      since it's a real architecture change and this repo's own numbers now surface
+      whether it's actually needed before investing in it.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's evidence looks good; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

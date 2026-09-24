@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 
 import pandas as pd
+import pytest
 
 from semimc.config import IntradayConfig
 from semimc.execution.broker import OrderRequest
@@ -246,4 +247,33 @@ def test_missing_a_current_price_leaves_the_position_open_and_logs_an_incident(t
 
     assert result.still_open == ["NVDA"]
     assert any("no current price" in i["message"] for i in ledger.incidents())
+    ledger.close()
+
+
+# -- monitor cadence (found 2026-09-23) ----------------------------------------------------
+
+
+def test_records_no_gap_for_the_days_first_call(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+
+    result = check_invalidation_and_time_stops(
+        IntradayConfig(), broker, ledger, {}, AS_OF, CYCLE, NOW
+    )
+
+    assert result.gap_seconds is None
+    assert ledger.monitor_checks_for(AS_OF)[0]["cycle"] == CYCLE
+    ledger.close()
+
+
+def test_records_the_gap_since_the_previous_call_this_same_day(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    check_invalidation_and_time_stops(IntradayConfig(), broker, ledger, {}, AS_OF, CYCLE, NOW)
+
+    result = check_invalidation_and_time_stops(
+        IntradayConfig(), broker, ledger, {}, AS_OF, "cycle_2", NOW + dt.timedelta(minutes=20)
+    )
+
+    assert result.gap_seconds == pytest.approx(1200.0)
     ledger.close()

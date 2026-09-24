@@ -180,6 +180,14 @@ CREATE TABLE IF NOT EXISTS playbook_versions (
     entry_id INTEGER NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS monitor_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    as_of TEXT NOT NULL,
+    cycle TEXT NOT NULL,
+    checked_at TEXT NOT NULL,
+    gap_seconds REAL
+);
 """
 
 _OPEN_ORDER_STATUSES = ("new", "accepted", "partially_filled")
@@ -816,6 +824,49 @@ class IntradayLedger:
                 symbol = row["message"].split(":", 1)[1]
                 out[symbol] = dt.datetime.fromisoformat(row["created_at"])
         return out
+
+    # -- monitor checks (S4, cadence telemetry, found 2026-09-23) ------------------------
+
+    def record_monitor_check(
+        self, as_of: pd.Timestamp, cycle: str, checked_at: dt.datetime
+    ) -> float | None:
+        """Records that `check_invalidation_and_time_stops` actually ran, and returns the
+        gap in seconds since this same trading day's previous recorded check (`None` for
+        the day's first) -- found the hard way, 2026-09-23: GitHub's own `schedule` event
+        delivery for this repo is far less reliable than the configured cron intervals
+        suggest (most `monitor`/`cycle` triggers never fire at all -- confirmed against
+        both this workflow and `paper_trading.yml`'s own, independent schedule, so it
+        isn't this project's own concurrency-group design), and `FakeBroker` never
+        auto-triggers a stop the way a real resting order would (see its own module
+        docstring) -- so during shadow mode, an invalidated position's actual protection
+        is only as prompt as this gap. Scoped to `as_of` rather than the single global
+        previous row, so the expected multi-hour overnight gap between yesterday's last
+        check and today's first is never counted as a same-day cadence failure.
+        """
+        if checked_at.tzinfo is None:
+            checked_at = checked_at.replace(tzinfo=dt.UTC)
+        previous = self._conn.execute(
+            "SELECT checked_at FROM monitor_checks WHERE as_of = ? ORDER BY id DESC LIMIT 1",
+            (str(pd.Timestamp(as_of)),),
+        ).fetchone()
+        gap_seconds: float | None = None
+        if previous is not None:
+            previous_at = dt.datetime.fromisoformat(previous["checked_at"])
+            gap_seconds = (checked_at - previous_at).total_seconds()
+        self._conn.execute(
+            "INSERT INTO monitor_checks (as_of, cycle, checked_at, gap_seconds) "
+            "VALUES (?, ?, ?, ?)",
+            (str(pd.Timestamp(as_of)), cycle, checked_at.isoformat(), gap_seconds),
+        )
+        self._conn.commit()
+        return gap_seconds
+
+    def monitor_checks_for(self, as_of: pd.Timestamp) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM monitor_checks WHERE as_of = ? ORDER BY id",
+            (str(pd.Timestamp(as_of)),),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # -- shadow broker state (S4's placebo agent, Phase 7) -------------------------------
 

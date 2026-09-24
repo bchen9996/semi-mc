@@ -546,3 +546,56 @@ def test_distinct_trading_days_is_empty_with_no_activity(tmp_path):
     assert ledger.distinct_trading_days() == []
     ledger.close()
     ledger.close()
+
+
+# -- monitor checks (S4, cadence telemetry, found 2026-09-23) -----------------------------
+
+
+def test_record_monitor_check_returns_none_gap_for_the_days_first_check(tmp_path):
+    ledger = _ledger(tmp_path)
+    gap = ledger.record_monitor_check(AS_OF, "cycle_1", dt.datetime(2026, 9, 21, 13, 30))
+    assert gap is None
+    ledger.close()
+
+
+def test_record_monitor_check_computes_the_gap_since_the_same_days_previous_check(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_monitor_check(AS_OF, "cycle_1", dt.datetime(2026, 9, 21, 13, 30))
+    gap = ledger.record_monitor_check(AS_OF, "cycle_2", dt.datetime(2026, 9, 21, 13, 35))
+    assert gap == pytest.approx(300.0)
+    ledger.close()
+
+
+def test_record_monitor_check_never_counts_the_overnight_gap_across_days(tmp_path):
+    """The day's first check must compare against nothing, not yesterday's last check --
+    otherwise every single morning would report a multi-hour "cadence failure" that's
+    really just the market being closed overnight."""
+    ledger = _ledger(tmp_path)
+    ledger.record_monitor_check(
+        pd.Timestamp("2026-09-20"), "carry", dt.datetime(2026, 9, 20, 19, 45)
+    )
+    gap = ledger.record_monitor_check(AS_OF, "preflight", dt.datetime(2026, 9, 21, 11, 45))
+    assert gap is None
+    ledger.close()
+
+
+def test_record_monitor_check_normalizes_a_naive_datetime_to_utc(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_monitor_check(AS_OF, "cycle_1", dt.datetime(2026, 9, 21, 13, 30, tzinfo=dt.UTC))
+    gap = ledger.record_monitor_check(AS_OF, "cycle_2", dt.datetime(2026, 9, 21, 13, 40))
+    assert gap == pytest.approx(600.0)
+    ledger.close()
+
+
+def test_monitor_checks_for_returns_every_check_recorded_that_day_in_order(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_monitor_check(AS_OF, "cycle_1", dt.datetime(2026, 9, 21, 13, 30))
+    ledger.record_monitor_check(AS_OF, "cycle_2", dt.datetime(2026, 9, 21, 13, 50))
+    ledger.record_monitor_check(
+        pd.Timestamp("2026-09-22"), "cycle_1", dt.datetime(2026, 9, 22, 13, 30)
+    )
+    checks = ledger.monitor_checks_for(AS_OF)
+    assert [c["cycle"] for c in checks] == ["cycle_1", "cycle_2"]
+    assert checks[0]["gap_seconds"] is None
+    assert checks[1]["gap_seconds"] == pytest.approx(1200.0)
+    ledger.close()

@@ -175,9 +175,16 @@ def weekly_summary(
 
     reflections: list[dict[str, Any]] = []
     scorecards: list[dict[str, Any]] = []
+    monitor_gaps_minutes: list[float] = []
+    monitor_checks_count = 0
     for day in window_days:
         reflections.extend(ledger.reflections_for(day))
         scorecards.append(process_scorecard(ledger, config, day))
+        checks = ledger.monitor_checks_for(day)
+        monitor_checks_count += len(checks)
+        monitor_gaps_minutes.extend(
+            c["gap_seconds"] / 60.0 for c in checks if c["gap_seconds"] is not None
+        )
 
     rejection_rates = [s["rejection_rate"] for s in scorecards]
     incidents_count = sum(len(s["incidents"]) for s in scorecards)
@@ -195,6 +202,14 @@ def weekly_summary(
         "total_reflections": sum(
             1 for r in ledger.all_reflections() if pd.Timestamp(r["as_of"]) <= today
         ),
+        # Cadence telemetry (found 2026-09-23, see IntradayLedger.record_monitor_check's
+        # docstring) -- how often the mechanical monitor/cycle check actually ran this
+        # week, not how often the cron was configured to.
+        "monitor_checks": monitor_checks_count,
+        "monitor_avg_gap_minutes": sum(monitor_gaps_minutes) / len(monitor_gaps_minutes)
+        if monitor_gaps_minutes
+        else None,
+        "monitor_max_gap_minutes": max(monitor_gaps_minutes) if monitor_gaps_minutes else None,
     }
 
 
@@ -224,6 +239,15 @@ def render_weekly_review_markdown(
             lines.append(
                 f"  - [{lo:.2f}, {hi:.2f}]: {bucket['win_rate']:.1%} win rate, n={bucket['n']}"
             )
+
+    lines.append("")
+    lines.append("## Monitor cadence")
+    lines.append(f"- Checks this week: {summary['monitor_checks']}")
+    if summary["monitor_avg_gap_minutes"] is not None:
+        lines.append(f"- Average gap between checks: {summary['monitor_avg_gap_minutes']:.1f}m")
+        lines.append(f"- Longest gap between checks: {summary['monitor_max_gap_minutes']:.1f}m")
+    else:
+        lines.append("- Not enough checks this week to measure a gap.")
 
     lines.append("")
     lines.append("## Since inception")
