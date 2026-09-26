@@ -1983,15 +1983,26 @@ problem for T6's control group):
       positions into s0's own permanent snapshot history, mislabeled as s0's -- corrupting
       the entire s0-vs-s3 comparison this shared-account setup exists to make, silently
       (no crash, no incident, just wrong data accumulating every 30 minutes). Fixed:
-      `run_mark` now only records the broker's real account state when
-      `config.paper.sleeves[sleeve].trading_enabled` is true for *this* sleeve; otherwise it
-      carries that sleeve's own last recorded snapshot forward unchanged (it never trades,
-      so nothing about it has genuinely changed), or records nothing if it has no prior
-      snapshot at all rather than invent a starting figure. Self-healing against the real
-      ledger the same way the other two fixes are -- no manual edit to the committed
-      `ledger/paper.sqlite3` needed, since `latest_snapshot("s0")` will find the real
-      2026-09-23 row the first time this runs. Also not yet verified against a real run,
-      same Monday caveat as the two fixes above.
+      `run_mark` now compares this sleeve's own fills (`net_filled_qty`) against the
+      account-wide total (`expected`, already computed above for reconciliation) -- equal
+      means nobody else has ever traded here, so the broker's real state genuinely is this
+      sleeve's own and gets recorded as before; otherwise it carries that sleeve's own last
+      recorded snapshot forward *verbatim* (equity, cash, and whatever positions it last
+      held), or records nothing if it has no prior snapshot at all rather than invent a
+      starting figure. **Deliberately not gated on `config.paper.sleeves[sleeve].
+      trading_enabled`** -- an earlier draft of this fix used that flag directly, but a
+      config flag answers "may this sleeve place new orders," not "does the account's real
+      state still belong to it": a sleeve disabled at a future review checkpoint
+      (`paper.review_months: [3, 6, 12]`) while still holding a real, market-moving position
+      from before must keep reading the broker directly, not freeze at a stale snapshot the
+      moment it's disabled. The fills-based comparison handles that case correctly without
+      any special-casing, since disabling a sleeve doesn't erase its historical fills.
+      Verified directly against the real `ledger/paper.sqlite3` (read-only query, not just
+      synthetic tests): `net_filled_qty("s0")` is `{}` against a combined total that already
+      includes s3's real fills, so the very next `mark(s0)` will correctly take the
+      carry-forward branch and reproduce the existing 2026-09-23 snapshot (`$100k`, flat) --
+      no manual ledger edit needed. Also not yet verified against a real scheduled run, same
+      Monday caveat as the two fixes above.
 
       **The self-looping `monitor` job (referenced above as still-open) was built
       2026-09-26**, once the deferred question -- "does the real cadence actually justify
