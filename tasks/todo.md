@@ -2019,6 +2019,28 @@ problem for T6's control group):
       Also not yet verified against a real scheduled run, same Monday caveat as the two
       fixes above.
 
+      **Audit closed 2026-09-26**: traced every place in the paper-trading pipeline that
+      constructs a real `AlpacaPaperBroker` or reads `broker.get_account()`/
+      `list_positions()`, to confirm the two fixes above (mark's reconciliation and
+      snapshot) were the complete list, not just the two that happened to surface via a
+      real screenshot. `cli.py` constructs a real broker in exactly two commands, `paper
+      execute` and `paper mark` -- `paper decide`/`paper report`/`paper evaluate` never do
+      (confirmed by reading each: `decide.py` and `strategy/decide.py::decide` are a pure
+      function of market data, no broker/positions input at all; `report.py` and
+      `analytics/paper_evaluation.py` (T2/T3) and `analytics/execution_cost.py` (T5) all
+      read only the ledger's own already-attributed `orders`/`fills`/`snapshots` rows,
+      correctly filtered by `sleeve` through the ledger's own internal joins, never
+      re-derived from the broker's live, unpartitioned account state). `execute.py` is
+      structurally immune (its `check_pretrade` call returns early for a disabled sleeve
+      before either broker call is ever reached). That leaves `mark.py` as the only
+      function that ever touches the broker's real account state unconditionally, for every
+      sleeve, regardless of `trading_enabled` -- both of its own instances of the bug are
+      now fixed. Also directly confirmed why the snapshot fix mattered:
+      `analytics/paper_evaluation.py::evaluate_t2` (T2, "does S3 improve on S0?") calls
+      `equity_curve_from_snapshots(ledger, "s0")`/`"s3"` straight off the exact table the
+      fix touches -- left broken, T2 would eventually have compared S3 against a corrupted
+      copy of itself.
+
       **The self-looping `monitor` job (referenced above as still-open) was built
       2026-09-26**, once the deferred question -- "does the real cadence actually justify
       this" -- had a real answer: the `monitor_checks` table's own 2026-09-24/25 data showed
