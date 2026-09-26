@@ -4,6 +4,7 @@ its own `record_x`/read method pair, same testing shape as `live/ledger.py`'s ow
 from __future__ import annotations
 
 import datetime as dt
+import sqlite3
 
 import pandas as pd
 import pytest
@@ -49,6 +50,43 @@ def test_watchlist_round_trips(tmp_path):
     assert len(rows) == 1
     assert rows[0]["symbol"] == "NVDA"
     assert rows[0]["thesis"] == "AI capex tailwind into earnings"
+    ledger.close()
+
+
+def test_opening_a_pre_phase_10_ledger_adds_the_missing_playbook_version_column(tmp_path):
+    """Found 2026-09-26: `CREATE TABLE IF NOT EXISTS` never adds a column to a `proposals`
+    table that already exists on disk -- the real, long-lived `ledger/intraday.sqlite3`
+    predates `playbook_version` (Phase 10), and the first real `record_proposal` call that
+    ever reached it raised `OperationalError: table proposals has no column named
+    playbook_version`. Reproduce that exact pre-migration file by hand (no `IntradayLedger`
+    involved, since it always creates the current, complete schema) and confirm opening it
+    now heals the column rather than erroring."""
+    path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE proposals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            as_of TEXT NOT NULL,
+            cycle TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            action TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reason TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    ledger = IntradayLedger(path)
+    proposal_id = ledger.record_proposal(
+        AS_OF, "cycle_1", "NVDA", "open", "accepted", payload={"size_pct": 0.02}, playbook_version=3
+    )
+    proposal = ledger.get_proposal(proposal_id)
+    assert proposal["playbook_version"] == 3
     ledger.close()
 
 
