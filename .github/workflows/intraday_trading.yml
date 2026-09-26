@@ -106,8 +106,13 @@ name: Intraday trading (S4)
     - cron: "30 13 * * 1-5"
     # monitor: every 5 minutes, ~08:35-15:00 Central -- no LLM call, cheap to run often.
     - cron: "*/5 13-20 * * 1-5"
-    # cycle: every 20 minutes, ~08:35-14:50 Central.
-    - cron: "*/20 13-19 * * 1-5"
+    # cycle: every 20 minutes, ~08:35-14:50 Central. Upper bound widened to hour 20 (not
+    # 19) -- found 2026-09-26: under CST (after 2026-11-01's DST change), a 13-19 UTC range
+    # maps to Central 07:00-13:55, cutting off ~55 minutes before the real ~14:50 close.
+    # 13-20 covers Central 07:00-14:55 under CST and 08:00-15:55 under CDT -- the extra
+    # hour past close under CDT is harmless (pretrade declines once the market's shut,
+    # same as every other job here tolerates being triggered outside its real window).
+    - cron: "*/20 13-20 * * 1-5"
     # carry: ~14:45 Central.
     - cron: "45 19 * * 1-5"
     # eod-review: ~15:15 Central.
@@ -386,7 +391,7 @@ jobs:
           exit 1
 
   cycle:
-    if: github.event.schedule == '*/20 13-19 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '*/20 13-20 * * 1-5' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write

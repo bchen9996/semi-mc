@@ -1987,6 +1987,45 @@ problem for T6's control group):
       deadline/close boundary, normal multi-iteration looping, and the 3-consecutive-
       failures exit), not yet against a real scheduled run -- same Monday market-open
       caveat as the two fixes above.
+
+      **`cycle`'s range widened the same day**, for the same reason: `13-19` UTC maps to
+      Central `07:00-13:55` under CST (starting 2026-11-01), cutting off ~55 minutes before
+      the real ~14:50 close -- widened to `13-20` (matching `monitor`'s already-existing
+      upper bound), covering Central `07:00-14:55` under CST and `08:00-15:55` under CDT
+      (the extra hour past close under CDT is harmless, same routine-decline tolerance
+      every job here already relies on). `monitor` itself needed no change -- its own
+      `13-20` range already reaches Central `14:55` under CST, a 5-minute margin, not the
+      lost hour originally (and incorrectly) suspected.
+
+      **DST reminder for 2026-11-01** (CST begins, Central shifts to UTC-6): every
+      single-fire job below shifts a full hour earlier in Central-clock terms if left
+      alone -- confirmed by precise computation, not assumption. Two are operationally
+      serious: `open-batch` would fire at 07:30 Central, a full hour before the market
+      opens, so pretrade declines and the day's designated opening cycle never runs that
+      day; `carry` would fire at 13:45 Central, closing out positions over an hour before
+      the actual close. `eod-review`/`weekly-review` would review a still-open session.
+      Deliberately not auto-fixed with a runtime guard: GitHub's own schedule delivery for
+      this workflow is already confirmed (this session, `monitor_checks` telemetry) to
+      sometimes land hours late regardless of DST, so a tolerance-based local-time check
+      wouldn't reliably distinguish "wrong season" from "just late" and would add real
+      complexity to jobs that submit/close real position-affecting actions (once
+      `shadow_mode` is eventually turned off) for only a partial fix. Chosen instead: the
+      same accepted approximation already live today in `paper_trading.yml` for real s0/s3
+      trading (its own header: "~9-10am ET depending on DST") -- a plain manual cron edit,
+      twice a year. On 2026-11-01, shift every one of these crons and their matching `if:`
+      condition by +1 hour UTC (both the `schedule:` entry and the job's own `if:` string,
+      same pattern used for `cycle`'s fix above):
+      ```
+      preflight:      "45 11 * * 1-5" -> "45 12 * * 1-5"
+      research:       "30 12 * * 1-5" -> "30 13 * * 1-5"
+      preopen:        "15 13 * * 1-5" -> "15 14 * * 1-5"
+      open-batch:     "30 13 * * 1-5" -> "30 14 * * 1-5"
+      carry:          "45 19 * * 1-5" -> "45 20 * * 1-5"
+      eod-review:     "15 20 * * 1-5" -> "15 21 * * 1-5"
+      weekly-review:  "45 20 * * 5"   -> "45 21 * * 5"
+      ```
+      Shift them all back by 1 hour UTC again the following spring (2027's DST start,
+      typically the second Sunday of March) to return to the values already in this file.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's evidence looks good; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).
