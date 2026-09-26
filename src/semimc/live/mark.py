@@ -133,10 +133,17 @@ def run_mark(
     # market-moving position from before must keep reading the broker directly, not freeze
     # at whatever its last snapshot happened to show the moment it was disabled. `expected`
     # (this account's combined fills, computed above for reconciliation) already answers the
-    # right question when compared against this sleeve's own fills: equal means nobody else
-    # has ever contributed anything here, so the account's real state is exclusively this
-    # sleeve's, trading_enabled or not.
-    if ledger.net_filled_qty(sleeve) == expected:
+    # right question when compared against this sleeve's own fills: equal (within the same
+    # `tolerance` reconciliation uses just above, not exact float equality -- SQLite makes
+    # no row-order guarantee between these two differently-filtered queries, so summation
+    # order, and therefore float rounding, could in principle differ even when the
+    # underlying fills are identical) means nobody else has ever contributed anything here,
+    # so the account's real state is exclusively this sleeve's, trading_enabled or not.
+    own_fills = ledger.net_filled_qty(sleeve)
+    is_sole_trader = set(own_fills) == set(expected) and all(
+        abs(own_fills[symbol] - expected[symbol]) <= tolerance for symbol in expected
+    )
+    if is_sole_trader:
         account = broker.get_account()
         positions = {p.symbol: p for p in broker.list_positions()}
         ledger.record_snapshot(sleeve, as_of, account.equity, account.cash, positions)
