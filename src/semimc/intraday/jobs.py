@@ -32,7 +32,7 @@ names explicitly.
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import pandas as pd
@@ -43,7 +43,7 @@ from ..data import MarketData
 from ..data.realized import realized_variance
 from ..execution.broker import Broker, OrderSide, Position
 from ..execution.fake_broker import FakeBroker
-from ..execution.market_data import AlpacaMarketDataClient
+from ..execution.market_data import AlpacaMarketDataClient, AlpacaOptionsMarketDataClient
 from ..execution.news import AlpacaNewsClient
 from .context import (
     ReflectionUpdate,
@@ -55,6 +55,7 @@ from .context import (
 from .ledger import IntradayLedger
 from .llm import ClaudeCliClient, DailyBudgetExhausted, invoke_role
 from .monitor import check_invalidation_and_time_stops
+from .options import OptionPricing, OptionQuote, price_contract
 from .orders import (
     build_close_order,
     build_entry_order,
@@ -646,6 +647,35 @@ class CycleResult:
     skipped_reason: str | None = None
 
 
+def _price_option_proposal(
+    proposal: TradeProposal,
+    options_market_data: AlpacaOptionsMarketDataClient,
+    spot: float,
+    rate: float,
+    as_of: pd.Timestamp,
+) -> tuple[OptionQuote | None, OptionPricing | None]:
+    """Fetches this one proposal's own contract quote (Phase 12b) and prices it.
+    `(None, None)` on no quote (an illiquid contract, a bad strike/expiry, or an
+    unentitled feed with nothing to fall back to) rather than raising --
+    `validate_option_proposal`'s own "no options pricing available for this proposal"
+    failure already covers that case cleanly, the same "a single missing quote must not
+    crash a whole cycle" tolerance `quote_map` already applies to equities."""
+    market_quote = options_market_data.quote_contract(
+        proposal.symbol, proposal.expiry, proposal.strike, proposal.right, as_of
+    )
+    if market_quote is None:
+        return None, None
+    quote = OptionQuote(
+        bid=market_quote.bid,
+        ask=market_quote.ask,
+        open_interest=market_quote.open_interest,
+        volume=market_quote.volume,
+        feed=market_quote.feed,
+    )
+    pricing = price_contract(proposal, quote, spot, rate, as_of)
+    return quote, pricing
+
+
 def run_cycle(
     cycle: str,
     config: Config,
@@ -655,6 +685,8 @@ def run_cycle(
     llm_client: ClaudeCliClient,
     as_of: pd.Timestamp,
     now: dt.datetime,
+    market_data_pit: MarketData | None = None,
+    options_market_data: AlpacaOptionsMarketDataClient | None = None,
 ) -> CycleResult:
     """One Trader cycle: monitor -> tranche continuation -> propose -> validate ->
     execute. `open_batch` and `cycle` (the CLI/workflow layer) both call this with a
@@ -672,6 +704,19 @@ def run_cycle(
     `validate_proposal` risk controls, the same order-construction primitives -- only
     which broker actually receives the resulting `submit_order` call differs, decided by
     the caller (`cli.py`), not here.
+
+    `market_data_pit`/`options_market_data` (Phase 12b, Rollout Stage 4) are both `None`
+    by default -- every existing equity-only caller and test is unaffected. `cli.py` only
+    builds and passes them once `config.intraday.options.shadow_pricing` or `.enabled` is
+    set; when a raw proposal names `instrument="option"` and neither is available, it
+    prices as `(None, None)` the same as a genuinely empty quote would, and
+    `validate_option_proposal` fails it cleanly ("no options pricing available") rather
+    than crashing. An accepted option proposal never reaches `build_entry_order`/
+    `submit_order_with_fault_isolation` regardless of `config.intraday.options.enabled` --
+    there is no Stage 5 order-construction path for options yet (no OCC symbol handling
+    anywhere in `orders.py`/`broker.py`), so flipping that flag today does not, by itself,
+    submit anything. The one invariant this phase must get exactly right: an option
+    proposal is priced and gated exactly like a real one would be, and only ever logged.
     """
     result = CycleResult()
     intraday = config.intraday
@@ -798,6 +843,38 @@ def run_cycle(
             ledger.record_incident("error", f"malformed trader proposal: {exc}")
             continue
 
+        # Phase 12b (Rollout Stage 4): price this proposal's own contract before building
+        # the ValidationContext -- validate_option_proposal (intraday/options.py) requires
+        # option_quote/option_pricing to already be populated, and can't fetch them itself
+        # (it never receives the market-data clients, only the already-gathered context).
+        # Priced regardless of what validate_proposal ends up deciding, and recorded either
+        # way (see options_pricing_snapshot below) -- Stage 4's whole purpose is judging
+        # whether the feed produces sane pricing, which needs the pricing on a *rejected*
+        # proposal too, not only on one that also happened to clear every other gate.
+        option_quote = None
+        option_pricing = None
+        option_forecast_vol = None
+        next_earnings_date = None
+        spot_price = None
+        options_cfg = intraday.options
+        if (
+            proposal.instrument == "option"
+            and proposal.action in OPEN_OR_ADD_ACTIONS
+            and (options_cfg.shadow_pricing or options_cfg.enabled)
+        ):
+            spot_price = prices.get(proposal.symbol)
+            if options_market_data is not None and spot_price is not None:
+                option_quote, option_pricing = _price_option_proposal(
+                    proposal, options_market_data, spot_price, config.drift.risk_free_rate, as_of
+                )
+            if market_data_pit is not None:
+                option_forecast_vol = _realized_vol([proposal.symbol], market_data_pit).get(
+                    proposal.symbol
+                )
+                next_earnings_date = _upcoming_earnings(
+                    [proposal.symbol], market_data_pit, as_of, options_cfg.max_dte
+                )
+
         validation_context = ValidationContext(
             as_of=as_of,
             now=now,
@@ -809,10 +886,21 @@ def run_cycle(
             prices=prices,
             turnover_so_far_usd=turnover_usd,
             last_stopout_at=last_stopout_at,
+            option_quote=option_quote,
+            option_pricing=option_pricing,
+            option_forecast_vol=option_forecast_vol,
+            spot_price=spot_price,
+            next_earnings_date=next_earnings_date,
         )
         failures = validate_proposal(proposal, validation_context)
         status = "rejected" if failures else "accepted"
         reason = "; ".join(failures) if failures else None
+        options_pricing_snapshot = None
+        if option_quote is not None and option_pricing is not None:
+            options_pricing_snapshot = {
+                "quote": asdict(option_quote),
+                "pricing": asdict(option_pricing),
+            }
         proposal_id = ledger.record_proposal(
             as_of,
             cycle,
@@ -827,11 +915,24 @@ def run_cycle(
             # `record_proposal`'s own docstring for why that would break
             # `TradeProposal(**payload)` reconstruction elsewhere.
             playbook_version=ledger.current_playbook_version(),
+            options_pricing=options_pricing_snapshot,
         )
         if failures:
             result.proposals_rejected += 1
             continue
         result.proposals_accepted += 1
+
+        if proposal.instrument == "option":
+            # Stage 4 (BRIEF_INTRADAY.md rollout) -- priced and logged above, never
+            # submitted. Deliberately unconditional on config.intraday.options.enabled:
+            # there is no Stage 5 order-construction path for options yet (no OCC symbol
+            # handling anywhere in orders.py/broker.py), so this must never fall through
+            # to the dispatch below regardless of that flag. That matters beyond "don't
+            # submit an order Stage 5 can't build yet" -- an option trim/close shares
+            # `symbol` with its underlying stock, so falling through would wrongly act on
+            # the *equity* position of the same name (trim/close below look up positions
+            # by `proposal.symbol` alone, with no instrument check of their own).
+            continue
 
         if proposal.action in OPEN_OR_ADD_ACTIONS:
             price = prices.get(proposal.symbol)

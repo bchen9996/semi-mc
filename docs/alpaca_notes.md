@@ -119,6 +119,33 @@ rollout stage until both are checked, regardless of how far S4's equities-only s
   Not yet decided whether to subscribe or accept the indicative feed under the brief's
   conservative options rules -- moot until Stage 4 (options in shadow) is reached.
 
+**Phase 12b market-data surface** (`execution/market_data.py::AlpacaOptionsMarketDataClient`,
+verified against the installed `alpaca-py` 0.44.0 models, not yet against a real account --
+both gates above are still unresolved, so no options-capable request has actually been
+sent):
+
+- `OptionHistoricalDataClient.get_option_chain` (`OptionChainRequest`, filtered to an exact
+  `strike_price_gte == strike_price_lte`/`expiration_date`/`type` so at most one contract
+  matches) resolves a proposal's own `expiry`/`strike`/`right` straight to its quote --
+  Alpaca generates the OCC symbol itself as the response dict's key; this project never
+  constructs one. `OptionsSnapshot.latest_quote` gives bid/ask.
+- Tries `feed=OptionsFeed.OPRA` first; on a 401/403 (this paper account not entitled) falls
+  back to `feed=OptionsFeed.INDICATIVE`. Which one actually answered is recorded on every
+  quote (`OptionMarketQuote.feed`) -- this *is* how Stage 4 answers its own "does the feed
+  produce sane pricing" question, so it's part of the record, not just plumbing.
+- **`OptionsSnapshot` has no open interest or daily volume field at all** (checked directly
+  against `OptionsSnapshot.model_fields`: only `symbol`/`latest_trade`/`latest_quote`/
+  `implied_volatility`/`greeks`). Open interest instead comes from `TradingClient.
+  get_option_contract` (the *trading* API's own contract metadata, `open_interest: str |
+  None`) -- used strictly read-only here, same `paper=True`-hardcoded client
+  `AlpacaPaperBroker` already builds. Volume comes from `OptionHistoricalDataClient.
+  get_option_bars`'s current-day bar; `0` if none has formed yet.
+- `OptionsSnapshot.implied_volatility`/`.greeks` (feed-reported) are deliberately never
+  read -- `intraday/options.py::price_contract` recomputes both from the quote's own
+  bid/ask midpoint, the same "never trust a feed's reported IV" discipline `data/
+  options.py`'s module docstring already established for the unrelated `--implied-vol`
+  path.
+
 ## Official MCP server
 
 - Package: `alpaca-mcp-server`. Defaults to paper trading (`ALPACA_PAPER_TRADE=true`);
