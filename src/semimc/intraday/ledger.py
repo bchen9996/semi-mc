@@ -192,6 +192,28 @@ CREATE TABLE IF NOT EXISTS monitor_checks (
 
 _OPEN_ORDER_STATUSES = ("new", "accepted", "partially_filled")
 
+# `CREATE TABLE IF NOT EXISTS` (in `_SCHEMA` above) never adds a column to a table that
+# already exists on disk -- the real, long-lived `ledger/intraday.sqlite3` predates
+# `proposals.playbook_version` (added in Phase 10, well after that table was first
+# created), so every `IntradayLedger.__init__` since then silently kept opening a
+# `proposals` table one column short of what `record_proposal` inserts into. Never caught
+# in tests (a fresh `tmp_path` ledger always gets the current, complete `_SCHEMA`) or in
+# earlier real runs (Stage 1's first `run_cycle` calls that reached `record_proposal` for
+# real only started 2026-09-25) -- found 2026-09-26 from a real `OperationalError: table
+# proposals has no column named playbook_version`. Any future column added to a table that
+# already shipped needs an entry here, not just in `_SCHEMA`.
+_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    "proposals": [("playbook_version", "INTEGER")],
+}
+
+
+def _migrate_missing_columns(conn: sqlite3.Connection) -> None:
+    for table, columns in _COLUMN_MIGRATIONS.items():
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in columns:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
 
 def _json_default(value: Any) -> Any:
     if isinstance(value, pd.Timestamp | dt.datetime | dt.date):
@@ -220,6 +242,7 @@ class IntradayLedger:
         self._conn = sqlite3.connect(self.path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        _migrate_missing_columns(self._conn)
         self._conn.commit()
 
     def close(self) -> None:
