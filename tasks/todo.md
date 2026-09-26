@@ -1965,6 +1965,28 @@ problem for T6's control group):
       run** -- both workflows' cron schedules are Mon-Fri only, so nothing runs until market
       open next week. Check the first Monday `mark (s0)` and `intraday cycle` runs actually
       commit cleanly before considering either fix confirmed.
+
+      **The self-looping `monitor` job (referenced above as still-open) was built
+      2026-09-26**, once the deferred question -- "does the real cadence actually justify
+      this" -- had a real answer: the `monitor_checks` table's own 2026-09-24/25 data showed
+      ~165-172 minute gaps against a 5-minute configured cadence, both days, nothing
+      (monitor, cycle, or open-batch) firing in between. `.github/workflows/
+      intraday_trading.yml`'s `monitor` job now loops internally (check, commit/push-retry,
+      sleep 5 minutes, repeat) for up to ~5.5 hours per invocation or until the trading
+      day's own close, instead of exiting after one check -- so a single successful
+      GitHub-scheduled firing can now cover the rest of the session on its own, rather than
+      needing ~80 separate firings a day to each land on time. Pulled `monitor` out of the
+      shared `intraday-trading-ledger-write` concurrency group (a 5.5-hour-long job would
+      otherwise block `cycle`/`carry` from running at all for that whole window) -- safe
+      because every iteration already does its own fetch/reset/push-with-retry, the same
+      pattern that already handles concurrent writers everywhere else in this workflow. A
+      single failed iteration doesn't abort the loop (logged, retried in 5 minutes); 3
+      *consecutive* fully-failed iterations does exit 1, so a transient push race stays
+      quiet but a genuine persistent bug still trips GitHub's failure email. Verified with a
+      stubbed-git/uv dry-run harness of the loop's control flow (always-run-once at the
+      deadline/close boundary, normal multi-iteration looping, and the 3-consecutive-
+      failures exit), not yet against a real scheduled run -- same Monday market-open
+      caveat as the two fixes above.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's evidence looks good; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).
