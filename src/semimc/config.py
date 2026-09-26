@@ -387,9 +387,43 @@ class IntradayScheduleConfig(_Base):
 
 class IntradayOptionsConfig(_Base):
     """Both gates (account level, data feed) are unresolved -- see docs/alpaca_notes.md.
-    Stays False through the equities-only rollout stages regardless of either gate."""
+    `enabled` stays False through the equities-only rollout stages regardless of either
+    gate -- real order submission is Stage 5, owner-approval-only (BRIEF_INTRADAY.md's
+    "Ask first: enabling options").
+
+    `shadow_pricing` is Stage 4's own, independent switch: the Trader may propose options
+    and they get priced, gated, and logged, but `intraday/jobs.py::run_cycle` never
+    reaches order submission for one while `enabled` is False, regardless of gate outcome
+    -- the same `trading_enabled`/`shadow_mode` two-flag shape Phase 11 already uses for
+    "may this run at all" vs. "does this run touch the real broker."
+    """
 
     enabled: bool = False
+    shadow_pricing: bool = False
+    # BRIEF_INTRADAY.md's Defaults table gives these two numbers directly.
+    premium_at_risk_pct_per_position: float = Field(0.005, gt=0)
+    premium_at_risk_pct_total: float = Field(0.02, gt=0)
+    min_dte: int = Field(7, ge=0)
+    max_dte: int = Field(60, gt=0)
+    close_at_dte: int = Field(2, ge=0)
+    # The brief states these narratively (liquidity filters, a net delta cap, a daily
+    # theta cap) but gives no numeric default for any of them -- a starting guess, not a
+    # researched figure, same caveat as IntradayRiskConfig.max_spread_bps. Recalibrate
+    # from real Stage-4 shadow-pricing logging.
+    min_open_interest: int = Field(50, ge=0)
+    min_volume: int = Field(10, ge=0)
+    max_spread_pct_of_mid: float = Field(0.15, gt=0)
+    net_delta_cap: float = Field(0.30, gt=0)
+    daily_theta_cap: float = Field(0.005, gt=0)
+    # "only buy premium when forecast volatility exceeds implied by a margin" -- the
+    # margin itself (in annualized vol points, e.g. 0.05 = 5 vol points) has no brief-given
+    # number either. Applies to long_call/long_put only; debit_vertical is the brief's own
+    # accepted way to trade richer implied vol, never gated on this.
+    min_forecast_vol_premium_over_iv: float = Field(0.05, ge=0)
+    # "half the spread plus 5 bps for options" (Defaults table), vs.
+    # IntradayRiskConfig.equity_cost_bps_per_side's flat 8bps for equities.
+    cost_model_spread_fraction: float = Field(0.5, gt=0)
+    cost_model_extra_bps: float = Field(5.0, ge=0)
 
 
 class IntradayModelsConfig(_Base):

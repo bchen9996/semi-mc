@@ -1880,6 +1880,89 @@ problem for T6's control group):
       process boundary would impose). `tests/test_config_intraday.py` (+1: the new
       fields' defaults). Full suite green (`uv run pytest`), `ruff check`/`format` clean.
 
+**Phase 12a -- options schema, config, and the options.py gate/pricing module (Rollout
+Stage 4), built 2026-09-26, ahead of Stage 4's actual turn in the rollout.** Confirmed by
+reading the code directly, not assumed: nothing for Stage 4 ("options in shadow, 2 weeks
+-- proposals priced and logged but not traded") existed. No `intraday/options.py` despite
+the brief's own file tree naming one; `TradeProposal` accepted `instrument="option"` at
+the schema level with no `expiry`/`strike`/`right`/`structure` fields despite the brief's
+schema section requiring them; `IntradayOptionsConfig` had exactly one field, `enabled`;
+`validate_proposal`'s entire options-awareness was a two-line blanket rejection.
+
+Split into two sub-phases (plan: `starry-drifting-parasol.md`) since the full surface area
+(schema, config, a new module, a market-data integration, execution wiring, prompts) was
+too large for one reviewable diff. **12a is pure logic, no live wiring** -- Phase 12b
+(real Alpaca options market data, `jobs.py` wiring, prompt updates) is still open.
+
+Design:
+- `data/options.py` gained `black_scholes_greeks` (delta/gamma/vega/theta), right next to
+  `black_scholes_price` -- reused by the new module rather than re-derived, matching this
+  project's "one choke point" convention generalized to option pricing math. Verified
+  against finite-difference derivatives of `black_scholes_price` itself, put-call delta
+  parity, and the `t<=0`/`sigma<=0` boundary (gamma/vega/theta exactly zero, delta the
+  intrinsic step function) -- not just closed-form-vs-closed-form, an independent
+  numerical cross-check.
+- `IntradayOptionsConfig` gained `shadow_pricing: bool = False`, independent of `enabled`
+  -- the same `trading_enabled`/`shadow_mode` two-flag shape Phase 11 already established
+  for "may this run at all" vs. "does this run touch the real broker." Plus every numeric
+  limit the brief names (two with brief-given defaults: premium-at-risk caps, DTE bounds;
+  the rest disclosed placeholders matching `max_spread_bps`'s own precedent: liquidity
+  minimums, net delta cap, daily theta cap, the "half the spread plus 5bps" options cost
+  model, and the IV-vs-forecast margin the brief states narratively but never numbers).
+  Added to both `config/default.yaml` and `config/paper.yaml`.
+- `TradeProposal` gained `expiry`/`strike`/`right`/`structure` (defined-risk-only --
+  `structure` has no short-premium value, so "never a naked short option" is a schema
+  fact, not a validator that could be bypassed), required together exactly when
+  `instrument="option"` via a new `model_validator`.
+- New `intraday/options.py`: `price_contract` (recomputes IV from a quote's own midpoint,
+  never trusts a feed's reported IV -- same discipline `data/options.py`'s docstring
+  already established; returns NaN greeks rather than a nonsense number when the quote is
+  crossed/stale), `check_liquidity`/`check_dte`/`check_premium_at_risk`/
+  `check_iv_vs_forecast`/`check_earnings`/`check_portfolio_delta_cap`/
+  `check_daily_theta_cap` (every brief-named gate), `should_close_for_dte` (an *exit*
+  rule, wired to nothing yet -- there's never a real position to close until Stage 5),
+  `portfolio_greeks` (built now for Stage 5's sake; always zero in practice during Stage
+  4 since nothing executes), and `validate_option_proposal` as the one aggregator
+  `proposals.py` calls. `TradeProposal`/`ValidationContext`/`IntradayOptionsConfig` are
+  imported under `TYPE_CHECKING` only -- `ValidationContext` type-hints its own new
+  `option_quote`/`option_pricing` fields against this module, so a module-level import in
+  either direction would be circular; `validate_proposal` imports the aggregator locally,
+  inside the function body, once both modules have already loaded.
+- `validate_proposal`'s options gate widened from "reject if `not enabled`" to "reject
+  unless `shadow_pricing or enabled`, then run the full gate suite" -- and its edge-vs-cost
+  check gained an instrument-aware branch (the options cost model needs the quote's own
+  spread, unlike the flat equity bps figure), both per-side figures doubled for a round
+  trip the same way `equity_cost_bps_per_side` already is.
+- **A design correction caught before finalizing, not after**: `check_iv_vs_forecast`'s
+  IV-richness gate and `check_portfolio_delta_cap`/`check_daily_theta_cap` needed a way to
+  size "how many contracts does this premium buy" without building real order-sizing
+  machinery (Stage 5's job) -- resolved with a continuous (not floored) `implied_contracts`
+  approximation, disclosed as a validation-time risk estimate, not the real order Stage 5
+  would eventually build.
+
+Deliberately not this phase (Stage 5's scope): real order submission (OCC symbols,
+`broker.py`/`orders.py` extensions), `review.py`/`eod_report.py`'s real options P&L
+attribution (stays hardcoded `0.0` -- nothing ever fills during Stage 4 either), the
+market-data fetch and `jobs.py` wiring themselves (Phase 12b), and flipping either
+`enabled` or `shadow_pricing` to `True` (owner-only, per the brief's own "Ask first:
+enabling options").
+
+Tests: `tests/test_options.py` (+8: greeks against finite-difference/parity/boundary
+identities). `tests/test_intraday_options.py` (new, 29 tests: every gate/pricing function
+in isolation, plus the aggregator). `tests/test_intraday_proposals.py` (+7: schema
+requires/forbids the option fields correctly, the `shadow_pricing`-widened gate, a clean
+pass with real pricing supplied, and the options-vs-equity cost model actually using the
+right formula -- caught a real gap while writing this last test: an early draft's
+generic-looking test didn't actually verify anything about *which* cost model ran).
+`tests/test_config_intraday.py` (+7: new field defaults on both the code default and
+`config/paper.yaml`). Two real test-authoring bugs caught by actually running the suite,
+not just writing it: the original "no prior pricing" test for `options.py` accidentally
+constructed a *genuinely untouched* scenario (which correctly reads clean, not the
+"someone else already has pricing" case it meant to test) -- rewritten once the failure
+explained why; a `ValidationContext` test helper passed a bare `IntradayOptionsConfig`
+where `IntradayConfig` (with `.options` nested inside) was needed. Full suite green
+(`uv run pytest`), `ruff check`/`format` clean.
+
 **Remaining prerequisites** -- what Phase 0 didn't (and couldn't) resolve:
 
 1. ~~The owner still needs to actually create the second Alpaca paper account~~ --
@@ -2105,7 +2188,13 @@ problem for T6's control group):
       Stage 1's evidence looks good; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).
 - [ ] Stage 3 -- equities, full budget.
-- [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded).
+- [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded). **Partially
+      built ahead of turn, 2026-09-26**: schema/config/gates (Phase 12a) done; the real
+      Alpaca options market-data fetch and `jobs.py` wiring (Phase 12b) are still open --
+      `shadow_pricing` flipping `True` today would have every option proposal fail
+      cleanly with "no options pricing available," not silently misbehave, but Stage 4
+      isn't actually *runnable* yet, the same "built vs. run" distinction already drawn
+      for Stage 1.
 - [ ] Stage 5 -- options enabled, only if the shadow results and both options gates pass,
       and only with the owner's explicit approval. Never live at any stage.
 

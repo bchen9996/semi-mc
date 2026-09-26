@@ -49,6 +49,12 @@ def test_intraday_section_matches_the_briefs_defaults_table():
     assert cfg.intraday.schedule.timezone == "America/Chicago"
     assert cfg.intraday.schedule.cycle_interval_minutes == 20
     assert cfg.intraday.options.enabled is False
+    assert cfg.intraday.options.shadow_pricing is False
+    assert cfg.intraday.options.premium_at_risk_pct_per_position == pytest.approx(0.005)
+    assert cfg.intraday.options.premium_at_risk_pct_total == pytest.approx(0.02)
+    assert cfg.intraday.options.min_dte == 7
+    assert cfg.intraday.options.max_dte == 60
+    assert cfg.intraday.options.close_at_dte == 2
     assert cfg.intraday.models.researcher == "sonnet"
     assert cfg.intraday.models.trader == "haiku"
     assert cfg.intraday.models.reviewer == "sonnet"
@@ -94,4 +100,5 @@ def test_paper_yaml_loads_intraday_at_rollout_stage_1():
     assert cfg.intraday.trading_enabled is True
     assert cfg.intraday.registered_account == "PA33HJGNHLI7"
     assert cfg.intraday.options.enabled is False
+    assert cfg.intraday.options.shadow_pricing is False
     assert cfg.intraday.shadow_mode is True

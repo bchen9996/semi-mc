@@ -248,6 +248,20 @@ intraday:
     cycle_interval_minutes: 20
   options:
     enabled: false   # both gates unresolved -- see docs/alpaca_notes.md
+    shadow_pricing: false   # Stage 4's own switch -- proposed, priced, logged, never traded
+    premium_at_risk_pct_per_position: 0.005
+    premium_at_risk_pct_total: 0.02
+    min_dte: 7
+    max_dte: 60
+    close_at_dte: 2
+    min_open_interest: 50    # placeholder -- recalibrate from real Stage-4 logging
+    min_volume: 10           # placeholder -- recalibrate from real Stage-4 logging
+    max_spread_pct_of_mid: 0.15   # placeholder -- recalibrate from real Stage-4 logging
+    net_delta_cap: 0.30           # placeholder -- recalibrate from real Stage-4 logging
+    daily_theta_cap: 0.005        # placeholder -- recalibrate from real Stage-4 logging
+    min_forecast_vol_premium_over_iv: 0.05   # placeholder -- recalibrate from real Stage-4 logging
+    cost_model_spread_fraction: 0.5
+    cost_model_extra_bps: 5.0
   models:
     researcher: sonnet
     trader: haiku      # cheapest model -- ~20 calls/day, vs. 2/day for researcher/reviewer
