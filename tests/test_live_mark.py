@@ -17,7 +17,7 @@ from semimc.config import PaperSleeveConfig
 from semimc.execution.broker import Order, OrderRequest
 from semimc.execution.fake_broker import FakeBroker
 from semimc.live.ledger import Ledger
-from semimc.live.mark import run_mark
+from semimc.live.mark import _CarriedPosition, run_mark
 
 SUBMITTED_AT = dt.datetime(2026, 1, 5, 10, 0)
 
@@ -200,9 +200,17 @@ def test_mark_carries_forward_a_disabled_sleeves_own_snapshot_not_the_accounts(c
     it ever reached this function's own final snapshot step, that step would otherwise still
     record the *account's* real, s3-driven equity/cash/positions under s0's own label the
     moment mark(s0) next succeeded -- corrupting the s0-vs-s3 comparison this shared account
-    exists to make. Unlike the reconciliation test above, s0 here is left at its real
-    production default (trading_enabled=False) -- only s3 is enabled -- so this exercises
-    the actual disabled-sleeve branch, not just a same-config stand-in for it."""
+    exists to make. Unlike the reconciliation test above, s0 here has never placed an order
+    at all -- the actual discriminator is s0's own (empty) fills versus the account-wide
+    total, not `trading_enabled` (see the wind-down test below for why that distinction
+    matters), so this exercises the real branch rather than a same-config stand-in for it.
+
+    s0's own seeded prior snapshot deliberately holds a position (AAPL) -- not today's real
+    production history (s0 has always been flat), but chosen to prove the fix carries a
+    disabled sleeve's own state forward *verbatim*, not just resets it to flat. Blanking
+    positions on carry-forward would happen to look right for today's actual s0 (it really
+    is flat) while being wrong in general, and this test would not catch that mistake if it
+    only used an already-flat starting snapshot."""
     paper = config.paper.model_copy(
         update={"sleeves": {**config.paper.sleeves, "s3": PaperSleeveConfig(trading_enabled=True)}}
     )
@@ -217,32 +225,96 @@ def test_mark_carries_forward_a_disabled_sleeves_own_snapshot_not_the_accounts(c
         price=submitted.filled_avg_price,
         filled_at=SUBMITTED_AT,
     )
-    ledger.record_snapshot("s0", pd.Timestamp("2026-01-04"), 100_000.0, 100_000.0, {})
+    ledger.record_snapshot(
+        "s0",
+        pd.Timestamp("2026-01-04"),
+        105_000.0,
+        95_000.0,
+        {"AAPL": _CarriedPosition(qty=5.0, market_value=850.0)},
+    )
 
     now = SUBMITTED_AT + dt.timedelta(minutes=1)
     run_mark("s0", cfg, broker, ledger, pd.Timestamp("2026-01-05"), now)
 
     snap = ledger.latest_snapshot("s0")
     assert snap["as_of"] == str(pd.Timestamp("2026-01-05"))
-    assert snap["equity"] == pytest.approx(100_000.0)
-    assert snap["cash"] == pytest.approx(100_000.0)
-    assert snap["positions"] == {}
+    assert snap["equity"] == pytest.approx(105_000.0)
+    assert snap["cash"] == pytest.approx(95_000.0)
+    assert snap["positions"] == {"AAPL": {"qty": 5.0, "market_value": 850.0}}
+    # And not, e.g., s3's real NVDA fill from this same run -- s0's carried-forward snapshot
+    # must not pick up any trace of the other sleeve's actual activity.
+    assert "NVDA" not in snap["positions"]
 
 
 def test_mark_skips_the_snapshot_for_a_disabled_sleeve_with_no_prior_history(config, ledger):
-    """No previous snapshot to carry forward, and this sleeve has never traded here -- there
-    is nothing genuine to report, so record nothing rather than fabricate a starting figure
-    this module has no config source for."""
+    """No previous snapshot to carry forward, and some other sleeve has already traded here
+    (so this sleeve's own fills diverge from the account-wide total, same as every other
+    disabled-sleeve test) -- there is nothing genuine to report for this sleeve, so record
+    nothing rather than fabricate a starting figure this module has no config source for.
+
+    Deliberately distinct from a genuinely fresh, untouched account (nobody has traded at
+    all): there, this sleeve's own empty fills *do* equal the account-wide total (also
+    empty), so the fix correctly reads the broker directly instead -- a real, brand new
+    Alpaca paper account really does start flat and it is truthful to record that, for
+    whichever sleeve asks first. That path already has coverage
+    (test_mark_always_records_a_fresh_snapshot); this test is specifically the "someone
+    else already traded" case."""
     paper = config.paper.model_copy(
         update={"sleeves": {**config.paper.sleeves, "s3": PaperSleeveConfig(trading_enabled=True)}}
     )
     cfg = config.model_copy(update={"paper": paper})
     broker = FakeBroker(now=SUBMITTED_AT)
+    request = _request(client_order_id="s3-nvda-1")
+    submitted = broker.submit_order(request)
+    ledger.record_order("s3", "hash-1", request, submitted)
+    ledger.record_fill(
+        request.client_order_id,
+        qty=submitted.filled_qty,
+        price=submitted.filled_avg_price,
+        filled_at=SUBMITTED_AT,
+    )
 
     now = SUBMITTED_AT + dt.timedelta(minutes=1)
     run_mark("s0", cfg, broker, ledger, pd.Timestamp("2026-01-05"), now)
 
     assert ledger.latest_snapshot("s0") is None
+
+
+def test_mark_keeps_reading_the_broker_for_a_sole_trader_even_once_disabled(config, ledger):
+    """A config flag answers "may this sleeve place new orders," not "does the account's
+    real state still belong to it." A sleeve disabled at a review checkpoint
+    (`paper.review_months`) while still the account's only historical trader must keep
+    reading the broker directly -- its real position is still there and its market value
+    still moves day to day. Freezing it at whatever its last snapshot showed the moment it
+    was disabled would be a *new* staleness bug traded for the one just fixed."""
+    paper = config.paper.model_copy(
+        update={"sleeves": {**config.paper.sleeves, "s3": PaperSleeveConfig(trading_enabled=False)}}
+    )
+    cfg = config.model_copy(update={"paper": paper})
+    broker = FakeBroker(now=SUBMITTED_AT)
+    request = _request(client_order_id="s3-nvda-1")
+    submitted = broker.submit_order(request)
+    ledger.record_order("s3", "hash-1", request, submitted)
+    ledger.record_fill(
+        request.client_order_id,
+        qty=submitted.filled_qty,
+        price=submitted.filled_avg_price,
+        filled_at=SUBMITTED_AT,
+    )
+    # A stale prior snapshot -- if the fix wrongly fell back to carry-forward here, this is
+    # the (wrong) value the assertion below would catch it returning instead.
+    ledger.record_snapshot("s3", pd.Timestamp("2026-01-04"), 100_000.0, 100_000.0, {})
+
+    now = SUBMITTED_AT + dt.timedelta(minutes=1)
+    run_mark("s3", cfg, broker, ledger, pd.Timestamp("2026-01-05"), now)
+
+    snap = ledger.latest_snapshot("s3")
+    account = broker.get_account()
+    # A carry-forward would have reproduced the stale seeded snapshot exactly: equity
+    # 100_000.0 and an empty positions dict. Reading the broker directly instead shows the
+    # real fill (NVDA) and the account's actual current equity, whatever that is.
+    assert snap["equity"] == pytest.approx(account.equity)
+    assert "NVDA" in snap["positions"]
 
 
 def test_an_open_order_missing_at_the_broker_is_surfaced_and_logged(config, ledger):

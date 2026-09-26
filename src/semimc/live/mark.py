@@ -23,6 +23,17 @@ from .ledger import Ledger
 _OPEN_STATUSES = ("new", "accepted", "partially_filled")
 
 
+@dataclass(frozen=True)
+class _CarriedPosition:
+    """Just enough to satisfy ``Ledger.record_snapshot``'s ``position.qty``/
+    ``position.market_value`` access -- not a real :class:`~semimc.execution.broker.Position`
+    (no ``side``/``avg_entry_price``, which the stored ``positions_json`` never carried and
+    which the broker was never actually asked about for a sleeve that isn't trading here)."""
+
+    qty: float
+    market_value: float
+
+
 @dataclass
 class MarkResult:
     fills_recorded: int = 0
@@ -114,26 +125,42 @@ def run_mark(
             "error", f"position reconciliation mismatch: {discrepancies}", sleeve
         )
 
-    sleeve_config = config.paper.sleeves.get(sleeve)
-    if sleeve_config is not None and sleeve_config.trading_enabled:
+    # Whether broker.get_account()/list_positions() genuinely is *this* sleeve's own state
+    # depends on whether any other sleeve has ever also traded here -- not on this sleeve's
+    # own current `trading_enabled` flag. A config flag answers "may this sleeve place new
+    # orders," not "does the shared account's real state still belong to it": a sleeve
+    # disabled at a review checkpoint (`paper.review_months`) while still holding a real,
+    # market-moving position from before must keep reading the broker directly, not freeze
+    # at whatever its last snapshot happened to show the moment it was disabled. `expected`
+    # (this account's combined fills, computed above for reconciliation) already answers the
+    # right question when compared against this sleeve's own fills: equal means nobody else
+    # has ever contributed anything here, so the account's real state is exclusively this
+    # sleeve's, trading_enabled or not.
+    if ledger.net_filled_qty(sleeve) == expected:
         account = broker.get_account()
         positions = {p.symbol: p for p in broker.list_positions()}
         ledger.record_snapshot(sleeve, as_of, account.equity, account.cash, positions)
     else:
-        # This sleeve isn't the one actually trading against the shared account (s0 while
-        # s3 trades, docs/go_live_checklist.md item 6) -- broker.get_account()/
-        # list_positions() would be the *other* sleeve's real equity/cash/positions, not
-        # this one's. Found 2026-09-26, the same root cause net_filled_qty_all_sleeves'
-        # reconciliation fix addressed, but for the snapshot this function always records
-        # last regardless of reconciliation outcome: once that reconciliation fix stopped
-        # crashing mark(s0) before it ever reached this line, this line would otherwise
-        # start silently mislabeling s3's real activity as s0's own on every successful
-        # run -- corrupting the entire s0-vs-s3 comparison this shared account exists to
-        # make. Carry this sleeve's own last recorded state forward unchanged instead (it
-        # never trades, so nothing about it has genuinely changed); if it has no prior
-        # snapshot at all, record nothing rather than fabricate a starting figure this
-        # module has no config source for.
+        # Some other sleeve has also traded on this shared account (s0 while s3 trades,
+        # `docs/go_live_checklist.md` item 6) -- broker.get_account()/list_positions() would
+        # be a mix of both, or the *other* sleeve's real equity/cash/positions, not cleanly
+        # this one's. Found 2026-09-26: the reconciliation fix above (`expected` itself)
+        # stopped mark(s0) from crashing before it ever reached this line -- but this line,
+        # unfixed, would then start silently mislabeling s3's real activity as s0's own on
+        # every successful run, corrupting the entire s0-vs-s3 comparison this shared
+        # account exists to make. Carry this sleeve's own last recorded state forward
+        # *verbatim* instead -- equity, cash, and whatever positions it last held, not
+        # blanked to flat (s0's own history happens to already be all-flat, but blanking
+        # would be wrong in general -- see the position-carrying test for why). If this
+        # sleeve has no prior snapshot at all, record nothing rather than fabricate a
+        # starting figure this module has no config source for.
         previous = ledger.latest_snapshot(sleeve)
         if previous is not None:
-            ledger.record_snapshot(sleeve, as_of, previous["equity"], previous["cash"], {})
+            carried_positions = {
+                symbol: _CarriedPosition(qty=p["qty"], market_value=p["market_value"])
+                for symbol, p in previous["positions"].items()
+            }
+            ledger.record_snapshot(
+                sleeve, as_of, previous["equity"], previous["cash"], carried_positions
+            )
     return result
