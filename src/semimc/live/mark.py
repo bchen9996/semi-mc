@@ -114,7 +114,26 @@ def run_mark(
             "error", f"position reconciliation mismatch: {discrepancies}", sleeve
         )
 
-    account = broker.get_account()
-    positions = {p.symbol: p for p in broker.list_positions()}
-    ledger.record_snapshot(sleeve, as_of, account.equity, account.cash, positions)
+    sleeve_config = config.paper.sleeves.get(sleeve)
+    if sleeve_config is not None and sleeve_config.trading_enabled:
+        account = broker.get_account()
+        positions = {p.symbol: p for p in broker.list_positions()}
+        ledger.record_snapshot(sleeve, as_of, account.equity, account.cash, positions)
+    else:
+        # This sleeve isn't the one actually trading against the shared account (s0 while
+        # s3 trades, docs/go_live_checklist.md item 6) -- broker.get_account()/
+        # list_positions() would be the *other* sleeve's real equity/cash/positions, not
+        # this one's. Found 2026-09-26, the same root cause net_filled_qty_all_sleeves'
+        # reconciliation fix addressed, but for the snapshot this function always records
+        # last regardless of reconciliation outcome: once that reconciliation fix stopped
+        # crashing mark(s0) before it ever reached this line, this line would otherwise
+        # start silently mislabeling s3's real activity as s0's own on every successful
+        # run -- corrupting the entire s0-vs-s3 comparison this shared account exists to
+        # make. Carry this sleeve's own last recorded state forward unchanged instead (it
+        # never trades, so nothing about it has genuinely changed); if it has no prior
+        # snapshot at all, record nothing rather than fabricate a starting figure this
+        # module has no config source for.
+        previous = ledger.latest_snapshot(sleeve)
+        if previous is not None:
+            ledger.record_snapshot(sleeve, as_of, previous["equity"], previous["cash"], {})
     return result
