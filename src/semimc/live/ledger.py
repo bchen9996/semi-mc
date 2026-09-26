@@ -342,9 +342,7 @@ class Ledger:
     def net_filled_qty(self, sleeve: str) -> dict[str, float]:
         """This sleeve's own view of what it should be holding, per symbol -- every
         recorded fill, signed by the order's side (buy positive, sell negative), summed
-        across all orders ever placed. ``live/mark.py``'s reconciliation compares this
-        against the broker's actual positions; a discrepancy beyond tolerance is a real
-        incident, not this method's concern."""
+        across all orders ever placed."""
         rows = self._conn.execute(
             """
             SELECT o.symbol AS symbol, o.side AS side, f.qty AS qty
@@ -353,6 +351,33 @@ class Ledger:
             """,
             (sleeve,),
         ).fetchall()
+        return self._net_from_rows(rows)
+
+    def net_filled_qty_all_sleeves(self) -> dict[str, float]:
+        """The combined view across every sleeve this ledger has ever recorded a fill for.
+
+        ``live/mark.py``'s reconciliation uses this, not the single-sleeve ``net_filled_qty``
+        -- s0 and s3 share one real Alpaca paper account (``docs/go_live_checklist.md`` item
+        6), so ``broker.list_positions()`` reflects whichever of them actually traded, not
+        just the sleeve this particular ``mark`` run happens to be for. Comparing a single
+        sleeve's own fills (always empty for a sleeve left disabled) against the shared
+        account's real, other-sleeve-driven holdings produced a guaranteed, permanent
+        reconciliation "discrepancy" for the disabled sleeve the moment the other one held
+        its first real position -- found 2026-09-26, s3's first month-end rebalance. Every
+        sleeve recorded in this ledger's ``orders``/``fills`` tables shares the same
+        ``paper.registered_accounts`` broker (a shadow-only sleeve like ``vol_twin_shadow``
+        never calls ``execute``, so it never appears here), so summing across all of them is
+        exactly the account-wide total the broker itself would report."""
+        rows = self._conn.execute(
+            """
+            SELECT o.symbol AS symbol, o.side AS side, f.qty AS qty
+            FROM fills f JOIN orders o ON o.client_order_id = f.client_order_id
+            """
+        ).fetchall()
+        return self._net_from_rows(rows)
+
+    @staticmethod
+    def _net_from_rows(rows: list[sqlite3.Row]) -> dict[str, float]:
         net: dict[str, float] = {}
         for row in rows:
             signed = row["qty"] if row["side"] == "buy" else -row["qty"]

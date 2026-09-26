@@ -170,6 +170,31 @@ def test_a_position_mismatch_is_caught_by_reconciliation(config, ledger):
     assert any(i["severity"] == "error" for i in incidents)
 
 
+def test_mark_reconciles_against_every_sleeves_fills_not_just_this_ones(config, ledger):
+    """Found 2026-09-26: s0 and s3 share one real Alpaca paper account, so once s3 held its
+    first real position, mark(s0) compared s0's own (always empty) fills against the whole
+    account's s3-driven holdings and failed on every single run. marking s0 while only s3
+    has ever traded must reconcile clean."""
+    cfg = _tradeable_config(config)
+    broker = FakeBroker(now=SUBMITTED_AT)
+    request = _request(client_order_id="s3-nvda-1")
+    submitted = broker.submit_order(request)
+    assert submitted.status == "filled"  # FakeBroker's default: fully filled immediately
+    ledger.record_order("s3", "hash-1", request, submitted)
+    ledger.record_fill(
+        request.client_order_id,
+        qty=submitted.filled_qty,
+        price=submitted.filled_avg_price,
+        filled_at=SUBMITTED_AT,
+    )
+
+    now = SUBMITTED_AT + dt.timedelta(minutes=1)
+    result = run_mark("s0", cfg, broker, ledger, pd.Timestamp("2026-01-05"), now)
+
+    assert result.reconciliation_status == "ok"
+    assert result.discrepancies == []
+
+
 def test_an_open_order_missing_at_the_broker_is_surfaced_and_logged(config, ledger):
     """Phase 7: distinct from a *position* reconciliation mismatch -- this is the ledger
     believing an order is still open when the broker has never heard of it at all (e.g. a
