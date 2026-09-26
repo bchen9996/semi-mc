@@ -2001,8 +2001,23 @@ problem for T6's control group):
       synthetic tests): `net_filled_qty("s0")` is `{}` against a combined total that already
       includes s3's real fills, so the very next `mark(s0)` will correctly take the
       carry-forward branch and reproduce the existing 2026-09-23 snapshot (`$100k`, flat) --
-      no manual ledger edit needed. Also not yet verified against a real scheduled run, same
-      Monday caveat as the two fixes above.
+      no manual ledger edit needed.
+
+      **One more hardening pass, same day, before pushing**: the sole-trader comparison
+      initially used exact dict equality (`net_filled_qty(sleeve) == expected`) on two dicts
+      of floats built from separately-filtered SQL queries with no `ORDER BY` -- SQLite makes
+      no row-order guarantee between them, so float summation order (and therefore rounding)
+      could in principle differ even for identical underlying fills. Switched to the same
+      `position_tolerance_shares` tolerance the reconciliation check three lines above already
+      uses, rather than relying on exact float equality holding by luck. Also confirmed
+      `live/execute.py`'s own unconditional `broker.get_account()`/`list_positions()` calls
+      are *not* exposed to this bug class -- its `check_pretrade` call returns early whenever
+      `not sleeve_config.trading_enabled`, before either call is ever reached, so a disabled
+      sleeve never gets far enough into `execute` to read the other sleeve's data. `mark`
+      needed this fix specifically because it has no equivalent gate.
+
+      Also not yet verified against a real scheduled run, same Monday caveat as the two
+      fixes above.
 
       **The self-looping `monitor` job (referenced above as still-open) was built
       2026-09-26**, once the deferred question -- "does the real cadence actually justify
