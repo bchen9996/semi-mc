@@ -17,9 +17,27 @@ name: Intraday trading (S4)
 # weekly-review) -- the five Phase 5 builds, monitor's own frequent, model-free cron
 # (BRIEF_INTRADAY.md's "minute monitor", adapted to this project's cron architecture --
 # see the Phase 5 plan), Phase 6's `research`, Phase 9b's `eod-review`, and Phase 10's
-# `weekly-review`. Every job shares one concurrency group: unlike paper_trading.yml's two
-# ledger-writing jobs, all nine of these touch the same ledger/intraday.sqlite3, so all
-# nine need to serialize their git commits, not just a pair of them.
+# `weekly-review`. Eight of the nine share one concurrency group: unlike
+# paper_trading.yml's two ledger-writing jobs, all nine touch the same
+# ledger/intraday.sqlite3, so eight need to serialize their git commits, not just a pair
+# of them. `monitor` is the deliberate exception -- see its own job comment below.
+#
+# **`monitor` self-loops instead of relying on GitHub's cron for its 5-minute cadence.**
+# Found 2026-09-24/25: GitHub's own `schedule` event delivery for this repo is far less
+# reliable than the `*/5` cron below promises -- real telemetry (`monitor_checks` table)
+# showed gaps of ~165-172 minutes between checks on both days, with nothing (monitor,
+# cycle, or open-batch) firing in between, against a 5-minute configured cadence. Since
+# `FakeBroker` never auto-triggers a resting stop, a real invalidated shadow position
+# could sit unprotected for the entire gap. Rather than depend on ~80 separate
+# GitHub-scheduled firings a day all landing on time, one successful firing now keeps
+# checking and committing on its own every 5 minutes for up to ~5.5 hours (comfortably
+# under GitHub-hosted runners' hard 6-hour job cap) or until the trading day's own close,
+# whichever comes first -- see the job's own step comment for the loop itself. The `*/5`
+# cron trigger is unchanged and now pure redundancy: an overlapping second loop is
+# harmless (each iteration's own fetch/reset/push-retry already handles concurrent
+# writers safely, the same pattern every other job here uses), which is exactly why
+# `monitor` was pulled out of the shared concurrency group -- a 5.5-hour-long loop must
+# not block `cycle`/`carry` from running for the rest of the session.
 #
 # `weekly-review` never accepts, rejects, or retires a playbook proposal -- confirmed
 # directly against the brief before building it: the schedule table names no agent for
@@ -245,9 +263,7 @@ jobs:
   monitor:
     if: github.event.schedule == '*/5 13-20 * * 1-5' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    concurrency:
-      group: intraday-trading-ledger-write
-      cancel-in-progress: false
+    timeout-minutes: 340
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -257,33 +273,69 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
-      - name: Enforce invalidation/time-stops and commit the ledger
+      - name: Enforce invalidation/time-stops and commit the ledger, looping internally
         # No Anthropic call here at all -- this is the cheap, model-free check
-        # (intraday/monitor.py) that can afford a 5-minute cron.
+        # (intraday/monitor.py) that can afford running every 5 minutes for hours.
+        #
+        # Self-loops rather than exiting after one check -- see this workflow's header
+        # comment for why. At least one iteration always runs (a single `workflow_dispatch`
+        # or a cron firing right at the boundary still does something); after that it keeps
+        # checking every 5 minutes until either the internal 330-minute budget is spent
+        # (leaving ~10 minutes of margin under the job's 340-minute timeout, itself under
+        # GitHub-hosted runners' hard 360-minute job cap) or the UTC hour reaches 20
+        # (roughly `carry`'s own close-out time), whichever comes first.
+        #
+        # A single iteration failing all 3 push/command attempts is logged and the loop
+        # moves on -- another attempt follows in 5 minutes regardless. Only 3 *consecutive*
+        # fully-failed iterations (~15 minutes of total failure) exits 1, so a transient
+        # push race never trips GitHub's failure email but a genuine, persistent bug still
+        # does.
         env:
           ALPACA_S4_API_KEY: ${{ secrets.ALPACA_S4_API_KEY }}
           ALPACA_S4_SECRET_KEY: ${{ secrets.ALPACA_S4_SECRET_KEY }}
         run: |
-          set -e
           git config user.name "semimc-bot"
           git config user.email "semimc-bot@users.noreply.github.com"
-          for attempt in 1 2 3; do
-            git fetch origin main
-            git reset --hard origin/main
-            uv run semimc intraday monitor --cycle "monitor_$(date -u +%H%M)" --config config/paper.yaml
-            git add ledger/intraday.sqlite3
-            if git diff --cached --quiet; then
-              echo "nothing to commit"
-              exit 0
+          deadline=$(( $(date -u +%s) + 330 * 60 ))
+          consecutive_failures=0
+          while true; do
+            iteration_ok=0
+            for attempt in 1 2 3; do
+              git fetch origin main
+              git reset --hard origin/main
+              if ! uv run semimc intraday monitor --cycle "monitor_$(date -u +%H%M)" --config config/paper.yaml; then
+                echo "monitor command failed (attempt $attempt/3)"
+                continue
+              fi
+              git add ledger/intraday.sqlite3
+              if git diff --cached --quiet; then
+                echo "nothing to commit"
+                iteration_ok=1
+                break
+              fi
+              git commit -m "intraday monitor: $(date -u +%F) $(date -u +%H:%M)"
+              if git push; then
+                iteration_ok=1
+                break
+              fi
+              echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+            done
+            if [ "$iteration_ok" = 1 ]; then
+              consecutive_failures=0
+            else
+              consecutive_failures=$((consecutive_failures + 1))
+              echo "loop iteration failed all 3 attempts ($consecutive_failures consecutive failed iterations)"
+              if [ "$consecutive_failures" -ge 3 ]; then
+                echo "3 consecutive fully-failed iterations -- stopping so this surfaces as a real failure"
+                exit 1
+              fi
             fi
-            git commit -m "intraday monitor: $(date -u +%F) $(date -u +%H:%M)"
-            if git push; then
-              exit 0
+            if [ "$(date -u +%s)" -ge "$deadline" ] || [ "$(date -u +%H)" -ge 20 ]; then
+              break
             fi
-            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+            sleep 300
           done
-          echo "failed to push after 3 attempts"
-          exit 1
+          echo "monitor loop finished for this invocation"
 
   open-batch:
     if: github.event.schedule == '30 13 * * 1-5' || github.event_name == 'workflow_dispatch'
