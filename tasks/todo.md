@@ -1945,6 +1945,26 @@ problem for T6's control group):
       GitHub's cron for sub-15-minute cadence) is still open -- deliberately not built yet,
       since it's a real architecture change and this repo's own numbers now surface
       whether it's actually needed before investing in it.
+
+      **Two more bugs found and fixed 2026-09-26, both first triggered by s3's own first
+      real month-end rebalance (`cf4f844`, 2026-09-25) rather than anything Stage-1-specific
+      to S4**: (1) `mark(s0)` reconciled s0's own (always-empty) `net_filled_qty` against
+      the *whole* shared Alpaca account's positions (s0 and s3 share one account,
+      `docs/go_live_checklist.md` item 6), so once s3 actually held something, every
+      `mark(s0)` run failed reconciliation -- and since `paper_trading.yml`'s mark step runs
+      under `set -e`, that failure aborted the script before `git commit`, so it produced
+      zero ledger commits the whole time rather than a visibly failing one. Fixed by
+      reconciling against `Ledger.net_filled_qty_all_sleeves()` instead
+      (`b3c78fe`). (2) The real `ledger/intraday.sqlite3`'s `proposals` table predates
+      Phase 10's `playbook_version` column -- `CREATE TABLE IF NOT EXISTS` never migrates an
+      existing table, so the first real `record_proposal` call (any cycle that actually
+      proposed something) crashed with `OperationalError: table proposals has no column
+      named playbook_version`; the table has zero rows in production, confirming no cycle
+      had ever gotten past this. Fixed with a small `_migrate_missing_columns` step in
+      `IntradayLedger.__init__` (`6c2d372`). Both pushed; **not yet verified against a real
+      run** -- both workflows' cron schedules are Mon-Fri only, so nothing runs until market
+      open next week. Check the first Monday `mark (s0)` and `intraday cycle` runs actually
+      commit cleanly before considering either fix confirmed.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's evidence looks good; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).
