@@ -91,7 +91,13 @@ def run_mark(
                 ledger.update_order_status(client_order_id, refreshed)
             result.orders_canceled_for_reprice.append(client_order_id)
 
-    expected = ledger.net_filled_qty(sleeve)
+    # Every sleeve reconciled here shares one real Alpaca paper account (s0 and s3, per
+    # `docs/go_live_checklist.md` item 6), so `broker.list_positions()` is the whole
+    # account's holdings, not just this sleeve's own -- compare against the combined view
+    # across every sleeve, not `net_filled_qty(sleeve)` alone (see that method's docstring
+    # for the 2026-09-26 incident this fixes: mark(s0) failing on every run once s3 held
+    # its first real position).
+    expected = ledger.net_filled_qty_all_sleeves()
     actual = {p.symbol: p.qty for p in broker.list_positions()}
     tolerance = config.paper.reconciliation.position_tolerance_shares
     symbols = set(expected) | set(actual)
