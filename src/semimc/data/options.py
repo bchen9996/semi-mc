@@ -91,6 +91,70 @@ def black_scholes_price(
     return k * np.exp(-r * t) * stats.norm.cdf(-d2) - s * np.exp(-q * t) * stats.norm.cdf(-d1)
 
 
+def black_scholes_greeks(
+    spot: float,
+    strike: float,
+    time_to_expiry: float,
+    rate: float,
+    sigma: float,
+    option_type: str,
+    dividend_yield: float = 0.0,
+) -> dict[str, float]:
+    """Black-Scholes-Merton delta, gamma, vega, and theta -- the same closed-form family
+    and edge-case handling as :func:`black_scholes_price`.
+
+    ``vega`` is per unit change in ``sigma`` (not per percentage point); ``theta`` is
+    annualized (this project's simulation convention), not per calendar day -- divide by
+    365.25 for a daily figure, matching this module's own disclosed day-count convention
+    for ``time_to_expiry`` itself. At the ``time_to_expiry <= 0`` or ``sigma <= 0``
+    boundary the option has only intrinsic value left: gamma, vega, and theta are all
+    exactly zero (no time value left to decay, or to be sensitive to volatility), and
+    delta collapses to the step function an already-expired (or zero-vol) option's price
+    implies.
+    """
+    if option_type not in ("call", "put"):
+        raise ValueError(f"option_type must be 'call' or 'put', got {option_type!r}")
+    s, k, t, r, q, sig = (
+        float(spot),
+        float(strike),
+        float(time_to_expiry),
+        float(rate),
+        float(dividend_yield),
+        float(sigma),
+    )
+    if t <= 0 or sig <= 0:
+        forward_intrinsic = s * np.exp(-q * t) - k * np.exp(-r * t)
+        in_the_money = forward_intrinsic > 0 if option_type == "call" else forward_intrinsic < 0
+        delta = (1.0 if option_type == "call" else -1.0) * np.exp(-q * t) if in_the_money else 0.0
+        return {"delta": float(delta), "gamma": 0.0, "vega": 0.0, "theta": 0.0}
+
+    d1 = (np.log(s / k) + (r - q + 0.5 * sig * sig) * t) / (sig * np.sqrt(t))
+    d2 = d1 - sig * np.sqrt(t)
+    pdf_d1 = stats.norm.pdf(d1)
+    gamma = np.exp(-q * t) * pdf_d1 / (s * sig * np.sqrt(t))
+    vega = s * np.exp(-q * t) * pdf_d1 * np.sqrt(t)
+    if option_type == "call":
+        delta = np.exp(-q * t) * stats.norm.cdf(d1)
+        theta = (
+            -s * np.exp(-q * t) * pdf_d1 * sig / (2 * np.sqrt(t))
+            - r * k * np.exp(-r * t) * stats.norm.cdf(d2)
+            + q * s * np.exp(-q * t) * stats.norm.cdf(d1)
+        )
+    else:
+        delta = np.exp(-q * t) * (stats.norm.cdf(d1) - 1.0)
+        theta = (
+            -s * np.exp(-q * t) * pdf_d1 * sig / (2 * np.sqrt(t))
+            + r * k * np.exp(-r * t) * stats.norm.cdf(-d2)
+            - q * s * np.exp(-q * t) * stats.norm.cdf(-d1)
+        )
+    return {
+        "delta": float(delta),
+        "gamma": float(gamma),
+        "vega": float(vega),
+        "theta": float(theta),
+    }
+
+
 def implied_volatility_from_price(
     price: float,
     spot: float,

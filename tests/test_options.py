@@ -13,6 +13,7 @@ import pytest
 
 from semimc.data.options import (
     ImpliedVolTermStructure,
+    black_scholes_greeks,
     black_scholes_price,
     implied_annual_vol_for_horizon,
     implied_vol_for_expiry,
@@ -48,6 +49,76 @@ def test_price_at_expiry_is_intrinsic_value():
 def test_rejects_an_unknown_option_type():
     with pytest.raises(ValueError, match="call.*put"):
         black_scholes_price(100, 100, 0.25, 0.04, 0.3, "straddle")
+
+
+# ---------------------------------------------------------------------------------------
+# Greeks (Phase 12: S4's options.py needs delta/gamma/vega/theta)
+# ---------------------------------------------------------------------------------------
+
+
+def test_greeks_delta_matches_a_finite_difference_of_price():
+    spot, strike, t, r, sigma = 100.0, 105.0, 0.5, 0.04, 0.30
+    bump = 0.01
+    price_up = black_scholes_price(spot + bump, strike, t, r, sigma, "call")
+    price_down = black_scholes_price(spot - bump, strike, t, r, sigma, "call")
+    finite_diff_delta = (price_up - price_down) / (2 * bump)
+    greeks = black_scholes_greeks(spot, strike, t, r, sigma, "call")
+    assert greeks["delta"] == pytest.approx(finite_diff_delta, abs=1e-4)
+
+
+def test_greeks_gamma_matches_a_finite_difference_of_delta():
+    spot, strike, t, r, sigma = 100.0, 105.0, 0.5, 0.04, 0.30
+    bump = 0.01
+    delta_up = black_scholes_greeks(spot + bump, strike, t, r, sigma, "call")["delta"]
+    delta_down = black_scholes_greeks(spot - bump, strike, t, r, sigma, "call")["delta"]
+    finite_diff_gamma = (delta_up - delta_down) / (2 * bump)
+    gamma = black_scholes_greeks(spot, strike, t, r, sigma, "call")["gamma"]
+    assert gamma == pytest.approx(finite_diff_gamma, abs=1e-3)
+
+
+def test_greeks_deep_itm_call_delta_approaches_one():
+    greeks = black_scholes_greeks(200, 100, 0.25, 0.04, 0.20, "call")
+    assert greeks["delta"] == pytest.approx(1.0, abs=1e-3)
+
+
+def test_greeks_deep_otm_call_delta_approaches_zero():
+    greeks = black_scholes_greeks(50, 100, 0.25, 0.04, 0.20, "call")
+    assert greeks["delta"] == pytest.approx(0.0, abs=1e-3)
+
+
+def test_greeks_put_call_delta_parity():
+    spot, strike, t, r, sigma, q = 100.0, 105.0, 0.5, 0.04, 0.25, 0.01
+    call_delta = black_scholes_greeks(spot, strike, t, r, sigma, "call", q)["delta"]
+    put_delta = black_scholes_greeks(spot, strike, t, r, sigma, "put", q)["delta"]
+    assert (call_delta - put_delta) == pytest.approx(np.exp(-q * t), abs=1e-9)
+
+
+def test_greeks_gamma_and_vega_are_identical_for_call_and_put():
+    spot, strike, t, r, sigma = 100.0, 105.0, 0.5, 0.04, 0.25
+    call = black_scholes_greeks(spot, strike, t, r, sigma, "call")
+    put = black_scholes_greeks(spot, strike, t, r, sigma, "put")
+    assert call["gamma"] == pytest.approx(put["gamma"])
+    assert call["vega"] == pytest.approx(put["vega"])
+
+
+def test_greeks_at_expiry_have_zero_gamma_vega_theta():
+    for option_type in ("call", "put"):
+        greeks = black_scholes_greeks(110, 100, 0.0, 0.04, 0.30, option_type)
+        assert greeks["gamma"] == 0.0
+        assert greeks["vega"] == 0.0
+        assert greeks["theta"] == 0.0
+
+
+def test_greeks_at_expiry_delta_is_the_intrinsic_step_function():
+    assert black_scholes_greeks(110, 100, 0.0, 0.04, 0.30, "call")["delta"] == pytest.approx(1.0)
+    assert black_scholes_greeks(90, 100, 0.0, 0.04, 0.30, "call")["delta"] == pytest.approx(0.0)
+    assert black_scholes_greeks(90, 100, 0.0, 0.04, 0.30, "put")["delta"] == pytest.approx(-1.0)
+    assert black_scholes_greeks(110, 100, 0.0, 0.04, 0.30, "put")["delta"] == pytest.approx(0.0)
+
+
+def test_greeks_rejects_an_unknown_option_type():
+    with pytest.raises(ValueError, match="call.*put"):
+        black_scholes_greeks(100, 100, 0.25, 0.04, 0.3, "straddle")
 
 
 # ---------------------------------------------------------------------------------------

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -24,14 +24,22 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ..config import IntradayConfig
 from .ledger import IntradayLedger
 
+if TYPE_CHECKING:
+    # Deferred: intraday/options.py imports TradeProposal from here for its own type
+    # hints (also TYPE_CHECKING-only), so a module-level import in either direction would
+    # be circular. validate_proposal below imports options.py's check functions locally,
+    # inside the function body, once both modules have already finished loading.
+    from .options import OptionPricing, OptionQuote
+
 OPEN_OR_ADD_ACTIONS = ("open", "add")
 
 
 class TradeProposal(BaseModel):
     """One action the Trader proposes for one symbol. `instrument="option"` is accepted
-    at the schema level (so a future options phase needs no migration) but is rejected by
-    :func:`validate_proposal` while `config.intraday.options.enabled` is `False` -- every
-    stage through Phase 7."""
+    at the schema level (so a future options phase needed no migration) and, since Phase
+    12, actually reaches :func:`validate_proposal`'s full options gate suite once
+    `config.intraday.options.shadow_pricing` or `.enabled` is `True` -- still rejected
+    outright while both stay `False` (the equities-only rollout stages)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -53,6 +61,14 @@ class TradeProposal(BaseModel):
     confidence: float | None = Field(None, ge=0, le=1)
     horizon: Literal["intraday", "multi-day", "multi-week"] | None = None
     risk_flags: list[str] = Field(default_factory=list)
+    # Options only (BRIEF_INTRADAY.md's trade proposal schema: "for options the expiry,
+    # strike, right, and structure"). `structure` has no short-premium value at all --
+    # "never a naked short option" is enforced by the schema itself, not by a validator
+    # that could be bypassed.
+    expiry: dt.date | None = None
+    strike: float | None = Field(None, gt=0)
+    right: Literal["call", "put"] | None = None
+    structure: Literal["long_call", "long_put", "debit_vertical"] | None = None
 
     @model_validator(mode="after")
     def _required_fields_per_action(self) -> TradeProposal:
@@ -74,6 +90,20 @@ class TradeProposal(BaseModel):
             # every action that uses it, rather than a second, silently-different unit
             # for trim alone.
             raise ValueError("action='trim' requires ['size_pct']")
+        return self
+
+    @model_validator(mode="after")
+    def _option_fields_match_instrument(self) -> TradeProposal:
+        option_fields = ("expiry", "strike", "right", "structure")
+        set_fields = [field for field in option_fields if getattr(self, field) is not None]
+        if self.instrument == "option":
+            missing = [field for field in option_fields if field not in set_fields]
+            if missing:
+                raise ValueError(f"instrument='option' requires {missing}")
+        elif set_fields:
+            raise ValueError(
+                f"instrument={self.instrument!r} must not set {set_fields} (options-only fields)"
+            )
         return self
 
 
@@ -113,6 +143,24 @@ class ValidationContext:
     prices: dict[str, float]  # symbol -> current price
     turnover_so_far_usd: float
     last_stopout_at: dict[str, dt.datetime]
+    # Options only (Phase 12). All `None`/empty until intraday/jobs.py actually fetches a
+    # quote and prices it (Phase 12b) -- an instrument="option" proposal validated before
+    # then fails cleanly ("no options pricing available"), rather than crashing or
+    # silently passing ungated. `option_quote`/`option_pricing` are this one proposal's
+    # own contract only, not a per-symbol dict -- unlike equities, no two option proposals
+    # in the same cycle share a contract (different strike/expiry/right), so there is
+    # nothing to key a dict by ahead of time the way `prices` is keyed by symbol.
+    option_quote: OptionQuote | None = None
+    option_pricing: OptionPricing | None = None
+    option_forecast_vol: float | None = None
+    spot_price: float | None = None  # underlying's own spot -- needed to convert this
+    # proposal's premium budget into an implied contract count for the delta/theta caps
+    open_option_premium_usd: float = 0.0  # every currently-open option position's cost basis
+    open_option_delta_pct: float = 0.0  # portfolio delta so far, as a fraction of equity
+    open_option_theta_pct_today: float = 0.0  # today's cumulative theta decay, same unit
+    next_earnings_date: dict[str, str] | None = (
+        None  # symbol -> ISO date, jobs.py::_upcoming_earnings shape
+    )
 
 
 def _accepted_proposals(context: ValidationContext) -> list[dict]:
@@ -133,8 +181,17 @@ def validate_proposal(proposal: TradeProposal, context: ValidationContext) -> li
 
     failures: list[str] = []
 
-    if proposal.instrument == "option" and not context.config.options.enabled:
-        failures.append("options are not enabled")
+    if proposal.instrument == "option":
+        options_cfg = context.config.options
+        if not (options_cfg.shadow_pricing or options_cfg.enabled):
+            failures.append("options are not enabled")
+        elif proposal.action in OPEN_OR_ADD_ACTIONS:
+            # Deferred import: intraday/options.py type-hints against this module's
+            # TradeProposal/ValidationContext under TYPE_CHECKING only, so a module-level
+            # import here would be circular -- see this file's own TYPE_CHECKING block.
+            from .options import validate_option_proposal
+
+            failures.extend(validate_option_proposal(proposal, context))
 
     if proposal.action not in OPEN_OR_ADD_ACTIONS:
         return failures
@@ -142,13 +199,36 @@ def validate_proposal(proposal: TradeProposal, context: ValidationContext) -> li
     risk = context.config.risk
 
     if proposal.expected_edge_bps is not None:
-        round_trip_cost_bps = 2 * risk.equity_cost_bps_per_side
-        min_edge_bps = risk.min_edge_multiple * round_trip_cost_bps
-        if proposal.expected_edge_bps < min_edge_bps:
-            failures.append(
-                f"expected_edge_bps {proposal.expected_edge_bps:.1f} is below "
-                f"{risk.min_edge_multiple}x the modeled round-trip cost ({min_edge_bps:.1f} bps)"
+        if proposal.instrument == "option":
+            # "half the spread plus 5 bps for options" (Defaults table) parallels "8 bps
+            # per side for equities" -- both are *per-side* figures, doubled below for a
+            # round trip the same way risk.equity_cost_bps_per_side already is. Needs the
+            # quote's own spread, unlike the equity cost model, so this only runs once a
+            # quote is actually available (context.option_quote is None before Phase 12b
+            # wires the real fetch in; the "no options pricing available" failure above
+            # already covers that case).
+            options_cfg = context.config.options
+            cost_bps_per_side = (
+                (
+                    context.option_quote.spread_pct_of_mid
+                    * 1e4
+                    * options_cfg.cost_model_spread_fraction
+                )
+                + options_cfg.cost_model_extra_bps
+                if context.option_quote is not None
+                else None
             )
+            round_trip_cost_bps = 2 * cost_bps_per_side if cost_bps_per_side is not None else None
+        else:
+            round_trip_cost_bps = 2 * risk.equity_cost_bps_per_side
+        if round_trip_cost_bps is not None:
+            min_edge_bps = risk.min_edge_multiple * round_trip_cost_bps
+            if proposal.expected_edge_bps < min_edge_bps:
+                failures.append(
+                    f"expected_edge_bps {proposal.expected_edge_bps:.1f} is below "
+                    f"{risk.min_edge_multiple}x the modeled round-trip cost "
+                    f"({min_edge_bps:.1f} bps)"
+                )
 
     accepted = _accepted_proposals(context)
     accepted_opens = [row for row in accepted if row["action"] in OPEN_OR_ADD_ACTIONS]

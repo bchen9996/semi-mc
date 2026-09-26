@@ -244,15 +244,103 @@ def test_daily_turnover_cap_is_enforced(tmp_path):
     assert any("daily_turnover_pct" in f for f in failures)
 
 
+# -- schema: option-only fields -----------------------------------------------------------
+
+
+def _option_open(**overrides) -> TradeProposal:
+    payload = {
+        "instrument": "option",
+        "expiry": AS_OF.date() + dt.timedelta(days=30),
+        "strike": 190.0,
+        "right": "call",
+        "structure": "long_call",
+    }
+    payload.update(overrides)
+    return _open(**payload)
+
+
+def test_option_open_with_every_option_field_is_valid():
+    proposal = _option_open()
+    assert proposal.instrument == "option"
+
+
+def test_option_instrument_requires_expiry_strike_right_and_structure():
+    with pytest.raises(ValidationError, match="expiry"):
+        _open(instrument="option")
+
+
+def test_equity_instrument_must_not_set_option_only_fields():
+    with pytest.raises(ValidationError, match="strike"):
+        _open(strike=190.0)
+
+
 # -- validator: options gate ---------------------------------------------------------------
 
 
 def test_option_instrument_is_rejected_while_options_are_disabled(tmp_path):
     config = IntradayConfig()
     assert config.options.enabled is False
-    proposal = _open(instrument="option")
+    assert config.options.shadow_pricing is False
+    proposal = _option_open()
     failures = validate_proposal(proposal, _context(tmp_path, config=config))
     assert any("options are not enabled" in f for f in failures)
+
+
+def test_option_instrument_still_gates_on_pricing_once_shadow_pricing_is_on(tmp_path):
+    """`shadow_pricing=True` lets a well-formed option proposal reach the full gate
+    suite (`intraday/options.py::validate_option_proposal`) instead of being rejected
+    outright -- but with no quote/pricing supplied, that suite itself fails cleanly
+    (`intraday/options.py`'s own test coverage), which is what should surface here."""
+    options = IntradayConfig().options.model_copy(update={"shadow_pricing": True})
+    config = IntradayConfig(options=options)
+    proposal = _option_open()
+    failures = validate_proposal(proposal, _context(tmp_path, config=config))
+    assert failures == ["no options pricing available for this proposal"]
+
+
+def test_option_instrument_passes_with_pricing_and_shadow_pricing_on(tmp_path):
+    from semimc.intraday.options import OptionPricing, OptionQuote
+
+    options = IntradayConfig().options.model_copy(update={"shadow_pricing": True})
+    config = IntradayConfig(options=options)
+    proposal = _option_open(size_pct=0.001, expected_edge_bps=None)
+    context = _context(
+        tmp_path,
+        config=config,
+        option_quote=OptionQuote(bid=4.8, ask=5.2, open_interest=500, volume=100, feed="opra"),
+        option_pricing=OptionPricing(
+            mid_price=5.0, implied_vol=0.20, delta=0.3, gamma=0.02, vega=0.1, theta=-0.02
+        ),
+        option_forecast_vol=0.40,
+        spot_price=190.0,
+    )
+    assert validate_proposal(proposal, context) == []
+
+
+def test_option_edge_vs_cost_uses_the_options_cost_model_not_the_equity_one(tmp_path):
+    """An option's wide quoted spread must price into the edge-vs-cost check via
+    `cost_model_spread_fraction`/`cost_model_extra_bps`, not the flat
+    `equity_cost_bps_per_side` -- 100bps of expected edge clears the equity round-trip bar
+    (2 * 2.0x * 8bps = 32bps) but not a 10%-of-mid-spread option's own (2 * 2.0x *
+    (0.10*1e4*0.5 + 5) = 2020bps), proving the instrument-aware branch is actually wired
+    to the right model, not silently falling through to the other one."""
+    from semimc.intraday.options import OptionPricing, OptionQuote
+
+    options = IntradayConfig().options.model_copy(update={"shadow_pricing": True})
+    config = IntradayConfig(options=options)
+    proposal = _option_open(size_pct=0.001, expected_edge_bps=100.0)
+    context = _context(
+        tmp_path,
+        config=config,
+        option_quote=OptionQuote(bid=4.75, ask=5.25, open_interest=500, volume=100, feed="opra"),
+        option_pricing=OptionPricing(
+            mid_price=5.0, implied_vol=0.20, delta=0.3, gamma=0.02, vega=0.1, theta=-0.02
+        ),
+        option_forecast_vol=0.40,
+        spot_price=190.0,
+    )
+    failures = validate_proposal(proposal, context)
+    assert any("modeled round-trip cost" in f for f in failures)
 
 
 # -- validator: first-class hold/no_trade/close/trim ---------------------------------------
