@@ -1966,6 +1966,33 @@ problem for T6's control group):
       open next week. Check the first Monday `mark (s0)` and `intraday cycle` runs actually
       commit cleanly before considering either fix confirmed.
 
+      **A third, related bug found 2026-09-26 while auditing for other instances of the same
+      two bug classes** (a targeted audit, not a re-scope -- both "Known gaps" items below
+      were checked and are unrelated, deliberate owner decisions, not touched): the fix
+      above (1) only stopped `mark(s0)` from *crashing* on a false reconciliation
+      discrepancy -- it didn't touch this same function's own final step, which "always
+      records a fresh snapshot... regardless of what else happened" (`run_mark`'s own
+      docstring) using the *raw* `broker.get_account()`/`list_positions()`, unchanged.
+      Since s0 and s3 share one account, that snapshot is whichever sleeve actually holds
+      real positions -- s3. Before the reconciliation fix, `set -e` aborted `mark(s0)`
+      before this line ever ran, so the real, committed `ledger/paper.sqlite3` was never
+      actually corrupted (confirmed directly: s0's last real snapshot is 2026-09-23, the
+      day before s3's rebalance, and nothing since -- the reconciliation crash was silently
+      protecting this line from ever executing). But now that `mark(s0)` reconciles clean,
+      the very next successful run would have started writing s3's real equity/cash/
+      positions into s0's own permanent snapshot history, mislabeled as s0's -- corrupting
+      the entire s0-vs-s3 comparison this shared-account setup exists to make, silently
+      (no crash, no incident, just wrong data accumulating every 30 minutes). Fixed:
+      `run_mark` now only records the broker's real account state when
+      `config.paper.sleeves[sleeve].trading_enabled` is true for *this* sleeve; otherwise it
+      carries that sleeve's own last recorded snapshot forward unchanged (it never trades,
+      so nothing about it has genuinely changed), or records nothing if it has no prior
+      snapshot at all rather than invent a starting figure. Self-healing against the real
+      ledger the same way the other two fixes are -- no manual edit to the committed
+      `ledger/paper.sqlite3` needed, since `latest_snapshot("s0")` will find the real
+      2026-09-23 row the first time this runs. Also not yet verified against a real run,
+      same Monday caveat as the two fixes above.
+
       **The self-looping `monitor` job (referenced above as still-open) was built
       2026-09-26**, once the deferred question -- "does the real cadence actually justify
       this" -- had a real answer: the `monitor_checks` table's own 2026-09-24/25 data showed

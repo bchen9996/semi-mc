@@ -195,6 +195,56 @@ def test_mark_reconciles_against_every_sleeves_fills_not_just_this_ones(config, 
     assert result.discrepancies == []
 
 
+def test_mark_carries_forward_a_disabled_sleeves_own_snapshot_not_the_accounts(config, ledger):
+    """Found 2026-09-26: once the reconciliation fix above stopped crashing mark(s0) before
+    it ever reached this function's own final snapshot step, that step would otherwise still
+    record the *account's* real, s3-driven equity/cash/positions under s0's own label the
+    moment mark(s0) next succeeded -- corrupting the s0-vs-s3 comparison this shared account
+    exists to make. Unlike the reconciliation test above, s0 here is left at its real
+    production default (trading_enabled=False) -- only s3 is enabled -- so this exercises
+    the actual disabled-sleeve branch, not just a same-config stand-in for it."""
+    paper = config.paper.model_copy(
+        update={"sleeves": {**config.paper.sleeves, "s3": PaperSleeveConfig(trading_enabled=True)}}
+    )
+    cfg = config.model_copy(update={"paper": paper})
+    broker = FakeBroker(now=SUBMITTED_AT)
+    request = _request(client_order_id="s3-nvda-1")
+    submitted = broker.submit_order(request)
+    ledger.record_order("s3", "hash-1", request, submitted)
+    ledger.record_fill(
+        request.client_order_id,
+        qty=submitted.filled_qty,
+        price=submitted.filled_avg_price,
+        filled_at=SUBMITTED_AT,
+    )
+    ledger.record_snapshot("s0", pd.Timestamp("2026-01-04"), 100_000.0, 100_000.0, {})
+
+    now = SUBMITTED_AT + dt.timedelta(minutes=1)
+    run_mark("s0", cfg, broker, ledger, pd.Timestamp("2026-01-05"), now)
+
+    snap = ledger.latest_snapshot("s0")
+    assert snap["as_of"] == str(pd.Timestamp("2026-01-05"))
+    assert snap["equity"] == pytest.approx(100_000.0)
+    assert snap["cash"] == pytest.approx(100_000.0)
+    assert snap["positions"] == {}
+
+
+def test_mark_skips_the_snapshot_for_a_disabled_sleeve_with_no_prior_history(config, ledger):
+    """No previous snapshot to carry forward, and this sleeve has never traded here -- there
+    is nothing genuine to report, so record nothing rather than fabricate a starting figure
+    this module has no config source for."""
+    paper = config.paper.model_copy(
+        update={"sleeves": {**config.paper.sleeves, "s3": PaperSleeveConfig(trading_enabled=True)}}
+    )
+    cfg = config.model_copy(update={"paper": paper})
+    broker = FakeBroker(now=SUBMITTED_AT)
+
+    now = SUBMITTED_AT + dt.timedelta(minutes=1)
+    run_mark("s0", cfg, broker, ledger, pd.Timestamp("2026-01-05"), now)
+
+    assert ledger.latest_snapshot("s0") is None
+
+
 def test_an_open_order_missing_at_the_broker_is_surfaced_and_logged(config, ledger):
     """Phase 7: distinct from a *position* reconciliation mismatch -- this is the ledger
     believing an order is still open when the broker has never heard of it at all (e.g. a
