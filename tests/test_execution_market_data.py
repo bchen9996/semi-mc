@@ -1,17 +1,27 @@
-"""``execution/market_data.py``: T5's independent arrival-price lookup. Mocked
-``StockHistoricalDataClient``, same boundary-mocking approach as
+"""``execution/market_data.py``: T5's independent arrival-price lookup, and (Phase 12b,
+S4 Rollout Stage 4) ``AlpacaOptionsMarketDataClient``. Mocked ``StockHistoricalDataClient``/
+``OptionHistoricalDataClient``/``TradingClient``, same boundary-mocking approach as
 ``tests/test_alpaca_broker.py`` -- no network, no credentials.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import json
 from unittest.mock import MagicMock
 
 import pytest
+from alpaca.common.exceptions import APIError
+from alpaca.data.models.bars import Bar, BarSet
 from alpaca.data.models.quotes import Quote, QuoteSet
+from alpaca.data.models.snapshots import OptionsSnapshot
+from alpaca.trading.models import OptionContract
 
-from semimc.execution.market_data import AlpacaMarketDataClient
+from semimc.execution.market_data import (
+    AlpacaMarketDataClient,
+    AlpacaOptionsMarketDataClient,
+    OptionMarketQuote,
+)
 
 AT = dt.datetime(2026, 1, 5, 14, 30, 0, tzinfo=dt.UTC)  # Quote.timestamp is always aware UTC
 
@@ -104,3 +114,145 @@ def test_from_env_reads_a_named_key_pair_for_a_second_account(monkeypatch):
     monkeypatch.setenv("ALPACA_S4_SECRET_KEY", "s4-secret")
     client = AlpacaMarketDataClient.from_env("ALPACA_S4_API_KEY", "ALPACA_S4_SECRET_KEY")
     assert client._client is not None
+
+
+# -- AlpacaOptionsMarketDataClient (Phase 12b, S4 Rollout Stage 4) -----------------------
+
+EXPIRY = dt.date(2026, 10, 21)
+OCC_SYMBOL = "NVDA261021C00190000"
+
+
+def _api_error(status_code: int) -> APIError:
+    """Same construction ``tests/test_alpaca_broker.py::_api_error`` already uses --
+    ``APIError.status_code`` reads ``http_error.response.status_code``."""
+    response = MagicMock()
+    response.status_code = status_code
+    http_error = MagicMock()
+    http_error.response = response
+    body = json.dumps({"code": status_code, "message": "error"})
+    return APIError(body, http_error)
+
+
+def _snapshot(bid: float | None, ask: float | None) -> OptionsSnapshot:
+    quote = None if bid is None else Quote.model_construct(bid_price=bid, ask_price=ask)
+    return OptionsSnapshot.model_construct(symbol=OCC_SYMBOL, latest_quote=quote)
+
+
+def _options_client(
+    data_client: MagicMock | None = None, trading_client: MagicMock | None = None
+) -> AlpacaOptionsMarketDataClient:
+    return AlpacaOptionsMarketDataClient(data_client or MagicMock(), trading_client or MagicMock())
+
+
+def test_quote_contract_returns_bid_ask_open_interest_and_volume_from_opra():
+    data_client = MagicMock()
+    data_client.get_option_chain.return_value = {OCC_SYMBOL: _snapshot(9.5, 10.5)}
+    data_client.get_option_bars.return_value = BarSet.model_construct(
+        data={OCC_SYMBOL: [Bar.model_construct(volume=42)]}
+    )
+    trading_client = MagicMock()
+    trading_client.get_option_contract.return_value = OptionContract.model_construct(
+        open_interest="150"
+    )
+    client = _options_client(data_client, trading_client)
+
+    quote = client.quote_contract("NVDA", EXPIRY, 190.0, "call", AT)
+
+    assert quote == OptionMarketQuote(
+        occ_symbol=OCC_SYMBOL, bid=9.5, ask=10.5, open_interest=150, volume=42, feed="opra"
+    )
+
+
+def test_quote_contract_falls_back_to_indicative_on_an_entitlement_error():
+    """Stage 4's own stated purpose is judging whether the feed produces sane pricing --
+    which feed actually answered must be recorded accurately, not assumed."""
+    data_client = MagicMock()
+    data_client.get_option_chain.side_effect = [
+        _api_error(403),
+        {OCC_SYMBOL: _snapshot(9.5, 10.5)},
+    ]
+    data_client.get_option_bars.return_value = BarSet.model_construct(data={})
+    trading_client = MagicMock()
+    trading_client.get_option_contract.return_value = OptionContract.model_construct(
+        open_interest=None
+    )
+    client = _options_client(data_client, trading_client)
+
+    quote = client.quote_contract("NVDA", EXPIRY, 190.0, "call", AT)
+
+    assert quote is not None
+    assert quote.feed == "indicative"
+    assert data_client.get_option_chain.call_count == 2
+
+
+def test_quote_contract_reraises_a_non_entitlement_api_error():
+    data_client = MagicMock()
+    data_client.get_option_chain.side_effect = _api_error(500)
+    client = _options_client(data_client)
+
+    with pytest.raises(APIError):
+        client.quote_contract("NVDA", EXPIRY, 190.0, "call", AT)
+
+
+def test_quote_contract_is_none_when_no_contract_matches():
+    data_client = MagicMock()
+    data_client.get_option_chain.return_value = {}
+    client = _options_client(data_client)
+
+    assert client.quote_contract("NVDA", EXPIRY, 190.0, "call", AT) is None
+
+
+def test_quote_contract_is_none_for_a_missing_quote():
+    data_client = MagicMock()
+    data_client.get_option_chain.return_value = {OCC_SYMBOL: _snapshot(None, None)}
+    client = _options_client(data_client)
+
+    assert client.quote_contract("NVDA", EXPIRY, 190.0, "call", AT) is None
+
+
+def test_quote_contract_is_none_for_a_non_positive_quote():
+    data_client = MagicMock()
+    data_client.get_option_chain.return_value = {OCC_SYMBOL: _snapshot(0.0, 0.0)}
+    client = _options_client(data_client)
+
+    assert client.quote_contract("NVDA", EXPIRY, 190.0, "call", AT) is None
+
+
+def test_quote_contract_defaults_open_interest_and_volume_to_zero_on_missing_data():
+    """`OptionsSnapshot` carries neither field at all (confirmed directly against the
+    installed alpaca-py models, see this class's own docstring) -- a contract lookup that
+    fails, or a contract genuinely missing `open_interest`, must not crash a whole quote,
+    the same "a single missing figure must not crash a whole cycle" tolerance every other
+    method in this file already applies."""
+    data_client = MagicMock()
+    data_client.get_option_chain.return_value = {OCC_SYMBOL: _snapshot(9.5, 10.5)}
+    data_client.get_option_bars.side_effect = _api_error(404)
+    trading_client = MagicMock()
+    trading_client.get_option_contract.side_effect = _api_error(404)
+    client = _options_client(data_client, trading_client)
+
+    quote = client.quote_contract("NVDA", EXPIRY, 190.0, "call", AT)
+
+    assert quote is not None
+    assert quote.open_interest == 0
+    assert quote.volume == 0
+
+
+def test_options_from_env_raises_a_clear_error_when_keys_are_missing(monkeypatch):
+    monkeypatch.delenv("ALPACA_S4_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_S4_SECRET_KEY", raising=False)
+    monkeypatch.setattr("semimc.execution.market_data.load_dotenv", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match=".env"):
+        AlpacaOptionsMarketDataClient.from_env()
+
+
+def test_options_from_env_defaults_to_s4s_own_key_pair(monkeypatch):
+    """Unlike `AlpacaMarketDataClient.from_env` (defaults to s0/s3's pair), this class's
+    only caller is S4, which always trades its own, separate paper account."""
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    monkeypatch.setenv("ALPACA_S4_API_KEY", "s4-key")
+    monkeypatch.setenv("ALPACA_S4_SECRET_KEY", "s4-secret")
+    client = AlpacaOptionsMarketDataClient.from_env()
+    assert client._data is not None
+    assert client._trading is not None

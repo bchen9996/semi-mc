@@ -1824,6 +1824,14 @@ def _intraday_market_data():  # noqa: ANN001 -- returns AlpacaMarketDataClient
     )
 
 
+def _intraday_options_market_data():  # noqa: ANN001 -- returns AlpacaOptionsMarketDataClient
+    from .execution.market_data import AlpacaOptionsMarketDataClient
+
+    return AlpacaOptionsMarketDataClient.from_env(
+        key_env="ALPACA_S4_API_KEY", secret_env="ALPACA_S4_SECRET_KEY"
+    )
+
+
 def _intraday_news_client():  # noqa: ANN001 -- returns AlpacaNewsClient
     from .execution.news import AlpacaNewsClient
 
@@ -2060,8 +2068,30 @@ def _run_intraday_cycle(
     market_data = _intraday_market_data()
     broker = _intraday_execution_broker(cfg, ledger, market_data, now)
     llm_client = ClaudeCliClient.from_env()
+    # Rollout Stage 4 (Phase 12b): both stay None -- no extra client construction, no
+    # extra local data load -- unless options shadow pricing (or real trading) is actually
+    # on, so Stage 1-3's real, currently-running cycles pay nothing for this. See
+    # `run_cycle`'s own docstring for what each defaults to when neither is supplied.
+    market_data_pit = None
+    options_market_data = None
+    if cfg.intraday.options.shadow_pricing or cfg.intraday.options.enabled:
+        from .data import load_market_data
+
+        market_data_pit = load_market_data(cfg, tickers=cfg.universe.tickers)
+        options_market_data = _intraday_options_market_data()
     try:
-        result = run_cycle(cycle, cfg, broker, ledger, market_data, llm_client, as_of_ts, now)
+        result = run_cycle(
+            cycle,
+            cfg,
+            broker,
+            ledger,
+            market_data,
+            llm_client,
+            as_of_ts,
+            now,
+            market_data_pit=market_data_pit,
+            options_market_data=options_market_data,
+        )
         if cfg.intraday.shadow_mode:
             ledger.save_shadow_broker_state(broker.to_state())
     finally:

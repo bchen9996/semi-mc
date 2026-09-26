@@ -1963,6 +1963,90 @@ explained why; a `ValidationContext` test helper passed a bare `IntradayOptionsC
 where `IntradayConfig` (with `.options` nested inside) was needed. Full suite green
 (`uv run pytest`), `ruff check`/`format` clean.
 
+**Phase 12b -- real Alpaca options market data, `jobs.py` execution-pipeline wiring, and
+prompts (Rollout Stage 4), built 2026-09-26, same session as 12a.** Makes Stage 4
+*runnable* (not yet *run* -- same "built vs. run" distinction already drawn for Stage 1;
+`shadow_pricing`/`enabled` both stay `False` in `config/paper.yaml`, unchanged this phase).
+
+Design:
+- New `execution/market_data.py::AlpacaOptionsMarketDataClient` -- a third Alpaca client
+  (`OptionHistoricalDataClient` for quotes/bars, plus a read-only `TradingClient` for open
+  interest, which the data API doesn't expose at all: confirmed directly against the
+  installed `alpaca-py` 0.44.0 models, `OptionsSnapshot` carries only `symbol`/
+  `latest_trade`/`latest_quote`/`implied_volatility`/`greeks`). `quote_contract` resolves a
+  proposal's own `expiry`/`strike`/`right` via `get_option_chain` filtered to an exact
+  strike/expiry/type match -- Alpaca generates the OCC symbol itself as the response dict's
+  key, so this project never constructs one (that stays Stage 5's job, for real order
+  submission, per the plan's own scoping). Tries `feed=OptionsFeed.OPRA` first, falls back
+  to `INDICATIVE` on a 401/403, and records which one actually answered on every quote --
+  this *is* how Stage 4 answers its own "does the feed produce sane pricing" question, see
+  `docs/alpaca_notes.md`'s new entry for the exact alpaca-py surface called. Feed-reported
+  `implied_volatility`/`greeks` are never read, same "never trust a feed's IV" discipline
+  12a's `price_contract` already established.
+- `intraday/ledger.py`: new nullable `proposals.options_pricing_json` column (with a
+  `_COLUMN_MIGRATIONS` entry, same defect class as the `playbook_version` migration a few
+  commits ago) -- **the plan's own Phase 12b write-up got this wrong**: it said to fold the
+  pricing snapshot into the existing `payload` dict ("no new ledger table... `payload`
+  already accepts arbitrary data"), but `record_proposal`'s own docstring already warns
+  exactly why that specific move is wrong: `payload` is reconstructed via
+  `TradeProposal(**payload)` in more than one place (`run_cycle`'s tranche continuation,
+  `reflect.py`), and that schema is `extra="forbid"`, so any extra key breaks every reader,
+  not just the writer. A dedicated column (not a new table, so the plan's actual worry --
+  needless schema sprawl -- still didn't happen) is the same fix `playbook_version` already
+  used for the identical problem. Caught by re-reading `record_proposal`'s own docstring
+  before wiring `jobs.py`, not by a failing test.
+- `intraday/jobs.py::run_cycle`: gained two new, defaulted-`None` parameters
+  (`market_data_pit`, `options_market_data`) so every existing equity-only caller and test
+  is unaffected. Before building each proposal's `ValidationContext`, an `instrument=
+  "option"` `open`/`add` proposal is priced via a new `_price_option_proposal` helper
+  (fetch + `options.py::price_contract`) and given a forecast-vol reading via the *existing*
+  `_realized_vol` (Garman-Klass, not a live GARCH/HAR re-fit -- reusing Phase 6's own
+  already-disclosed substitution for "the project's GARCH or HAR forecast," for the same
+  cost/latency reasons that phase gave, applied here at per-proposal instead of per-morning
+  frequency) and `_upcoming_earnings`. The resulting pricing snapshot is recorded via the
+  new ledger column on *every* option proposal, accepted or rejected -- Stage 4's whole
+  purpose is judging the feed's pricing, which needs the data point on a rejected proposal
+  too, not only one that also happened to clear every other gate.
+- **The core invariant, and a real bug caught while wiring it, not after**: an accepted
+  option proposal must never reach `build_entry_order`/`submit_order_with_fault_isolation`.
+  The obvious guard ("skip if `not config.options.enabled`") isn't what got written --
+  it's unconditional on that flag instead, because there is no Stage 5 order-construction
+  path for options at all yet, so flipping `enabled` today wouldn't make submission work
+  correctly regardless. More importantly: `validate_proposal` accepts an option `trim`/
+  `close` almost for free (those actions skip every options-specific gate the same way they
+  already skip every equity risk check), and `trim`/`close` are dispatched by `symbol`
+  alone with no instrument check of their own -- without a guard placed *before* that
+  dispatch, an option trim/close would have silently trimmed/closed the *equity* position
+  of the same underlying symbol. Caught by tracing the actual dispatch code, not by a
+  test failing first; a regression test now covers it directly (see Tests).
+- `intraday/context.py::build_trader_context` gained an `options_available` bool
+  (`shadow_pricing or enabled`) in `sections`, and `cli.py::_run_intraday_cycle` only
+  builds `market_data_pit`/`options_market_data` at all when one of those is true -- so
+  Stage 1-3's real, currently-running cycles pay zero extra latency or credential surface
+  for this phase, matching the priority already set for the self-looping monitor job
+  earlier this session ("optimizing time in market," not adding lag).
+- `intraday/prompts/trader.md`: the old blanket "options are not enabled yet; do not
+  propose one" replaced with conditional guidance gated on `options_available`, describing
+  `expiry`/`strike`/`right`/`structure` and when to prefer `debit_vertical` over an outright
+  long call/put -- the actual numeric gates stay enforced in code, the prompt only
+  describes the schema and intent, same division of labor as the rest of this file.
+
+Deliberately not this phase (Stage 5's scope, unchanged from 12a's own list): real order
+submission, OCC symbol construction, `should_close_for_dte`'s call site, real options P&L
+attribution, and flipping `enabled`/`shadow_pricing` to `True`.
+
+Tests: `tests/test_execution_market_data.py` (+18: `AlpacaOptionsMarketDataClient`
+construction, the OPRA-then-indicative fallback, a non-entitlement error re-raising rather
+than being swallowed, missing/non-positive quotes, and open-interest/volume defaulting to
+`0` on a failed lookup rather than crashing). `tests/test_intraday_jobs.py` (+4: the core
+never-submits invariant on a genuinely accepted proposal, pricing recorded on a *rejected*
+proposal too, a clean "no pricing available" failure with no market-data client supplied at
+all, and the option-trim-must-not-touch-the-equity-position regression). `tests/
+test_intraday_ledger.py` (+3: the new column's own pre-Phase-12b migration, and a plain
+round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context.py` (+2:
+`options_available` false by default, true under `shadow_pricing` alone). Full suite green
+(`uv run pytest`), `ruff check`/`format` clean.
+
 **Remaining prerequisites** -- what Phase 0 didn't (and couldn't) resolve:
 
 1. ~~The owner still needs to actually create the second Alpaca paper account~~ --

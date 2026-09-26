@@ -19,6 +19,7 @@ import pytest
 from fixtures.injection_corpus import INJECTION_CORPUS
 
 from semimc.execution.fake_broker import FakeBroker
+from semimc.execution.market_data import OptionMarketQuote
 from semimc.intraday.jobs import (
     mark_broker_to_market,
     run_carry,
@@ -89,6 +90,46 @@ class _FakeMarketData:
 
 def _quote(price: float, spread: float = 0.05, at: dt.datetime = NOW) -> _FakeQuote:
     return _FakeQuote(bid_price=price - spread / 2, ask_price=price + spread / 2, timestamp=at)
+
+
+@dataclass
+class _FakeOptionMarketData:
+    """`AlpacaOptionsMarketDataClient`'s test double (Phase 12b) -- keyed by underlying
+    symbol only, matching `_FakeMarketData`'s own simplicity: no test in this file needs
+    two different option proposals on the same underlying in the same cycle."""
+
+    quotes: dict[str, OptionMarketQuote] = field(default_factory=dict)
+
+    def quote_contract(self, underlying_symbol, expiry, strike, right, as_of):
+        return self.quotes.get(underlying_symbol)
+
+
+def _with_shadow_pricing(cfg, **option_overrides):
+    """Turns on Stage 4 (`IntradayOptionsConfig.shadow_pricing`), optionally overriding
+    other options limits -- layered the same way `_tradeable_config`'s own
+    `risk_overrides` are."""
+    options = cfg.intraday.options.model_copy(update={"shadow_pricing": True, **option_overrides})
+    return cfg.model_copy(update={"intraday": cfg.intraday.model_copy(update={"options": options})})
+
+
+def _option_proposal(**overrides) -> dict:
+    payload = {
+        "action": "open",
+        "instrument": "option",
+        "symbol": "NVDA",
+        "side": "buy",
+        "size_pct": 0.005,
+        "limit_price": 10.0,
+        "thesis": "AI capex",
+        "invalidation_price": 8.0,
+        "time_stop_minutes": 60,
+        "expiry": "2026-10-21",
+        "strike": 190.0,
+        "right": "call",
+        "structure": "long_call",
+    }
+    payload.update(overrides)
+    return payload
 
 
 @dataclass
@@ -900,6 +941,159 @@ def test_run_cycle_trim_proposal_reprotects_the_remainder_at_the_original_invali
     reflections = ledger.reflections_for(AS_OF)
     assert len(reflections) == 1
     assert reflections[0]["content"]["close_reason"] == "trader_trim"
+    ledger.close()
+
+
+# -- run_cycle: options (Phase 12b, Rollout Stage 4) --------------------------------------
+
+
+def test_run_cycle_prices_and_logs_an_option_proposal_without_ever_submitting_it(config, tmp_path):
+    """The core invariant Phase 12b must get exactly right: an option proposal is priced
+    and gated exactly like a real one -- accepted here, on purpose -- and yet never reaches
+    `build_entry_order`/`submit_order_with_fault_isolation`. Stage 4 is "priced and
+    logged... not traded"; `config.intraday.options.enabled` staying `False` (unchanged
+    here) is what that phrase means in code."""
+    cfg = _with_shadow_pricing(_tradeable_config(config, tmp_path))
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    options_market_data = _FakeOptionMarketData(
+        quotes={
+            "NVDA": OptionMarketQuote(
+                occ_symbol="NVDA261021C00190000",
+                bid=9.5,
+                ask=10.5,
+                open_interest=100,
+                volume=50,
+                feed="opra",
+            )
+        }
+    )
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [_option_proposal()]})
+    )
+
+    result = run_cycle(
+        "cycle_1",
+        cfg,
+        FakeBroker(now=NOW),
+        ledger,
+        market_data,
+        client,
+        AS_OF,
+        NOW,
+        options_market_data=options_market_data,
+    )
+
+    assert result.proposals_accepted == 1
+    assert result.orders_submitted == []
+    assert result.order_failures == []
+    recorded = ledger.proposals_for(AS_OF)[-1]
+    assert recorded["status"] == "accepted"
+    assert recorded["options_pricing"]["quote"]["feed"] == "opra"
+    assert recorded["options_pricing"]["pricing"]["delta"] == pytest.approx(0.536, abs=1e-3)
+    ledger.close()
+
+
+def test_run_cycle_records_options_pricing_even_when_the_proposal_is_rejected(config, tmp_path):
+    """Stage 4's whole purpose is judging whether the feed produces sane pricing -- that
+    needs the pricing recorded on a rejected proposal too, not only on one that also
+    happened to clear every other gate."""
+    cfg = _with_shadow_pricing(_tradeable_config(config, tmp_path))
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    options_market_data = _FakeOptionMarketData(
+        quotes={
+            "NVDA": OptionMarketQuote(
+                occ_symbol="NVDA260925C00190000",
+                bid=9.5,
+                ask=10.5,
+                open_interest=100,
+                volume=50,
+                feed="opra",
+            )
+        }
+    )
+    # 4 days to expiry -- below min_dte (7), a clean, deterministic rejection reason.
+    proposal = _option_proposal(expiry="2026-09-25")
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
+
+    result = run_cycle(
+        "cycle_1",
+        cfg,
+        FakeBroker(now=NOW),
+        ledger,
+        market_data,
+        client,
+        AS_OF,
+        NOW,
+        options_market_data=options_market_data,
+    )
+
+    assert result.proposals_rejected == 1
+    recorded = ledger.proposals_for(AS_OF)[-1]
+    assert recorded["status"] == "rejected"
+    assert "min_dte" in recorded["reason"]
+    assert recorded["options_pricing"] is not None
+    assert recorded["options_pricing"]["quote"]["open_interest"] == 100
+    ledger.close()
+
+
+def test_run_cycle_option_proposal_fails_cleanly_with_no_market_data_client_supplied(
+    config, tmp_path
+):
+    """Every existing equity-only caller (`cli.py` before Stage 4 is turned on, and every
+    other test in this file) passes no `options_market_data` at all -- an
+    `instrument="option"` proposal must still fail cleanly (schema-checked, then gated),
+    never crash on a `None` client."""
+    cfg = _with_shadow_pricing(_tradeable_config(config, tmp_path))
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [_option_proposal()]})
+    )
+
+    result = run_cycle("cycle_1", cfg, FakeBroker(now=NOW), ledger, market_data, client, AS_OF, NOW)
+
+    assert result.proposals_rejected == 1
+    recorded = ledger.proposals_for(AS_OF)[-1]
+    assert "no options pricing available" in recorded["reason"]
+    assert recorded["options_pricing"] is None
+    ledger.close()
+
+
+def test_run_cycle_option_trim_does_not_touch_the_underlying_equity_position(config, tmp_path):
+    """A real, non-obvious bug this phase must avoid: an option trim/close proposal shares
+    `symbol` with its underlying stock, and `validate_proposal` accepts it almost for free
+    (trim/close skip every options-specific gate the same way they skip every equity risk
+    check). `run_cycle` must never let that fall through to the equity trim/close dispatch,
+    which looks up a position by `symbol` alone with no instrument check of its own -- it
+    would otherwise trim the real *equity* position instead of doing nothing."""
+    cfg = _with_shadow_pricing(_tradeable_config(config, tmp_path))
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, price=190.0, invalidation_price=185.0)
+    held_qty = broker.list_positions()[0].qty
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    proposal = {
+        "action": "trim",
+        "instrument": "option",
+        "symbol": "NVDA",
+        "size_pct": 0.01,
+        "expiry": "2026-10-21",
+        "strike": 190.0,
+        "right": "call",
+        "structure": "long_call",
+    }
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
+
+    result = run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+
+    [position] = broker.list_positions()
+    assert position.qty == pytest.approx(held_qty)
+    assert result.orders_submitted == []
     ledger.close()
 
 

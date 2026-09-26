@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS proposals (
     reason TEXT,
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    playbook_version INTEGER
+    playbook_version INTEGER,
+    options_pricing_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS orders (
@@ -203,7 +204,7 @@ _OPEN_ORDER_STATUSES = ("new", "accepted", "partially_filled")
 # proposals has no column named playbook_version`. Any future column added to a table that
 # already shipped needs an entry here, not just in `_SCHEMA`.
 _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
-    "proposals": [("playbook_version", "INTEGER")],
+    "proposals": [("playbook_version", "INTEGER"), ("options_pricing_json", "TEXT")],
 }
 
 
@@ -229,6 +230,18 @@ def _dumps(payload: Any) -> str:
 
 def _now() -> str:
     return dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+
+
+def _unpack_proposal_row(row: sqlite3.Row) -> dict[str, Any]:
+    """Shared by `get_proposal`/`proposals_for` -- both unpack `payload_json` into
+    `payload` and, since Phase 12b, `options_pricing_json` into `options_pricing` (`None`
+    when the column is `NULL`, either an old row from before this column existed or a
+    proposal that was never priced as an option)."""
+    data = dict(row)
+    data["payload"] = json.loads(data.pop("payload_json"))
+    pricing_json = data.pop("options_pricing_json")
+    data["options_pricing"] = json.loads(pricing_json) if pricing_json is not None else None
+    return data
 
 
 class IntradayLedger:
@@ -327,23 +340,29 @@ class IntradayLedger:
         payload: dict[str, Any],
         reason: str | None = None,
         playbook_version: int | None = None,
+        options_pricing: dict[str, Any] | None = None,
     ) -> int:
         """Every proposal, accepted or rejected -- a plain append, per the brief's own
         "blotter: every proposal including rejected ones." ``status`` carries the
         accept/reject outcome; ``reason`` is populated on a rejection.
 
-        ``playbook_version`` (Phase 10) is its own column, deliberately not folded into
-        ``payload`` -- ``payload`` is exactly ``TradeProposal.model_dump()``, and more
-        than one code path (`run_cycle`'s own tranche continuation,
-        `intraday/reflect.py`) reconstructs a `TradeProposal` via `TradeProposal(**
-        payload)`; that schema is `extra="forbid"`, so an extra key would raise a
-        `ValidationError` everywhere it's read back, not just where it was written.
+        ``playbook_version`` (Phase 10) and ``options_pricing`` (Phase 12b) are each their
+        own column, deliberately not folded into ``payload`` -- ``payload`` is exactly
+        ``TradeProposal.model_dump()``, and more than one code path (`run_cycle`'s own
+        tranche continuation, `intraday/reflect.py`) reconstructs a `TradeProposal` via
+        `TradeProposal(**payload)`; that schema is `extra="forbid"`, so an extra key would
+        raise a `ValidationError` everywhere it's read back, not just where it was written.
+        ``options_pricing`` is the quote/greeks snapshot `run_cycle` priced this option
+        proposal with -- `None` for every equity proposal, and for an option proposal
+        whose action never reaches pricing (`trim`/`close`/`hold`/`no_trade`) or whose
+        quote fetch came back empty.
         """
         cursor = self._conn.execute(
             """
             INSERT INTO proposals (as_of, cycle, symbol, action, status, reason,
-                                    payload_json, created_at, playbook_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    payload_json, created_at, playbook_version,
+                                    options_pricing_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(pd.Timestamp(as_of)),
@@ -355,6 +374,7 @@ class IntradayLedger:
                 _dumps(payload),
                 _now(),
                 playbook_version,
+                _dumps(options_pricing) if options_pricing is not None else None,
             ),
         )
         self._conn.commit()
@@ -367,20 +387,13 @@ class IntradayLedger:
         row = self._conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
         if row is None:
             return None
-        data = dict(row)
-        data["payload"] = json.loads(data.pop("payload_json"))
-        return data
+        return _unpack_proposal_row(row)
 
     def proposals_for(self, as_of: pd.Timestamp) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT * FROM proposals WHERE as_of = ? ORDER BY id", (str(pd.Timestamp(as_of)),)
         ).fetchall()
-        out = []
-        for row in rows:
-            data = dict(row)
-            data["payload"] = json.loads(data.pop("payload_json"))
-            out.append(data)
-        return out
+        return [_unpack_proposal_row(row) for row in rows]
 
     # -- orders / fills -------------------------------------------------------------------
 

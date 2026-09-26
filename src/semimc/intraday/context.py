@@ -142,6 +142,13 @@ def build_trader_context(
             for row in rejected
         ],
         "headlines": headlines or [],
+        # Rollout Stage 4 (Phase 12b): tells the Trader whether an instrument="option"
+        # proposal is even worth constructing this cycle -- config governs what the model
+        # is told, not the model governing itself, same discipline every other switch in
+        # this function already follows. True under shadow_pricing alone (Stage 4's own
+        # state): the Trader may propose options and they get priced/gated/logged, even
+        # though `enabled` staying False means none of them ever reach a real order.
+        "options_available": config.options.shadow_pricing or config.options.enabled,
     }
     return build_context(
         "trader", as_of, cycle, sections, untrusted_keys=["watchlist", "prices", "headlines"]

@@ -90,6 +90,72 @@ def test_opening_a_pre_phase_10_ledger_adds_the_missing_playbook_version_column(
     ledger.close()
 
 
+def test_opening_a_pre_phase_12b_ledger_adds_the_missing_options_pricing_column(tmp_path):
+    """Same defect class as the `playbook_version` migration above, for the column Phase
+    12b added -- a real ledger created between Phase 10 and Phase 12b has
+    `playbook_version` but not yet `options_pricing_json`."""
+    path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE proposals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            as_of TEXT NOT NULL,
+            cycle TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            action TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reason TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            playbook_version INTEGER
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    ledger = IntradayLedger(path)
+    proposal_id = ledger.record_proposal(
+        AS_OF,
+        "cycle_1",
+        "NVDA",
+        "open",
+        "accepted",
+        payload={"size_pct": 0.02},
+        options_pricing={"quote": {"bid": 9.5}},
+    )
+    proposal = ledger.get_proposal(proposal_id)
+    assert proposal["options_pricing"] == {"quote": {"bid": 9.5}}
+    ledger.close()
+
+
+def test_options_pricing_round_trips_through_get_proposal_and_proposals_for(tmp_path):
+    ledger = _ledger(tmp_path)
+    pricing = {"quote": {"bid": 9.5, "ask": 10.5, "feed": "opra"}, "pricing": {"delta": 0.5}}
+    proposal_id = ledger.record_proposal(
+        AS_OF,
+        "cycle_1",
+        "NVDA",
+        "open",
+        "accepted",
+        payload={"size_pct": 0.02},
+        options_pricing=pricing,
+    )
+    assert ledger.get_proposal(proposal_id)["options_pricing"] == pricing
+    assert ledger.proposals_for(AS_OF)[0]["options_pricing"] == pricing
+    ledger.close()
+
+
+def test_options_pricing_defaults_to_none_for_an_equity_proposal(tmp_path):
+    ledger = _ledger(tmp_path)
+    proposal_id = ledger.record_proposal(
+        AS_OF, "cycle_1", "NVDA", "open", "accepted", payload={"size_pct": 0.02}
+    )
+    assert ledger.get_proposal(proposal_id)["options_pricing"] is None
+    ledger.close()
+
+
 def test_every_proposal_is_recorded_including_rejected_ones(tmp_path):
     ledger = _ledger(tmp_path)
     ledger.record_proposal(AS_OF, "cycle_1", "NVDA", "open", "accepted", payload={"size_pct": 0.02})
