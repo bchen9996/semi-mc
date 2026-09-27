@@ -2089,7 +2089,7 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       PA33HJGNHLI7`, `intraday.trading_enabled: true`, `intraday.shadow_mode: true`
       (unchanged, still the default). Full schedule, no real orders submitted, proposals
       filled against the cost model (`FakeBroker`), playbook frozen for a clean baseline.
-      Runs through roughly 2026-10-07. Unconfirmed going in: whether `ANTHROPIC_API_KEY`
+      Originally through ~2026-10-07; **recounted from 2026-09-28** (timezone bug, see below). Unconfirmed going in: whether `ANTHROPIC_API_KEY`
       is a valid GitHub secret -- see "Remaining prerequisites" item 1; the first
       `research` run under this stage is the first real test of it.
 
@@ -2288,9 +2288,13 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       `created_at` from a naive `now` -- a `TypeError` on the first cycle after any real
       stop-out, hidden because every test used an aware `NOW`; and, from Stage 2 on, real
       Alpaca fills (aware UTC) would have made the monitor's time-stop elapsed time five
-      hours short. **Owner decision pending: restart Stage 1's two-week clock from the
-      first run after this fix**, since nothing before it exercised the proposal path at
-      all. **The same bug class in s0/s3, fixed the same day** (owner-approved):
+      hours short. **Owner decision 2026-09-27: Stage 1 is counted from 2026-09-28**
+      (the first session after this fix), since nothing before it exercised the proposal
+      path at all -- earliest end 2026-10-09, and promotion to Stage 2 additionally needs
+      `semimc intraday readiness --since 2026-09-28` to pass its evidence checks, not just
+      the calendar. Before then: a mid-week readiness run to confirm proposals appear and
+      "no quote available" is gone, and the missing-`eod.md` cause found from the Actions
+      run history. **The same bug class in s0/s3, fixed the same day** (owner-approved):
       `live/mark.py`'s reprice check computed `now - order.submitted_at` with
       `_paper_now`'s naive-Eastern `now` against Alpaca's aware-UTC `submitted_at` -- a
       `TypeError` whenever a real order was still open at mark time, hidden from the suite
