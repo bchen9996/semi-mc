@@ -2067,10 +2067,10 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
 2. ~~Where the loop runs~~ -- **resolved**, see the correction above.
 3. **A per-day model-call spend cap** -- the mechanism is built (`intraday/budget.py`), but
    the $10 default is a placeholder. Recalibrate from real Stage-1 shadow-mode logging.
-4. **Alpaca's news API is not wired anywhere** (no `NewsClient` under `src/`), and whether
-   the Researcher reads anything beyond it and this project's own data is still
-   unanswered -- still recommending "nothing beyond Alpaca news + existing data" as the
-   Stage-1 default, expand later only with evidence.
+4. ~~Alpaca's news API is not wired anywhere~~ -- **resolved** (stale note corrected
+   2026-09-27): `execution/news.py::AlpacaNewsClient` is wired into `preflight`,
+   `research`, and `preopen` (`cli.py::_intraday_news_client`). Still the Stage-1 default:
+   nothing beyond Alpaca news + this project's own data, expand later only with evidence.
 5. ~~`.claude/agents/`~~ -- **resolved**, see the correction above (`--append-system-
    prompt-file`, a Phase 2 concern).
 6. ~~The headless flag set beyond `--bare` is unverified~~ -- **mostly resolved in
@@ -2268,17 +2268,68 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       ```
       Shift them all back by 1 hour UTC again the following spring (2027's DST start,
       typically the second Sunday of March) to return to the values already in this file.
+
+      **Stage 1's first three days produced no usable evidence -- a timezone bug, found
+      and fixed 2026-09-27** while building the readiness report below, whose first run
+      against the real ledger showed zero proposals on every shadow day and a wall of
+      `"<SYMBOL>: no quote available"` warnings for liquid names (AMD, TSM) at midday.
+      Cause: `cli.py::_intraday_now` returned naive *Central* wall-clock time, but every
+      timezone boundary it reaches reads a naive datetime as UTC
+      (`AlpacaMarketDataClient._nearest_quote`, `pretrade.py::check_spread_gate`, the
+      monitor's time-stop, `reflect.py`). So a 12:45 CT lookup asked IEX for quotes at
+      12:45 *UTC* (07:45 CT, pre-market), got nothing, and every candidate was dropped
+      before the Trader could propose it. The same mismatch shows in `monitor_checks.
+      checked_at` (12:45+00:00) sitting five hours behind its own row's `created_at`
+      (17:45+00:00). Fixed at the source: `_intraday_now` now returns naive UTC (nothing
+      in the intraday layer reads its wall-clock fields; still naive so FakeBroker state
+      stays naive-to-naive comparable; zero fills in either ledger, so nothing stored
+      needed migrating). Two consequences of the same mismatch fixed with it: the
+      post-stop-out cooldown (`proposals.py`) subtracted the incident log's aware-UTC
+      `created_at` from a naive `now` -- a `TypeError` on the first cycle after any real
+      stop-out, hidden because every test used an aware `NOW`; and, from Stage 2 on, real
+      Alpaca fills (aware UTC) would have made the monitor's time-stop elapsed time five
+      hours short. **Owner decision pending: restart Stage 1's two-week clock from the
+      first run after this fix**, since nothing before it exercised the proposal path at
+      all. **Not fixed, flagged for s0/s3** (separate pipeline, not touched without
+      asking): `live/mark.py`'s reprice check computes `now - order.submitted_at` with
+      `_paper_now`'s naive-Eastern `now` against Alpaca's aware-UTC `submitted_at` -- the
+      same `TypeError` whenever a real order is still open at mark time; FakeBroker's
+      naive timestamps hide it from the test suite.
+
+      **Stage readiness report built 2026-09-27** (`intraday/readiness.py`, `semimc
+      intraday readiness [--since DATE] [--as-of DATE]`, writes `reports/YYYY-MM-DD/
+      stage_readiness.md`). Every other S4 report covers one day or five; the Stage 1 ->
+      2 decision is about the whole shadow period, and nothing put it in one place. Pure
+      ledger aggregation (real + placebo), no broker/market data/model call, never flips
+      config or recommends a stage -- run on demand, not on a schedule. Evidence checks
+      map onto the brief's success criteria: activity every weekday (holidays can't be
+      told from missed runs without a market calendar -- reported as "holiday or missed
+      run", not guessed), research + Trader ran on every active day, an `eod.md` on every
+      active day, no error incidents, proposals produced, closed trades >=
+      `playbook.evidence_min_trades` (a disclosed reuse of the brief's own playbook
+      evidence threshold -- it names no separate promotion threshold), placebo comparison
+      available, peak daily spend within `budget.max_cost_usd_per_day`. Plus a day-by-day
+      table, rejection reasons (split on `"; "`), incidents grouped by failure mode, and a
+      spend summary for recalibrating the $10 placeholder. New `IntradayLedger.briefs_for`.
+      Its first real run (2026-09-23..25) passed 2/8, and surfaced two more findings
+      beyond the timezone bug: **no `eod.md` has ever been committed** (`reports/` holds
+      only one `weekly_review.md`) -- eod-review either never fired or failed every day;
+      the Actions run history (not visible locally, no `gh` CLI) is the next place to
+      look; and every job that did run landed 3-5 hours after its cron (research at
+      ~17:29 UTC vs. 12:30 scheduled, both days), so research and open-batch both ran
+      after midday Central, not before the open. Opening a ledger applies pending schema
+      migrations (as every command does), so running this locally modifies
+      `ledger/*.sqlite3` -- `git checkout -- ledger/` afterwards rather than committing a
+      locally-migrated copy over CI's.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's evidence looks good; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).
 - [ ] Stage 3 -- equities, full budget.
-- [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded). **Partially
-      built ahead of turn, 2026-09-26**: schema/config/gates (Phase 12a) done; the real
-      Alpaca options market-data fetch and `jobs.py` wiring (Phase 12b) are still open --
-      `shadow_pricing` flipping `True` today would have every option proposal fail
-      cleanly with "no options pricing available," not silently misbehave, but Stage 4
-      isn't actually *runnable* yet, the same "built vs. run" distinction already drawn
-      for Stage 1.
+- [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded). **Built
+      ahead of turn, 2026-09-26**: schema/config/gates (Phase 12a) and the real Alpaca
+      options market-data fetch plus `jobs.py` wiring (Phase 12b) are both done -- Stage 4
+      is *runnable* once the owner sets `intraday.options.shadow_pricing: true`, not yet
+      *run*, the same "built vs. run" distinction already drawn for Stage 1.
 - [ ] Stage 5 -- options enabled, only if the shadow results and both options gates pass,
       and only with the owner's explicit approval. Never live at any stage.
 

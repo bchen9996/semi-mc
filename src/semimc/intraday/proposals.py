@@ -288,7 +288,14 @@ def validate_proposal(proposal: TradeProposal, context: ValidationContext) -> li
     stopout_at = context.last_stopout_at.get(proposal.symbol)
     if stopout_at is not None:
         cooldown = dt.timedelta(minutes=risk.cooldown_minutes_after_stopout)
-        if context.now - stopout_at < cooldown:
+        # `stopout_at` is the incident log's aware-UTC `created_at`; the real `now` is
+        # naive UTC (`cli.py::_intraday_now`). Naive-minus-aware raises, so normalize a
+        # naive value on either side to UTC -- the same convention `check_spread_gate`
+        # and the monitor's time-stop already use.
+        now = context.now if context.now.tzinfo else context.now.replace(tzinfo=dt.UTC)
+        if stopout_at.tzinfo is None:
+            stopout_at = stopout_at.replace(tzinfo=dt.UTC)
+        if now - stopout_at < cooldown:
             failures.append(f"{proposal.symbol} is in its post-stop-out cooldown")
 
     projected_turnover = (context.turnover_so_far_usd + proposed_notional) / context.equity

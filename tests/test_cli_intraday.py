@@ -686,3 +686,43 @@ def test_placebo_carry_runs_cleanly_with_no_positions(tmp_path, fake_placebo_env
     result = runner.invoke(app, ["intraday", "placebo", "carry"] + _intraday_overrides(tmp_path))
     assert result.exit_code == 0, result.output
     assert "Carried: (none)" in result.output
+
+
+def test_intraday_now_is_naive_utc_the_convention_every_timezone_boundary_assumes():
+    # Found 2026-09-27: `_intraday_now` returned naive *Central* wall-clock time, but
+    # `AlpacaMarketDataClient._nearest_quote`, `check_spread_gate`, the monitor's time-stop
+    # and `reflect.py` all read a naive datetime as UTC. Every quote lookup during Stage 1
+    # therefore asked IEX for a window five hours in the past (pre-market), got nothing,
+    # and logged "no quote available" -- zero proposals across every shadow day.
+    from semimc.cli import _intraday_now
+
+    now = _intraday_now()
+    assert now.tzinfo is None
+    utc_now = dt.datetime.now(dt.UTC).replace(tzinfo=None)
+    assert abs((utc_now - now).total_seconds()) < 60
+
+
+def test_readiness_writes_a_report_from_the_ledger_and_never_creates_a_placebo_ledger(tmp_path):
+    """Like `weekly-review`, no fake env needed: `readiness` reads ledgers only. It must
+    not open (and so create) a missing placebo ledger -- an empty one would read as "the
+    placebo ran and closed nothing" rather than "no placebo data"."""
+    ledger = IntradayLedger(tmp_path / "intraday.sqlite3")
+    ledger.record_brief(pd.Timestamp("2026-09-21"), {"summary": "brief"})
+    ledger.close()
+
+    result = runner.invoke(
+        app,
+        ["intraday", "readiness", "--as-of", "2026-09-22"]
+        + _intraday_overrides(
+            tmp_path, **{"intraday.reports_dir": (tmp_path / "reports").as_posix()}
+        ),
+    )
+    assert result.exit_code == 0, result.output
+    assert "Evidence checks passed:" in result.output
+
+    report = tmp_path / "reports" / "2026-09-22" / "stage_readiness.md"
+    text = report.read_text(encoding="utf-8")
+    # --since defaults to the ledger's first day of activity.
+    assert "# S4 stage readiness: 2026-09-21 to 2026-09-22" in text
+    assert "no placebo ledger" in text
+    assert not (tmp_path / "intraday_shadow.sqlite3").exists()

@@ -703,3 +703,13 @@ def test_monitor_checks_for_returns_every_check_recorded_that_day_in_order(tmp_p
     assert checks[0]["gap_seconds"] is None
     assert checks[1]["gap_seconds"] == pytest.approx(1200.0)
     ledger.close()
+
+
+def test_briefs_for_returns_only_that_days_briefs(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_brief(AS_OF, {"summary": "monday"})
+    ledger.record_brief(AS_OF + pd.Timedelta(days=1), {"summary": "tuesday"})
+    briefs = ledger.briefs_for(AS_OF)
+    assert [b["content"]["summary"] for b in briefs] == ["monday"]
+    assert ledger.briefs_for(AS_OF - pd.Timedelta(days=1)) == []
+    ledger.close()
