@@ -32,6 +32,7 @@ from ..execution.orders import build_orders
 from ..execution.pretrade import PretradeContext, check_order_tradable, check_pretrade
 from ..strategy.decide import Decision
 from .ledger import Ledger
+from .mark import as_paper_local
 
 
 @dataclass
@@ -129,7 +130,7 @@ def run_execute(
                 request.client_order_id,
                 qty=submitted.filled_qty,
                 price=submitted.filled_avg_price,
-                filled_at=submitted.filled_at or now,
+                filled_at=submitted.filled_at or as_paper_local(now, config),
             )
         result.submitted.append(submitted)
 
