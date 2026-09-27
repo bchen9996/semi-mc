@@ -1,0 +1,79 @@
+name: Forecast journal
+
+# The forward forecast journal (src/semimc/journal.py): once a month, write down what the
+# models forecast *before* the outcome exists, and score every earlier forecast whose
+# horizon has since passed. The commit this workflow pushes is the timestamp that proves
+# each forecast predates its outcome -- the whole point of the journal (see
+# journal.py's module docstring and tasks/todo.md).
+#
+# Runs every weekday evening; the gate is in code, not in these crons, the same pattern
+# paper_trading.yml's own header describes: `journal record --month-end-only` is a fast
+# no-op unless the latest price is the last weekday of its month, and it refuses to
+# record at all once the next session could have opened (so a late firing can never
+# write a forecast whose outcome window has already started). An origin that is already
+# in the journal is skipped, so the backup cron below is harmless when the first one
+# already landed.
+#
+# No secrets: yfinance prices only, no broker, no model call. Its own concurrency group,
+# since it writes only journal/ and never touches either trading workflow's ledger --
+# the push-retry loop below still handles a race with their commits to main.
+
+"on":
+  workflow_dispatch: {}
+  schedule:
+    # ~19:00 New York time under EDT (18:00 under EST): after the close, with the
+    # day's bar published.
+    - cron: "0 23 * * 1-5"
+    # Backup, ~23:00 New York time. GitHub's schedule delivery on this repo has landed
+    # 3-5 hours late (tasks/todo.md); both firings still fall before the next open.
+    - cron: "0 3 * * 2-6"
+
+permissions:
+  contents: write
+
+jobs:
+  record-and-score:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: forecast-journal-write
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Refresh cached prices
+        run: uv run semimc fetch --config config/paper.yaml
+      - name: Record (month-end only), score, and commit the journal
+        # journal/forecasts.csv is plain append-only text, but a rejected push is still
+        # handled the same way the ledger workflows do it -- re-fetch, reset, and re-run
+        # the (idempotent) record step against the latest main -- rather than trusting a
+        # rebase, so a concurrent commit can never leave a half-merged journal.
+        # Scoring runs only on a run that actually recorded, so the report is monthly,
+        # not a new file every weekday.
+        run: |
+          set -e
+          git config user.name "semimc-bot"
+          git config user.email "semimc-bot@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            uv run semimc journal record --month-end-only --config config/paper.yaml
+            if [ -z "$(git status --porcelain -- journal/forecasts.csv)" ]; then
+              echo "nothing recorded"
+              exit 0
+            fi
+            uv run semimc journal score --config config/paper.yaml
+            git add journal/
+            git commit -m "forecast journal: $(date -u +%F)"
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+          done
+          echo "failed to push after 3 attempts"
+          exit 1

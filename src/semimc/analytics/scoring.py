@@ -60,6 +60,48 @@ def crps_from_samples(samples: np.ndarray, observed: float) -> float:
     return absolute_error - pairwise / (2.0 * m * (m - 1))
 
 
+def crps_from_quantiles(quantiles: np.ndarray, levels: np.ndarray, observed: float) -> float:
+    """CRPS approximated from a grid of predictive quantiles, for forecasts stored as
+    quantiles rather than samples (the forecast journal, ``journal.py``).
+
+    Uses ``CRPS = 2 * integral_0^1 QS_tau(q_tau, y) dtau`` with the pinball loss
+    ``QS_tau(q, y) = (1{y < q} - tau) * (q - y)``, the integral replaced by the mean over
+    an evenly spaced grid. The journal's 1%..99% grid leaves the outer tails unresolved,
+    so this differs from the exact CRPS by a small amount in either direction (about 1%
+    for a normal forecast; ``tests/test_journal.py`` checks it against the closed form).
+    Every forecast on the same grid carries the same approximation, so comparisons
+    between models stay fair, but these numbers are not interchangeable with
+    :func:`crps_from_samples` values.
+
+    Parameters
+    ----------
+    quantiles
+        Predictive quantiles at ``levels``, shape ``(k,)``.
+    levels
+        Evenly spaced probability levels in ``(0, 1)``, shape ``(k,)``.
+    observed
+        The realized outcome, in the same units as ``quantiles``.
+    """
+    q = np.asarray(quantiles, dtype=float)
+    tau = np.asarray(levels, dtype=float)
+    pinball = ((observed < q).astype(float) - tau) * (q - observed)
+    return float(2.0 * np.mean(pinball))
+
+
+def pit_from_quantiles(quantiles: np.ndarray, levels: np.ndarray, observed: float) -> float:
+    """Probability integral transform from a quantile grid, by linear interpolation of
+    the predictive CDF between stored quantiles. An outcome beyond the outermost
+    quantile is placed at the midpoint of that tail's unresolved mass (e.g. 0.005 below
+    a 1% quantile) -- the grid cannot say where inside the tail it fell."""
+    q = np.maximum.accumulate(np.asarray(quantiles, dtype=float))
+    tau = np.asarray(levels, dtype=float)
+    if observed < q[0]:
+        return float(tau[0] / 2.0)
+    if observed > q[-1]:
+        return float((1.0 + tau[-1]) / 2.0)
+    return float(np.interp(observed, q, tau))
+
+
 def crps_normal(mu: float, sigma: float, observed: float) -> float:
     """Closed-form CRPS of a normal distribution.
 

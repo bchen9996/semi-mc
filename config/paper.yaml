@@ -68,6 +68,21 @@ backtest:
   risk_free_series: config/risk_free_3m.csv
   n_dependence_bootstraps: 2000
 
+
+# Forward forecast journal (journal.py): distributions recorded before their outcomes
+# exist, scored once each horizon passes. See JournalConfig in config.py.
+journal:
+  path: journal/forecasts.csv
+  scores_dir: journal/scores
+  variants:
+    - {model: gbm, drift_policy: shrunk_historical}
+    - {model: bootstrap, drift_policy: shrunk_historical}
+    - {model: garch_t, drift_policy: shrunk_historical}
+    - {model: garch_t, drift_policy: capm}
+    - {model: garch_t, drift_policy: risk_free}
+  baseline: {model: gbm, drift_policy: shrunk_historical}
+  n_paths: 5000
+
 models:
   bootstrap:
     block_length: auto

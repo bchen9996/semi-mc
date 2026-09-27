@@ -50,6 +50,14 @@ placebo_app = typer.Typer(
 )
 intraday_app.add_typer(placebo_app, name="placebo")
 
+journal_app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    help="Forward forecast journal: record today's distributions, score them once their "
+    "horizons pass (journal.py).",
+)
+app.add_typer(journal_app, name="journal")
+
 LOGGER = logging.getLogger("semimc")
 
 ConfigOption = Annotated[Path | None, typer.Option("--config", "-c", help="Path to a YAML config.")]
@@ -2570,6 +2578,86 @@ def placebo_carry(
         typer.secho(
             f"Closed for overnight cap: {', '.join(result.closed_for_cap)}", fg=typer.colors.YELLOW
         )
+
+
+# -- forward forecast journal (journal.py, added 2026-09-27) -------------------------------
+
+
+@journal_app.command("record")
+def journal_record(
+    month_end_only: Annotated[
+        bool,
+        typer.Option(
+            "--month-end-only",
+            help="Record only when the latest price is the last weekday of its month "
+            "(the scheduled workflow's mode).",
+        ),
+    ] = False,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Append today's forecast distributions to `journal.path` -- the latest trading day
+    in the cache only (no backdating), skipped if already recorded, refused once the
+    next session could have opened. Commit the file afterwards: the commit timestamp is
+    what proves each forecast predates its outcome.
+    """
+    import datetime as dt
+
+    from .data import load_market_data
+    from .journal import append_journal, read_journal, record_forecasts
+    from .live.decide import git_commit
+
+    cfg = _setup(config, set_, verbose)
+    market = load_market_data(cfg)
+    path = cfg.path(cfg.journal.path)
+    result = record_forecasts(
+        market,
+        cfg,
+        recorded_at=dt.datetime.now(dt.UTC),
+        git_commit=git_commit(),
+        existing=read_journal(path),
+        month_end_only=month_end_only,
+    )
+    if result.skipped_reason is not None:
+        typer.echo(f"Skipped: {result.skipped_reason}")
+        return
+    for failure in result.failures:
+        typer.secho(
+            f"  failed: {failure['ticker']} {failure['variant']}: {failure['error']}",
+            fg=typer.colors.YELLOW,
+        )
+    if result.rows.empty:
+        typer.secho("Nothing recorded -- every fit failed.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    append_journal(path, result.rows)
+    typer.echo(f"Recorded {len(result.rows)} forecasts for origin {result.origin.date()} to {path}")
+
+
+@journal_app.command("score")
+def journal_score(
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Score every journal forecast whose horizon has passed and write
+    `journal.scores_dir/YYYY-MM-DD.md`. Reads the journal and the price cache only.
+    """
+    from .data import load_market_data
+    from .journal import read_journal, render_score_markdown, score_journal
+
+    cfg = _setup(config, set_, verbose)
+    journal = read_journal(cfg.path(cfg.journal.path))
+    if journal.empty:
+        typer.echo("The journal is empty -- run `semimc journal record` first.")
+        return
+    market = load_market_data(cfg)
+    result = score_journal(journal, market, cfg)
+    out_path = cfg.path(cfg.journal.scores_dir) / f"{result.as_of.date()}.md"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(render_score_markdown(result), encoding="utf-8")
+    typer.echo(f"Wrote {out_path}")
+    typer.echo(f"Scored {len(result.scored)} forecasts; {result.n_pending} still pending")
 
 
 if __name__ == "__main__":  # pragma: no cover

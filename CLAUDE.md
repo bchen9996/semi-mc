@@ -38,6 +38,8 @@ uv run semimc scenario --name sector_shock_25
 uv run semimc report --run latest
 uv run semimc models                                # list available models
 uv run semimc dashboard [--port 8765] [--no-open]   # HTML dashboard, browser front end
+uv run semimc journal record [--month-end-only]      # forward forecast journal: write today's forecasts
+uv run semimc journal score                         # score journal forecasts whose horizon has passed
 ```
 
 Every command takes `--config PATH` and repeatable `--set key.path=value` overrides
