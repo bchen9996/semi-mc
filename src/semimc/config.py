@@ -127,6 +127,61 @@ class BacktestConfig(_Base):
         return self
 
 
+class JournalVariant(_Base):
+    """One (model, drift policy) pair the forecast journal records."""
+
+    model: str
+    drift_policy: Literal["capm", "risk_free", "shrunk_historical"]
+
+    @property
+    def label(self) -> str:
+        return f"{self.model}/{self.drift_policy}"
+
+
+def _default_journal_variants() -> list[JournalVariant]:
+    return [
+        JournalVariant(model="gbm", drift_policy="shrunk_historical"),
+        JournalVariant(model="bootstrap", drift_policy="shrunk_historical"),
+        JournalVariant(model="garch_t", drift_policy="shrunk_historical"),
+        JournalVariant(model="garch_t", drift_policy="capm"),
+        JournalVariant(model="garch_t", drift_policy="risk_free"),
+    ]
+
+
+class JournalConfig(_Base):
+    """The forward forecast journal (`journal.py`, added 2026-09-27): distributions
+    recorded *before* their outcomes exist, scored once the horizon passes -- the only
+    evidence about these models that is not contaminated by the 2012-2026 backtest
+    `drift.policy` was chosen on (MODEL_NOTES section 7), and the Phase 4B holdout is
+    already spent.
+
+    The default variants put the drift question to a clean test: garch_t under all three
+    non-manual policies, plus gbm (the scoring baseline, as in `backtest.baseline`) and
+    bootstrap under the configured default. `manual` is excluded -- it has no
+    out-of-sample meaning. No staleness setting: `journal.py` refuses any record run
+    after the next session could have opened, the exact contamination test.
+    """
+
+    path: str = "journal/forecasts.csv"
+    scores_dir: str = "journal/scores"
+    variants: list[JournalVariant] = Field(default_factory=_default_journal_variants)
+    baseline: JournalVariant = Field(
+        default_factory=lambda: JournalVariant(model="gbm", drift_policy="shrunk_historical")
+    )
+    n_paths: int = Field(5_000, gt=0)
+
+    @model_validator(mode="after")
+    def _baseline_in_variants(self) -> JournalConfig:
+        if self.baseline not in self.variants:
+            raise ValueError(
+                f"journal.baseline {self.baseline.label!r} must be one of journal.variants"
+            )
+        labels = [v.label for v in self.variants]
+        if len(labels) != len(set(labels)):
+            raise ValueError(f"journal.variants has duplicates: {labels}")
+        return self
+
+
 class BootstrapModelConfig(_Base):
     block_length: int | Literal["auto"] = "auto"
 
@@ -573,6 +628,7 @@ class Config(_Base):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
+    journal: JournalConfig = Field(default_factory=JournalConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     signals: SignalsConfig = Field(default_factory=SignalsConfig)
     portfolio: PortfolioConfig = Field(default_factory=PortfolioConfig)

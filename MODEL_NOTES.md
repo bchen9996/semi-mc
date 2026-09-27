@@ -425,7 +425,11 @@ winning.
 - **Survivorship bias.** The universe is today's semiconductor leaders. Every historical
   statistic is measured on a sample selected for having survived, which understates
   volatility and overstates drift by an unknown amount.
-- **The drift is an assumption.** See §0. Nothing here validates it.
+- **The drift is an assumption.** See §0. Nothing in the backtest validates it, since the
+  default was chosen on the same window it is scored on. Since 2026-09-27 the forward
+  forecast journal (`journal.py`) records garch_t under all three non-manual policies each
+  month-end, before the outcome exists -- the first clean test of the choice, once enough
+  independent origins accumulate (years, not months, at the longer horizons).
 - **Parameter uncertainty is not propagated** in any model.
 - **Regime change is unmodelled.** Every model assumes the next period resembles a rolling
   five-year window.

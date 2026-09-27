@@ -2342,6 +2342,33 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
 - [ ] Stage 5 -- options enabled, only if the shadow results and both options gates pass,
       and only with the owner's explicit approval. Never live at any stage.
 
+## Forward forecast journal (added 2026-09-27)
+
+- [x] **Built** (`journal.py`, `semimc journal record [--month-end-only]` / `semimc journal
+      score`, `.github/workflows/forecast_journal.yml`). Why: every favourable backtest
+      number is at least mildly contaminated -- `drift.policy` was chosen on the same
+      2012-2026 window it is reported on (MODEL_NOTES section 7), and the Phase 4B holdout
+      is spent -- so the only clean evidence left is forecasts written down before their
+      outcomes exist. Each month-end, the workflow fits every `journal.variants` entry
+      (gbm, bootstrap, and garch_t under `shrunk_historical`/`capm`/`risk_free` -- the
+      drift question put to a clean test) for the 14-ticker universe at the latest close
+      and appends 99 quantiles of the simple return per horizon to `journal/forecasts.csv`
+      (append-only, git-tracked: the commit is the pre-registration timestamp). Guards:
+      no backdating (latest trading day only); refused once the next session could have
+      opened (next weekday 09:30 New York -- the exact contamination test, replacing a
+      first-draft calendar-day age limit); an already-recorded origin is skipped, never
+      overwritten; `--month-end-only` records only on the last weekday of a month (a month
+      ending on an exchange holiday is skipped, a few times a decade, rather than recorded
+      a session late -- no market calendar in this project). Scoring reuses the
+      backtester's outcome definition from current adjusted prices and reports mean CRPS
+      (quantile-grid approximation, `analytics/scoring.py::crps_from_quantiles`, within
+      ~1% of the closed form for a normal), skill vs `journal.baseline`, mean PIT,
+      coverage, and the independent-origin count -- **no significance tests until that
+      count reaches a couple of dozen** (two years of month-ends at 21 days; longer
+      horizons slower). ~300 KB of CSV per month-end. Verified end to end on the real
+      universe locally (280 forecasts, 9 s, origin 2026-09-25 -- a trial file, not
+      committed: the first real entry is the workflow's 2026-09-30 run).
+
 ## Known gaps (deliberate, with reasons)
 
 - [ ] **Cross-run fit caching.** Fitted parameters are cached in memory within a run (one
