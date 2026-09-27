@@ -358,3 +358,37 @@ def test_mark_always_records_a_fresh_snapshot(config, ledger):
     broker = FakeBroker(now=SUBMITTED_AT)
     run_mark("s0", cfg, broker, ledger, pd.Timestamp("2026-01-05"), SUBMITTED_AT)
     assert ledger.latest_snapshot("s0") is not None
+
+
+class _AlpacaTimestampBroker(FakeBroker):
+    """FakeBroker, but reporting `submitted_at` the way the real Alpaca adapter does:
+    aware UTC (`execution/alpaca_broker.py`'s docstring). FakeBroker's own timestamps are
+    naive, which is what hid the bug below from every other test in this file."""
+
+    def get_order_by_client_id(self, client_order_id):
+        order = super().get_order_by_client_id(client_order_id)
+        if order is None or order.submitted_at is None:
+            return order
+        local = order.submitted_at.replace(tzinfo=_EASTERN)
+        return dataclasses.replace(order, submitted_at=local.astimezone(dt.UTC))
+
+
+_EASTERN = __import__("zoneinfo").ZoneInfo("America/New_York")
+
+
+@pytest.mark.parametrize(("minutes_later", "canceled"), [(30, True), (5, False)])
+def test_reprice_compares_alpacas_aware_utc_submitted_at_against_a_naive_local_now(
+    config, ledger, minutes_later, canceled
+):
+    # Found 2026-09-27: `cli.py::_paper_now` is naive local (Eastern) time, while a real
+    # Alpaca order's `submitted_at` is aware UTC -- `now - order.submitted_at` raised
+    # TypeError whenever a real order was still open at mark time.
+    cfg = _tradeable_config(config)
+    broker = _AlpacaTimestampBroker(partial_fill_fraction=0.0, now=SUBMITTED_AT)
+    request = _request()
+    ledger.record_order("s0", "hash-1", request, broker.submit_order(request))
+
+    now = SUBMITTED_AT + dt.timedelta(minutes=minutes_later)
+    result = run_mark("s0", cfg, broker, ledger, pd.Timestamp("2026-01-05"), now)
+
+    assert (request.client_order_id in result.orders_canceled_for_reprice) is canceled

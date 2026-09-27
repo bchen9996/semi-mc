@@ -2290,11 +2290,16 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       Alpaca fills (aware UTC) would have made the monitor's time-stop elapsed time five
       hours short. **Owner decision pending: restart Stage 1's two-week clock from the
       first run after this fix**, since nothing before it exercised the proposal path at
-      all. **Not fixed, flagged for s0/s3** (separate pipeline, not touched without
-      asking): `live/mark.py`'s reprice check computes `now - order.submitted_at` with
-      `_paper_now`'s naive-Eastern `now` against Alpaca's aware-UTC `submitted_at` -- the
-      same `TypeError` whenever a real order is still open at mark time; FakeBroker's
-      naive timestamps hide it from the test suite.
+      all. **The same bug class in s0/s3, fixed the same day** (owner-approved):
+      `live/mark.py`'s reprice check computed `now - order.submitted_at` with
+      `_paper_now`'s naive-Eastern `now` against Alpaca's aware-UTC `submitted_at` -- a
+      `TypeError` whenever a real order was still open at mark time, hidden from the suite
+      by FakeBroker's naive timestamps. Fixed with `live/mark.py::as_paper_local`, which
+      reads a naive value as `paper.execution.timezone` local time before comparing
+      (`_paper_now` itself left local: `execute`'s `market.spot(as_of=now)` wants the
+      exchange-local date). The `filled_at` fallback in `mark`/`execute` (used only when
+      the broker reports a fill without a timestamp) now stores that same aware value,
+      so the column never mixes naive-local with aware-UTC.
 
       **Stage readiness report built 2026-09-27** (`intraday/readiness.py`, `semimc
       intraday readiness [--since DATE] [--as-of DATE]`, writes `reports/YYYY-MM-DD/

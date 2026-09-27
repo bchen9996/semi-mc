@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -21,6 +22,18 @@ from ..execution.broker import Broker
 from .ledger import Ledger
 
 _OPEN_STATUSES = ("new", "accepted", "partially_filled")
+
+
+def as_paper_local(value: dt.datetime, config) -> dt.datetime:  # noqa: ANN001
+    """``value`` as an aware datetime, reading a naive one as
+    ``config.paper.execution.timezone`` local time. `cli.py::_paper_now` hands every job
+    a naive *local* `now`, and FakeBroker's timestamps follow it, but a real Alpaca
+    order's ``submitted_at``/``filled_at`` come back aware UTC (`alpaca_broker.py`'s
+    docstring). Found 2026-09-27: `run_mark`'s reprice check subtracted one from the
+    other and raised TypeError whenever a real order was still open at mark time."""
+    if value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=ZoneInfo(config.paper.execution.timezone))
 
 
 @dataclass(frozen=True)
@@ -76,7 +89,7 @@ def run_mark(
                 client_order_id,
                 qty=order.filled_qty - already,
                 price=order.filled_avg_price or 0.0,
-                filled_at=order.filled_at or now,
+                filled_at=order.filled_at or as_paper_local(now, config),
             )
             result.fills_recorded += 1
         ledger.update_order_status(client_order_id, order)
@@ -84,7 +97,8 @@ def run_mark(
         if (
             order.status in _OPEN_STATUSES
             and order.submitted_at is not None
-            and now - order.submitted_at > reprice_after
+            and as_paper_local(now, config) - as_paper_local(order.submitted_at, config)
+            > reprice_after
         ):
             try:
                 broker.cancel_order(order.id)
