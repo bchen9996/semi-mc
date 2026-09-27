@@ -361,3 +361,23 @@ def test_close_and_trim_bypass_every_risk_increasing_check(tmp_path):
     assert (
         validate_proposal(TradeProposal(action="trim", symbol="NVDA", size_pct=0.01), context) == []
     )
+
+
+def test_cooldown_compares_a_naive_utc_now_against_the_ledgers_aware_stopout_time(tmp_path):
+    # The real call path: `cli.py::_intraday_now` hands every job a *naive* UTC `now`,
+    # while `IntradayLedger.last_stopout_times` parses the incident log's aware-UTC
+    # `created_at`. Every earlier cooldown test used an aware `NOW`, which hid that
+    # naive-minus-aware raises TypeError -- a crash on the first cycle after any
+    # real stop-out (found 2026-09-27).
+    ledger = _ledger(tmp_path)
+    ledger.record_incident("warning", "stopout:NVDA")
+    naive_utc_now = dt.datetime.now(dt.UTC).replace(tzinfo=None)
+    context = _context(
+        tmp_path,
+        ledger=ledger,
+        now=naive_utc_now,
+        config=IntradayConfig(risk={"cooldown_minutes_after_stopout": 30}),
+        last_stopout_at=ledger.last_stopout_times(),
+    )
+    failures = validate_proposal(_open(), context)
+    assert any("cooldown" in f for f in failures)

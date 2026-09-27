@@ -1801,11 +1801,19 @@ def _intraday_as_of(value: str | None) -> pd.Timestamp:
     return pd.Timestamp(value) if value else pd.Timestamp.now().normalize()
 
 
-def _intraday_now(cfg: Config):  # noqa: ANN001 -- returns dt.datetime
+def _intraday_now():  # noqa: ANN001 -- returns dt.datetime
+    """Naive **UTC** -- the convention every timezone boundary this `now` reaches already
+    assumes (`AlpacaMarketDataClient._nearest_quote`, `check_spread_gate`, the monitor's
+    time-stop, `reflect.py`: each reads a naive datetime as UTC). Found 2026-09-27: this
+    used to return naive *Central* wall-clock time, so every Stage-1 quote lookup asked
+    IEX for a window five hours in the past (pre-market), got nothing back, and logged
+    "no quote available" -- zero proposals on every shadow day. Nothing in the intraday
+    layer reads `now`'s wall-clock fields, so it has no reason to be local time.
+    Deliberately still naive, not aware: FakeBroker state and ledger rows written from it
+    stay naive-to-naive comparable."""
     import datetime as dt
-    from zoneinfo import ZoneInfo
 
-    return dt.datetime.now(ZoneInfo(cfg.intraday.schedule.timezone)).replace(tzinfo=None)
+    return dt.datetime.now(dt.UTC).replace(tzinfo=None)
 
 
 def _intraday_broker():  # noqa: ANN001 -- returns AlpacaPaperBroker
@@ -1888,7 +1896,7 @@ def intraday_preflight(
     from .intraday.jobs import run_preflight
     from .intraday.ledger import IntradayLedger
 
-    now = _intraday_now(cfg)
+    now = _intraday_now()
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
     broker = _intraday_broker()
     market_data = _intraday_market_data()
@@ -1942,7 +1950,7 @@ def intraday_research(
     from .intraday.llm import ClaudeCliClient
 
     as_of_ts = _intraday_as_of(as_of)
-    now = _intraday_now(cfg)
+    now = _intraday_now()
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
     broker = _intraday_broker()
     market_data = _intraday_market_data()
@@ -1988,7 +1996,7 @@ def intraday_preopen(
     from .intraday.ledger import IntradayLedger
 
     as_of_ts = _intraday_as_of(as_of)
-    now = _intraday_now(cfg)
+    now = _intraday_now()
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
     market_data = _intraday_market_data()
     news_client = _intraday_news_client()
@@ -2028,7 +2036,7 @@ def intraday_monitor(
     from .intraday.monitor import check_invalidation_and_time_stops
 
     as_of_ts = _intraday_as_of(as_of)
-    now = _intraday_now(cfg)
+    now = _intraday_now()
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
     market_data = _intraday_market_data()
     broker = _intraday_execution_broker(cfg, ledger, market_data, now)
@@ -2063,7 +2071,7 @@ def _run_intraday_cycle(
     from .intraday.llm import ClaudeCliClient
 
     as_of_ts = _intraday_as_of(as_of)
-    now = _intraday_now(cfg)
+    now = _intraday_now()
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
     market_data = _intraday_market_data()
     broker = _intraday_execution_broker(cfg, ledger, market_data, now)
@@ -2155,7 +2163,7 @@ def intraday_carry(
     from .intraday.ledger import IntradayLedger
 
     as_of_ts = _intraday_as_of(as_of)
-    now = _intraday_now(cfg)
+    now = _intraday_now()
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
     market_data = _intraday_market_data()
     broker = _intraday_execution_broker(cfg, ledger, market_data, now)
@@ -2200,7 +2208,7 @@ def intraday_eod_review(
     from .live.ledger import Ledger as PaperLedger
 
     as_of_ts = _intraday_as_of(as_of)
-    now = _intraday_now(cfg)
+    now = _intraday_now()
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
     market_data = _intraday_market_data()
     news_client = _intraday_news_client()
@@ -2262,6 +2270,59 @@ def intraday_weekly_review(
     typer.echo(f"Wrote {result.report_path}")
     typer.echo(f"Pending playbook proposals: {result.pending_proposals}")
     typer.echo(f"Entries due for re-review: {result.entries_due_for_review}")
+
+
+@intraday_app.command("readiness")
+def intraday_readiness(
+    since: Annotated[
+        str | None,
+        typer.Option(
+            "--since",
+            help="First day of the window, YYYY-MM-DD. Defaults to the ledger's first "
+            "day of activity.",
+        ),
+    ] = None,
+    as_of: IntradayAsOfOption = None,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Writes `reports/YYYY-MM-DD/stage_readiness.md` -- the whole window's evidence for
+    the next rollout-stage decision, checked against BRIEF_INTRADAY.md's success
+    criteria (`intraday/readiness.py`). Run on demand, not on a schedule; reads the
+    ledgers only -- no broker, market data, or model call -- and never changes config.
+    """
+    cfg = _setup(config, set_, verbose)
+    from .intraday.ledger import IntradayLedger
+    from .intraday.readiness import render_stage_readiness_markdown, stage_readiness
+
+    as_of_ts = _intraday_as_of(as_of)
+    ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    # Opening an IntradayLedger creates its file; never conjure an empty placebo ledger
+    # that would then read as "the placebo ran and closed nothing".
+    placebo_path = cfg.path(cfg.intraday.shadow_ledger_path)
+    placebo_ledger = IntradayLedger(placebo_path) if placebo_path.exists() else None
+    try:
+        if since is not None:
+            since_ts = pd.Timestamp(since)
+        else:
+            days = ledger.distinct_trading_days()
+            since_ts = pd.Timestamp(days[0]) if days else as_of_ts
+        reports_dir = cfg.path(cfg.intraday.reports_dir)
+        report = stage_readiness(
+            ledger, placebo_ledger, cfg.intraday, reports_dir, since_ts, as_of_ts
+        )
+    finally:
+        ledger.close()
+        if placebo_ledger is not None:
+            placebo_ledger.close()
+
+    out_path = reports_dir / str(as_of_ts.date()) / "stage_readiness.md"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(render_stage_readiness_markdown(report), encoding="utf-8")
+    passed = sum(1 for c in report.checks if c.passed)
+    typer.echo(f"Wrote {out_path}")
+    typer.echo(f"Evidence checks passed: {passed}/{len(report.checks)}")
 
 
 # -- S4's playbook: human accept/reject/retire actions (BRIEF_INTRADAY.md's
@@ -2326,7 +2387,7 @@ def playbook_accept(
     from .intraday.ledger import IntradayLedger
     from .intraday.playbook import PlaybookEvidenceError, accept_proposal
 
-    now = _intraday_now(cfg)
+    now = _intraday_now()
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
     try:
         version = accept_proposal(
@@ -2386,7 +2447,7 @@ def playbook_retire(
     from .intraday.ledger import IntradayLedger
     from .intraday.playbook import retire_entry
 
-    now = _intraday_now(cfg)
+    now = _intraday_now()
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
     try:
         version = retire_entry(cfg, ledger, entry_id, reason, now)
@@ -2418,7 +2479,7 @@ def _run_placebo_cycle(
     from .intraday.placebo import run_placebo_cycle
 
     as_of_ts = _intraday_as_of(as_of)
-    now = _intraday_now(cfg)
+    now = _intraday_now()
     real_ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
     shadow_ledger = IntradayLedger(cfg.path(cfg.intraday.shadow_ledger_path))
     market_data = _intraday_market_data()
@@ -2491,7 +2552,7 @@ def placebo_carry(
     from .intraday.placebo import run_placebo_carry
 
     as_of_ts = _intraday_as_of(as_of)
-    now = _intraday_now(cfg)
+    now = _intraday_now()
     shadow_ledger = IntradayLedger(cfg.path(cfg.intraday.shadow_ledger_path))
     market_data = _intraday_market_data()
     shadow_broker = _load_shadow_broker(cfg, shadow_ledger, now)

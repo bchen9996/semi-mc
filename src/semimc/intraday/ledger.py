@@ -285,6 +285,20 @@ class IntradayLedger:
         data["content"] = json.loads(data.pop("content_json"))
         return data
 
+    def briefs_for(self, as_of: pd.Timestamp) -> list[dict[str, Any]]:
+        """One trading day's research briefs -- `intraday/readiness.py` needs "did
+        research run on day X" for every day in a window, which `latest_brief` alone
+        can't answer."""
+        rows = self._conn.execute(
+            "SELECT * FROM briefs WHERE as_of = ? ORDER BY id", (str(pd.Timestamp(as_of)),)
+        ).fetchall()
+        out = []
+        for row in rows:
+            data = dict(row)
+            data["content"] = json.loads(data.pop("content_json"))
+            out.append(data)
+        return out
+
     # -- watchlist ------------------------------------------------------------------------
 
     def record_watchlist_item(
