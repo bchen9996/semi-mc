@@ -148,12 +148,29 @@ def _unpack_fit(
         "loglikelihood": float(result.loglikelihood),
     }
     standardized = (scaled / result.conditional_volatility).dropna()
-    state = {"last_resid_scaled": last_resid, "last_variance_scaled": last_variance}
+    state = {
+        "last_resid_scaled": last_resid,
+        "last_variance_scaled": last_variance,
+        "max_variance_scaled": float(result.conditional_volatility.max() ** 2),
+    }
     return params, next_variance_scaled / scale_sq, standardized, state
 
 
 class GJRGarchTModel(BaseReturnModel):
-    """GJR-GARCH(1,1)-t fitted per ticker, with a Gaussian copula across tickers."""
+    """GJR-GARCH(1,1)-t fitted per ticker, with a Gaussian copula across tickers.
+
+    ``variance_cap_multiple`` caps every *simulated* conditional variance at that multiple
+    of the highest conditional variance the fit filtered in-sample (MODEL_NOTES section
+    3). Found 2026-09-27: fits with ``nu`` below 4 (infinite innovation kurtosis) or
+    persistence at 1 occasionally simulated explosive paths -- a 7,800x single day in one
+    reproduction -- which barely moved quantiles but dominated the backtest's CRPS. The
+    default 2.0 (about 1.41x the worst in-sample volatility) was fixed before looking at
+    any backtest result, not tuned on one. ``None`` or ``0`` disables the cap. The
+    closed-form :meth:`annualized_variance` (the Ito correction's input) ignores the cap.
+    Measured on the real universe over 252 days: it touches a median 1-5% of paths (up
+    to 23% for the most extreme fits) but only ~0.02% of simulated days (at most 0.36%),
+    so the resulting drift error is negligible.
+    """
 
     name = "garch_t"
 
@@ -164,9 +181,12 @@ class GJRGarchTModel(BaseReturnModel):
         q: int = 1,
         rescale_factor: float = 100.0,
         force_independent: bool = False,
+        variance_cap_multiple: float | None = 2.0,
         dtype: str = "float64",
     ) -> None:
         super().__init__(dtype=dtype)
+        self.variance_cap_multiple = variance_cap_multiple or None
+        self._variance_cap: dict[str, float] = {}  # unscaled daily variance ceiling
         self.p = p
         self.o = o
         self.q = q
@@ -182,17 +202,22 @@ class GJRGarchTModel(BaseReturnModel):
         standardized: dict[str, pd.Series] = {}
 
         for ticker in self.tickers:
-            params, next_variance, std_resid = fit_gjr_garch_t(
-                log_returns[ticker],
-                p=self.p,
-                o=self.o,
-                q=self.q,
-                rescale_factor=self.rescale_factor,
-                label=ticker,
+            result, scaled = _fit_arch_gjr_t(
+                log_returns[ticker], self.p, self.o, self.q, self.rescale_factor, ticker
+            )
+            params, next_variance, std_resid, state = _unpack_fit(
+                result, scaled, self.rescale_factor, ticker
             )
             self.params[ticker] = params
             self._h0[ticker] = next_variance
             standardized[ticker] = std_resid
+            if self.variance_cap_multiple is not None:
+                self._variance_cap[ticker] = (
+                    self.variance_cap_multiple
+                    * state["max_variance_scaled"]
+                    / self.rescale_factor**2
+                )
+            self._after_ticker_fit(ticker, result, params, state)
 
         if len(self.tickers) == 1 or self.force_independent:
             self._resid_correlation = np.eye(len(self.tickers))
@@ -201,6 +226,17 @@ class GJRGarchTModel(BaseReturnModel):
             correlation = frame.loc[:, self.tickers].corr().fillna(0.0).to_numpy(dtype=float)
             np.fill_diagonal(correlation, 1.0)
             self._resid_correlation = correlation
+
+    def _after_ticker_fit(self, ticker: str, result, params: dict, state: dict) -> None:  # noqa: ANN001
+        """Hook for subclasses that need more of a ticker's arch result than the
+        parameters (``GJRGarchTParamUncertaintyModel``: the covariance)."""
+
+    def _cap_variance(self, ticker: str, variance: np.ndarray) -> None:
+        """In place: floor at 1e-14, and cap at ``_variance_cap`` when one is set."""
+        np.maximum(variance, 1e-14, out=variance)
+        cap = self._variance_cap.get(ticker)
+        if cap is not None:
+            np.minimum(variance, cap, out=variance)
 
     # -- drift input ----------------------------------------------------------------
 
@@ -288,7 +324,7 @@ class GJRGarchTModel(BaseReturnModel):
                 shock = volatility * innovations[:, step, index]
                 out[:, step, index] = shock
                 variance = omega + (alpha + gamma * (shock < 0.0)) * shock**2 + beta * variance
-                np.maximum(variance, 1e-14, out=variance)
+                self._cap_variance(ticker, variance)
 
         return out
 
@@ -297,6 +333,7 @@ class GJRGarchTModel(BaseReturnModel):
         info.update(
             {
                 "params": {t: dict(p) for t, p in self.params.items()},
+                "variance_cap_multiple": self.variance_cap_multiple,
                 "start_conditional_vol_annual": {
                     t: float(
                         np.sqrt(
@@ -359,37 +396,18 @@ class GJRGarchTParamUncertaintyModel(GJRGarchTModel):
         self._state: dict[str, dict[str, float]] = {}
         self.last_valid_fraction: dict[str, float] = {}
 
-    def _fit_shape(self, log_returns: pd.DataFrame, context: FitContext) -> None:
-        standardized: dict[str, pd.Series] = {}
-        for ticker in self.tickers:
-            result, scaled = _fit_arch_gjr_t(
-                log_returns[ticker], self.p, self.o, self.q, self.rescale_factor, ticker
-            )
-            params, next_variance, std_resid, state = _unpack_fit(
-                result, scaled, self.rescale_factor, ticker
-            )
-            self.params[ticker] = params
-            self._h0[ticker] = next_variance
-            self._state[ticker] = state
-            standardized[ticker] = std_resid
-            self._theta[ticker] = np.array([float(result.params[k]) for k in _PARAM_ORDER])
-            cov = result.param_cov.loc[list(_PARAM_ORDER), list(_PARAM_ORDER)].to_numpy()
-            usable = (
-                self.covariance_scale > 0
-                and params["persistence"] < 1.0 - 1e-8
-                and np.isfinite(cov).all()
-            )
-            self._cov_cholesky[ticker] = (
-                nearest_psd_cholesky(cov * self.covariance_scale) if usable else None
-            )
-
-        if len(self.tickers) == 1 or self.force_independent:
-            self._resid_correlation = np.eye(len(self.tickers))
-        else:
-            frame = pd.DataFrame(standardized).dropna(how="any")
-            correlation = frame.loc[:, self.tickers].corr().fillna(0.0).to_numpy(dtype=float)
-            np.fill_diagonal(correlation, 1.0)
-            self._resid_correlation = correlation
+    def _after_ticker_fit(self, ticker: str, result, params: dict, state: dict) -> None:  # noqa: ANN001
+        self._state[ticker] = state
+        self._theta[ticker] = np.array([float(result.params[k]) for k in _PARAM_ORDER])
+        cov = result.param_cov.loc[list(_PARAM_ORDER), list(_PARAM_ORDER)].to_numpy()
+        usable = (
+            self.covariance_scale > 0
+            and params["persistence"] < 1.0 - 1e-8
+            and np.isfinite(cov).all()
+        )
+        self._cov_cholesky[ticker] = (
+            nearest_psd_cholesky(cov * self.covariance_scale) if usable else None
+        )
 
     # -- parameter draws ------------------------------------------------------------
 
@@ -478,7 +496,7 @@ class GJRGarchTParamUncertaintyModel(GJRGarchTModel):
                     + (par["alpha"] + par["gamma"] * (shock < 0.0)) * shock**2
                     + par["beta"] * variance
                 )
-                np.maximum(variance, 1e-14, out=variance)
+                self._cap_variance(ticker, variance)
             if self._cov_cholesky[ticker] is not None:
                 ito = 0.5 * (point_variance[ticker] - self._average_variance(par, horizon))
                 out[:, :, index] += ito[:, None]

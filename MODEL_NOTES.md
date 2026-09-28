@@ -183,6 +183,21 @@ and mean-reverts towards `omega / (1 - alpha - gamma/2 - beta)` at the estimated
 
 ---
 
+**The simulated-variance cap (added 2026-09-27).** Each simulated conditional variance
+is capped at `models.garch_t.variance_cap_multiple` (default 2.0) times the highest
+conditional variance the fit filtered in-sample -- about 1.41x the worst in-sample
+volatility. Without it, fits with `nu` below 4 (infinite innovation kurtosis, so an
+extremely heavy-tailed variance process) or persistence at 1 occasionally simulated
+explosive paths: a 7,800x single day and a 2.8-billion-fold year in one reproduction
+(AMD, origin 2018-11-30). Quantiles barely noticed; the backtest's energy-form CRPS was
+dominated by two such cells. The multiple was fixed before any backtest ran with it. Over
+2012-2026 the cap moved `garch_t`'s 252-day mean CRPS from 0.473 to 0.334 (gbm: 0.333)
+and nothing else past the fourth decimal (research_log.md, 2026-09-27). It bounds
+variance, not innovations: a single extreme t draw at `nu` near 3 can still produce a
+very large one-day move. Inherited by `garch_t_pu`, `factor`, `factor_regime`, and
+`earnings_jumps` on a `garch_t` base; FHS resamples bounded historical residuals and has
+no cap.
+
 ## 4. Earnings-jump overlay
 
 **What it does.** Wraps any base model. On each scheduled report inside the horizon, it
@@ -916,9 +931,6 @@ persistence), which is correct: the policy fixes the arithmetic drift (section 0
 intervals were already about the right width; the backtest's persistent error is the
 centre (mean PIT 0.54-0.65 for every model), which a mean-preserving spread cannot move.
 
-**A `garch_t` defect found along the way.** With `nu` below 4 (infinite innovation
-kurtosis) or persistence at 1, `garch_t`'s 252-day simulations occasionally contain
-explosive paths -- a single-day log return of 8.96 in one reproduction. Quantiles and
-coverage barely notice; the energy-form CRPS is dominated by them (two cells turned
-`garch_t`'s 252-day mean CRPS from roughly gbm's level to 31% worse). The forecast
-journal's quantile-grid CRPS is insensitive to this by construction.
+**A `garch_t` defect found along the way**, since fixed by the simulated-variance cap
+(section 3): with `nu` below 4 or persistence at 1, `garch_t`'s 252-day simulations
+occasionally contained explosive paths, which dominated the energy-form CRPS.

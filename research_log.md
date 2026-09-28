@@ -345,3 +345,33 @@ varying size). Recorded as a separate `garch_t` defect in tasks/todo.md.
 
 **Decision:** `garch_t_pu` stays in the codebase as an opt-in model (cheap to re-test,
 documented negative result), not a default and not a journal variant.
+
+
+## 2026-09-27 -- `garch_t` simulated-variance cap (fix for explosive paths)
+
+Follow-up to the entry above. `models.garch_t.variance_cap_multiple = 2.0` caps each
+simulated conditional variance at twice the fit's in-sample peak (MODEL_NOTES section 3).
+The 2.0 was chosen before this run and not revisited after it.
+
+- **Command:** `semimc backtest --models gbm,garch_t --horizons 21,63,126,252` (same
+  config, seeds and model order as `runs/20260927-195909-backtest`, so any row the cap
+  never touches is bit-identical; gbm confirmed identical)
+- **Run:** `runs/20260927-201927-backtest`
+
+| horizon | garch_t mean CRPS before -> after | median CRPS | 90% cov | mean PIT |
+|---|---|---|---|---|
+| 21d | 0.0613 -> 0.0613 | 0.0407 -> 0.0407 | 89.3% -> 89.3% | 0.544 -> 0.544 |
+| 63d | 0.1109 -> 0.1109 | 0.0718 -> 0.0718 | 89.8% -> 89.8% | 0.576 -> 0.576 |
+| 126d | 0.1786 -> 0.1787 | 0.1080 -> 0.1075 | 88.3% -> 88.3% | 0.610 -> 0.610 |
+| 252d | 0.4730 -> 0.3343 | 0.1761 -> 0.1762 | 84.8% -> 84.6% | 0.651 -> 0.651 |
+
+gbm at 252d: mean CRPS 0.3333. Diebold-Mariano `garch_t` vs gbm at 252d: +1.00 -> -0.28
+(bootstrap p 0.29 -> 0.77, not distinguishable either way). The two explosive cells:
+AMD 2018-11-30 CRPS 224 -> 0.56, INTC 2025-04-30 99 -> 3.6.
+
+**Read:** the fix does exactly one thing -- removes the explosive-path artifact that made
+`garch_t`'s 252-day mean CRPS look 31% worse than gbm -- and leaves every calibration
+number where it was. It does not make `garch_t` beat gbm at any horizon; nothing here
+changes the earlier conclusion that the persistent error is the drift, not the shape.
+Binding frequency, measured: a median 1-5% of paths ever touch the cap over 252 days (up
+to 23% for the most extreme fits), ~0.02% of simulated days.

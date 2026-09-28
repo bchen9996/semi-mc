@@ -91,6 +91,7 @@ models:
     o: 1
     q: 1
     rescale_factor: 100.0
+    variance_cap_multiple: 2.0  # cap simulated variance at 2x the in-sample peak; 0 = off
   garch_t_pu:             # garch_t + per-path parameter draws (MODEL_NOTES 18)
     covariance_scale: 1.0 # 0 reproduces garch_t exactly
     max_redraws: 10
