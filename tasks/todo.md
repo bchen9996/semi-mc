@@ -2349,9 +2349,13 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       loop now stops at 15:00 Central, not UTC hour 20 (which would have cut the last hour
       from 2026-11-01). **Owner steps pending**: a fine-grained token (Actions read/write,
       this repo only) and the cron-job.org entries, per the doc. **Actions minutes**: the repo
-      is private and the full schedule is roughly 500 min/day (~10,500/month, ~385/day of it
-      the monitor loop) against a 2,000-3,000 free allowance -- owner decision on the monitor
-      (keep / single-shot / rely on `cycle`'s built-in check), laid out at the end of the doc.
+      is private (metered: 2,000/month on Free, 3,000 on Pro). **Owner decision
+      2026-09-27: `monitor` gets no schedule** -- its cron is removed and it runs only on
+      demand, since the loop was ~385 of the full schedule's ~500 minutes a day; every
+      `cycle` already runs the same invalidation/time-stop check, so shadow stops are
+      enforced within ~20 minutes (a conservative bias on Stage 1's stop-outs; irrelevant
+      from Stage 2, where real stops rest at Alpaca). Remaining schedule: ~120 min/day,
+      ~2,500/month.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's evidence looks good; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).
