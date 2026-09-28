@@ -274,3 +274,35 @@ def test_run_placebo_carry_closes_every_placebo_position(tmp_path, config):
     assert result.closed == ["NVDA"]
     assert broker.list_positions() == []
     shadow_ledger.close()
+
+
+def test_placebo_open_batch_runs_once_per_day_like_the_real_agents(tmp_path, config):
+    cfg = _placebo_config(config, tmp_path)
+    real_ledger = _ledger(tmp_path, "real.sqlite3")
+    shadow_ledger = _ledger(tmp_path, "shadow.sqlite3")
+    real_ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    real_ledger.record_watchlist_item(AS_OF, "AMD", thesis="test")
+    broker = FakeBroker()
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0), "AMD": _quote(150.0)})
+
+    def batch():
+        return run_placebo_cycle(
+            "open_batch",
+            cfg,
+            broker,
+            shadow_ledger,
+            real_ledger,
+            market_data,
+            AS_OF,
+            NOW,
+            random.Random(1),
+        )
+
+    first = batch()
+    second = batch()
+
+    assert first.order_submitted is not None
+    assert second.skipped_reason == f"open_batch already ran for {AS_OF.date()}"
+    assert len(broker.list_positions()) == 1
+    real_ledger.close()
+    shadow_ledger.close()

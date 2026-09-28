@@ -2336,6 +2336,22 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       migrations (as every command does), so running this locally modifies
       `ledger/*.sqlite3` -- `git checkout -- ledger/` afterwards rather than committing a
       locally-migrated copy over CI's.
+      **External triggering built 2026-09-27** (`docs/external_scheduler.md`). The
+      scheduling data showed GitHub delivers this repo's `schedule` events 4-5 hours late
+      for *both* workflows -- every morning job landed in a burst around 17:10-18:20 UTC
+      (research ~12:30 CT, open-batch ~13:00 CT, paper decide ~14:00 ET, with ~1.5 h of
+      margin before its 15:30 ET cutoff). Built: a required `job` choice input on both
+      workflows' `workflow_dispatch`, with each job running only for its own name (this also
+      fixes a footgun: a manual "Run workflow" click used to fire every job at once); a
+      once-per-day guard on `open-batch` (real and placebo) and on the Reviewer call in
+      `eod-review`, since a late cron copy of either used to do real work a second time
+      (a second opening batch with fresh picks; a second paid Reviewer call); and the monitor
+      loop now stops at 15:00 Central, not UTC hour 20 (which would have cut the last hour
+      from 2026-11-01). **Owner steps pending**: a fine-grained token (Actions read/write,
+      this repo only) and the cron-job.org entries, per the doc. **Actions minutes**: the repo
+      is private and the full schedule is roughly 500 min/day (~10,500/month, ~385/day of it
+      the monitor loop) against a 2,000-3,000 free allowance -- owner decision on the monitor
+      (keep / single-shot / rely on `cycle`'s built-in check), laid out at the end of the doc.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's evidence looks good; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

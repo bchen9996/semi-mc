@@ -39,6 +39,17 @@ name: Intraday trading (S4)
 # `monitor` was pulled out of the shared concurrency group -- a 5.5-hour-long loop must
 # not block `cycle`/`carry` from running for the rest of the session.
 #
+# **External triggering (added 2026-09-27).** GitHub delivers this repo's `schedule`
+# events 4-5 hours late -- every morning job in both workflows landed in a burst around
+# 17:10-18:20 UTC during Stage 1, whatever its cron said (tasks/todo.md). The reliable
+# fix is outside GitHub: an external scheduler calls the `workflow_dispatch` API at the
+# exact minute with `{"ref": "main", "inputs": {"job": "<job>"}}`, and each job below
+# runs only for its own name. The crons stay as a fallback -- every job here is already
+# idempotent or safely repeatable, so a late cron firing after the external one is a
+# no-op or a harmless re-check. A manual "Run workflow" click now runs exactly the one
+# job picked, not every job at once (which is what the old bare `workflow_dispatch`
+# condition on each job did). Setup steps: docs/external_scheduler.md.
+#
 # `weekly-review` never accepts, rejects, or retires a playbook proposal -- confirmed
 # directly against the brief before building it: the schedule table names no agent for
 # `weekly_review`, and "Ask first: Accepting a playbook proposal"/"accepted or rejected
@@ -94,7 +105,22 @@ name: Intraday trading (S4)
 # `research`/`cycle` run, is what actually verifies the CLI itself works pre-go-live.
 
 "on":
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Which job to run (external scheduler or manual run)"
+        required: true
+        type: choice
+        options:
+          - preflight
+          - research
+          - preopen
+          - monitor
+          - open-batch
+          - cycle
+          - carry
+          - eod-review
+          - weekly-review
   schedule:
     # preflight: ~06:45 Central.
     - cron: "45 11 * * 1-5"
@@ -125,7 +151,7 @@ permissions:
 
 jobs:
   preflight:
-    if: github.event.schedule == '45 11 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '45 11 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'preflight')
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write
@@ -175,7 +201,7 @@ jobs:
           exit 1
 
   research:
-    if: github.event.schedule == '30 12 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '30 12 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'research')
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write
@@ -225,7 +251,7 @@ jobs:
           exit 1
 
   preopen:
-    if: github.event.schedule == '15 13 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '15 13 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'preopen')
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write
@@ -266,7 +292,7 @@ jobs:
           exit 1
 
   monitor:
-    if: github.event.schedule == '*/5 13-20 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '*/5 13-20 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'monitor')
     runs-on: ubuntu-latest
     timeout-minutes: 340
     steps:
@@ -287,8 +313,8 @@ jobs:
         # or a cron firing right at the boundary still does something); after that it keeps
         # checking every 5 minutes until either the internal 330-minute budget is spent
         # (leaving ~10 minutes of margin under the job's 340-minute timeout, itself under
-        # GitHub-hosted runners' hard 360-minute job cap) or the UTC hour reaches 20
-        # (roughly `carry`'s own close-out time), whichever comes first.
+        # GitHub-hosted runners' hard 360-minute job cap) or it is 15:00 Central (the
+        # close), whichever comes first.
         #
         # A single iteration failing all 3 push/command attempts is logged and the loop
         # moves on -- another attempt follows in 5 minutes regardless. Only 3 *consecutive*
@@ -335,7 +361,10 @@ jobs:
                 exit 1
               fi
             fi
-            if [ "$(date -u +%s)" -ge "$deadline" ] || [ "$(date -u +%H)" -ge 20 ]; then
+            # Stop at the 15:00 Central close, in Central time: a UTC-hour check (the
+            # original `date -u +%H -ge 20`) meant 15:00 CDT but 14:00 CST, cutting the
+            # last hour of every session from 2026-11-01 on.
+            if [ "$(date -u +%s)" -ge "$deadline" ] || [ "$(TZ=America/Chicago date +%H%M)" -ge 1500 ]; then
               break
             fi
             sleep 300
@@ -343,7 +372,7 @@ jobs:
           echo "monitor loop finished for this invocation"
 
   open-batch:
-    if: github.event.schedule == '30 13 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '30 13 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'open-batch')
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write
@@ -391,7 +420,7 @@ jobs:
           exit 1
 
   cycle:
-    if: github.event.schedule == '*/20 13-20 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '*/20 13-20 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'cycle')
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write
@@ -440,7 +469,7 @@ jobs:
           exit 1
 
   carry:
-    if: github.event.schedule == '45 19 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '45 19 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'carry')
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write
@@ -482,7 +511,7 @@ jobs:
           exit 1
 
   eod-review:
-    if: github.event.schedule == '15 20 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '15 20 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'eod-review')
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write
@@ -538,7 +567,7 @@ jobs:
           exit 1
 
   weekly-review:
-    if: github.event.schedule == '45 20 * * 5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '45 20 * * 5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'weekly-review')
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write

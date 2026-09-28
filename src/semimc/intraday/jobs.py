@@ -721,6 +721,19 @@ def run_cycle(
     result = CycleResult()
     intraday = config.intraday
 
+    # The opening batch runs once per day. Added 2026-09-27 with external triggering: the
+    # external scheduler fires `open-batch` on time and GitHub's own cron copy still
+    # lands hours later. A second pass would make a fresh Trader call that could pick
+    # different symbols (order ids only dedupe the same symbol) and duplicate the
+    # open-batch rows the "do nothing" benchmark reads. Keyed on the Trader call, not on
+    # proposals: a batch that ran and proposed nothing still ran. A batch that declined
+    # at pretrade (market not open yet) made no call, so a later trigger may still run it.
+    if cycle == "open_batch" and any(
+        row["cycle"] == "open_batch" for row in ledger.model_calls_for(as_of)
+    ):
+        result.skipped_reason = f"open_batch already ran for {pd.Timestamp(as_of).date()}"
+        return result
+
     pretrade_failures = check_intraday_pretrade(
         IntradayPretradeContext(now=now, config=config, broker=broker),
         shadow=intraday.shadow_mode,
@@ -1180,7 +1193,12 @@ def run_eod_review(
     proposals_today = ledger.proposals_for(as_of)
     reflections_today = ledger.reflections_for(as_of)
     nothing_to_grade = not proposals_today and not reflections_today
-    if any(r["content"].get("category") is not None for r in reflections_today):
+    if any(r["content"].get("category") is not None for r in reflections_today) or any(
+        row["role"] == "reviewer" for row in ledger.model_calls_for(as_of)
+    ):
+        # The graded-reflection check alone missed a day with proposals but no closes:
+        # nothing gets graded, so a second trigger (external scheduler + late cron, added
+        # 2026-09-27) would pay for a second Reviewer call. The recorded call covers it.
         return EodReviewResult(skipped_reason=f"eod_review already ran for {as_of}")
 
     # Local imports: `review.py` and `placebo.py` both import *from* this module at their
