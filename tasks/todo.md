@@ -2377,6 +2377,25 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
 
 ## Known gaps (deliberate, with reasons)
 
+- [ ] **`garch_t` simulates occasional explosive paths at long horizons** (found
+      2026-09-27 while backtesting `garch_t_pu`, see research_log.md and MODEL_NOTES
+      section 18). Fits with `nu` below 4 (infinite innovation kurtosis -- AMD at
+      2018-11-30: alpha 0.32, nu 3.3) or persistence at 1 (INTC at 2025-04-30) produce a
+      few paths with absurd moves: a single-day log return of 8.96 (a 7,800x day) in one
+      reproduction. Medians and coverage barely notice; the backtest's energy-form CRPS is
+      dominated by them (two cells made `garch_t`'s 252-day mean CRPS 31% worse than gbm,
+      where its median CRPS is 4% better). **Not fixed -- owner decision**: every fix
+      changes the flagship model's behaviour (a cap on simulated conditional variance, a
+      floor on `nu` such as 4.1, or clipping standardized innovations), which is the
+      "changing the default assumptions" ask-first boundary. The forecast journal's
+      quantile-grid CRPS is insensitive to it by construction.
+- [x] **Parameter uncertainty tried, no improvement** (2026-09-27): `garch_t_pu`
+      (MODEL_NOTES section 18) draws each path's GARCH parameters from the MLE's asymptotic
+      covariance, restricted to the stationary region. Backtested at 21/63/126/252 days
+      against `garch_t` and gbm: median CRPS within noise, coverage marginally narrower,
+      mean PIT unchanged (research_log.md). Kept as an opt-in model; not a default, not a
+      journal variant.
+
 - [ ] **Cross-run fit caching.** Fitted parameters are cached in memory within a run (one
       fit serves every horizon, roughly a 4x saving) and every fit is recorded in the run
       manifest, but nothing is reloaded across runs. Reconstructing a GARCH from stored

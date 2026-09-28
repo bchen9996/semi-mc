@@ -17,7 +17,7 @@ from .earnings_jumps import EarningsCalendarMissing, EarningsJumpModel
 from .factor import FactorModel
 from .factor_regime import FactorRegimeModel
 from .fhs import FilteredHistoricalSimulation
-from .garch_t import GarchFitError, GJRGarchTModel
+from .garch_t import GarchFitError, GJRGarchTModel, GJRGarchTParamUncertaintyModel
 from .gbm import GBMModel
 from .har import HARFitError, HARVolatilityModel
 from .merton import MertonFitError, MertonJumpDiffusion
@@ -37,6 +37,7 @@ __all__ = [
     "FitContext",
     "GBMModel",
     "GJRGarchTModel",
+    "GJRGarchTParamUncertaintyModel",
     "GarchFitError",
     "HARFitError",
     "HARVolatilityModel",
@@ -54,6 +55,7 @@ MODEL_NAMES = [
     "gbm",
     "bootstrap",
     "garch_t",
+    "garch_t_pu",
     "earnings_jumps",
     "factor",
     "factor_regime",
@@ -109,6 +111,15 @@ def build_model(
             block_length=config.models.bootstrap.block_length, dtype=dtype
         ),
         "garch_t": lambda: GJRGarchTModel(
+            p=config.models.garch_t.p,
+            o=config.models.garch_t.o,
+            q=config.models.garch_t.q,
+            rescale_factor=config.models.garch_t.rescale_factor,
+            dtype=dtype,
+        ),
+        "garch_t_pu": lambda: GJRGarchTParamUncertaintyModel(
+            covariance_scale=config.models.garch_t_pu.covariance_scale,
+            max_redraws=config.models.garch_t_pu.max_redraws,
             p=config.models.garch_t.p,
             o=config.models.garch_t.o,
             q=config.models.garch_t.q,

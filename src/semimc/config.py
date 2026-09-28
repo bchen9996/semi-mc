@@ -193,6 +193,16 @@ class GarchModelConfig(_Base):
     rescale_factor: float = Field(100.0, gt=0)
 
 
+class GarchParamUncertaintyConfig(_Base):
+    """`garch_t_pu` (MODEL_NOTES section 18): `garch_t` with each path drawing its own
+    parameters from the fit's asymptotic covariance. Orders and rescaling are shared
+    with `models.garch_t`. `covariance_scale` multiplies that covariance (0 reproduces
+    `garch_t` exactly); `max_redraws` bounds the rejection of invalid draws."""
+
+    covariance_scale: float = Field(1.0, ge=0)
+    max_redraws: int = Field(10, ge=0)
+
+
 class EarningsModelConfig(_Base):
     base_model: str = "garch_t"
     min_earnings_observations: int = Field(8, ge=2)
@@ -233,6 +243,7 @@ class BlendModelConfig(_Base):
 class ModelsConfig(_Base):
     bootstrap: BootstrapModelConfig = Field(default_factory=BootstrapModelConfig)
     garch_t: GarchModelConfig = Field(default_factory=GarchModelConfig)
+    garch_t_pu: GarchParamUncertaintyConfig = Field(default_factory=GarchParamUncertaintyConfig)
     earnings_jumps: EarningsModelConfig = Field(default_factory=EarningsModelConfig)
     factor: FactorModelConfig = Field(default_factory=FactorModelConfig)
     fhs: FHSModelConfig = Field(default_factory=FHSModelConfig)

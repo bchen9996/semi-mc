@@ -430,7 +430,9 @@ winning.
   forecast journal (`journal.py`) records garch_t under all three non-manual policies each
   month-end, before the outcome exists -- the first clean test of the choice, once enough
   independent origins accumulate (years, not months, at the longer horizons).
-- **Parameter uncertainty is not propagated** in any model.
+- **Parameter uncertainty is not propagated** in any default model. `garch_t_pu` (section
+  18) propagates it for GJR-GARCH-t and was backtested 2026-09-27: no improvement, because
+  the widths were already about right and the error is in the centre.
 - **Regime change is unmodelled.** Every model assumes the next period resembles a rolling
   five-year window.
 - **Monte Carlo error is separate from model error.** The convergence diagnostic quantifies
@@ -874,3 +876,49 @@ to completion unattended. In practice nothing here writes anywhere near that muc
 stdout, so this is a real but minor caveat, not a load-bearing one. This is a personal,
 single-user tool; building multi-job orchestration for it would be solving a problem
 nobody has.
+
+---
+
+## 18. Parameter uncertainty (`garch_t_pu`)
+
+`garch_t_pu` is `garch_t` with each simulated path drawing its own
+`(omega, alpha, gamma, beta, nu)` from the maximum-likelihood estimate's asymptotic normal
+approximation (`arch`'s `param_cov`). The fit is identical; only simulation changes.
+
+**Why the asymptotic draw, not a bootstrap refit.** Refitting on resampled data gives
+draws that respect the parameter space automatically, but costs one GARCH fit per draw --
+roughly 20x the backtest's fitting time for 20 refits. The normal approximation costs
+nothing extra and is the standard first-order treatment.
+
+**The stationary region.** Invalid draws (negative omega/alpha/beta, `alpha + gamma < 0`,
+persistence >= 1, `nu <= 2.05`) are redrawn. Read as Bayesian, this is the normal
+approximation to the likelihood times a flat prior restricted to stationary parameters --
+the true parameters must be stationary, so the retained draws legitimately sit away from
+the boundary. The consequence is that their mean persistence is lower than the point
+estimate: on the 2026-09-25 universe, acceptance was 67-96% and the shift in mean
+persistence under 0.004 for most names (ASML 0.010, AVGO 0.006). On the synthetic test
+fixture, where beta is poorly identified (standard error 0.10), the shift is large and
+the 21-day distribution comes out *narrower* than `garch_t`'s. A ticker whose point
+estimate is itself non-stationary gets no uncertainty.
+
+**Approximations.** The next-step variance is re-derived per draw from the point fit's
+last residual and filtered variance rather than re-filtering the whole series (exact would
+cost `n_paths x T` per ticker). Draws are independent across tickers.
+
+**The drift contract, per path.** The base class adds `mu_A - V/2` with `V` the point
+parameters' average variance. Each path adds `(V - V_i)/2` per day, so its own log drift is
+`mu_A - V_i/2` and `E[S_T]/S_0 = exp(mu_A T)` holds for every parameter set. The *log*
+mean across paths therefore sits slightly below `daily_log_drift` (`V` is convex in
+persistence), which is correct: the policy fixes the arithmetic drift (section 0).
+`covariance_scale = 0` reproduces `garch_t` bit for bit.
+
+**Result (research_log.md, 2026-09-27): no improvement** at 21, 63, 126 or 252 days. The
+intervals were already about the right width; the backtest's persistent error is the
+centre (mean PIT 0.54-0.65 for every model), which a mean-preserving spread cannot move.
+
+**A `garch_t` defect found along the way.** With `nu` below 4 (infinite innovation
+kurtosis) or persistence at 1, `garch_t`'s 252-day simulations occasionally contain
+explosive paths -- a single-day log return of 8.96 in one reproduction. Quantiles and
+coverage barely notice; the energy-form CRPS is dominated by them (two cells turned
+`garch_t`'s 252-day mean CRPS from roughly gbm's level to 31% worse). The forecast
+journal's quantile-grid CRPS is insensitive to this by construction.
