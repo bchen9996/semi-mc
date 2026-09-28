@@ -294,3 +294,54 @@ holdout at these settings, so none is. The higher-frequency evaluation machinery
 `min_gap_periods`, the automatic power diagnostic in `semimc signals`) stays in the
 codebase as a reusable tool for the next signal idea, not spent or discredited by this
 null result -- it did its job by answering the question honestly.
+
+
+## 2026-09-27 -- parameter uncertainty in GJR-GARCH-t (`garch_t_pu`): no improvement
+
+Not a Phase 4B signal, but the same append-only discipline applies to any model idea
+tried against the backtest. MODEL_NOTES section 8 listed "parameter uncertainty is not
+propagated" as a known flaw; `garch_t_pu` (MODEL_NOTES section 18) propagates it by giving
+each simulated path its own GARCH parameters, drawn from the MLE's asymptotic normal
+approximation restricted to the stationary region.
+
+- **Command:** `semimc backtest --models gbm,garch_t,garch_t_pu --horizons 21,63,126,252`
+  (default config: 177 month-end origins 2012-01..2026-09, 14 tickers, 2000 paths)
+- **Run:** `runs/20260927-195909-backtest`
+
+| horizon | model | mean CRPS | median CRPS | 50% cov | 90% cov | mean PIT |
+|---|---|---|---|---|---|---|
+| 21d | gbm | 0.0615 | 0.0424 | 53.2% | 91.3% | 0.546 |
+| 21d | garch_t | 0.0613 | 0.0407 | 49.8% | 89.3% | 0.544 |
+| 21d | garch_t_pu | 0.0613 | 0.0404 | 48.7% | 89.0% | 0.545 |
+| 63d | gbm | 0.1114 | 0.0755 | 51.6% | 91.7% | 0.577 |
+| 63d | garch_t | 0.1109 | 0.0718 | 48.2% | 89.8% | 0.576 |
+| 63d | garch_t_pu | 0.1113 | 0.0722 | 47.3% | 89.8% | 0.579 |
+| 126d | gbm | 0.1795 | 0.1120 | 47.6% | 90.0% | 0.607 |
+| 126d | garch_t | 0.1786 | 0.1080 | 45.5% | 88.3% | 0.610 |
+| 126d | garch_t_pu | 0.1797 | 0.1077 | 44.9% | 88.3% | 0.613 |
+| 252d | gbm | 0.3333 | 0.1839 | 42.5% | 87.2% | 0.644 |
+| 252d | garch_t | 0.4730 | 0.1761 | 42.2% | 84.8% | 0.651 |
+| 252d | garch_t_pu | 0.3360 | 0.1770 | 41.4% | 84.8% | 0.654 |
+
+No Diebold-Mariano difference against gbm is significant for either GARCH variant
+(bootstrap p >= 0.08 everywhere).
+
+**Read:** no gain. Median CRPS is within noise of `garch_t` at every horizon, coverage is
+marginally *narrower* (the stationarity restriction pulls retained draws toward lower
+persistence -- faster mean reversion), and mean PIT is untouched. That last point is the
+real story: the intervals were already about the right width at 21-126 days; the error
+the backtest keeps pointing at is the *centre* (mean PIT 0.54 -> 0.65 for every model),
+a verdict on the drift policy that a mean-preserving spread cannot fix. The forward
+forecast journal (`journal.py`, same day) is the clean test of that.
+
+**The 252d mean-CRPS gap (garch_t 0.473 vs 0.336) is not a parameter-uncertainty
+effect.** Two cells dominate it -- AMD at 2018-11-30 (CRPS 224) and INTC at 2025-04-30
+(CRPS 99) -- where `garch_t` simulated explosive paths: AMD's fit (alpha 0.32, nu 3.3;
+nu < 4 means infinite innovation kurtosis, so an extremely heavy-tailed variance process)
+produced a single-day log return of 8.96 on one seed; INTC's fit is integrated
+(persistence 1.000). `garch_t_pu` avoided those two cells by drawing different random
+numbers, not by modelling them better (re-seeding `garch_t` reproduces explosions of
+varying size). Recorded as a separate `garch_t` defect in tasks/todo.md.
+
+**Decision:** `garch_t_pu` stays in the codebase as an opt-in model (cheap to re-test,
+documented negative result), not a default and not a journal variant.

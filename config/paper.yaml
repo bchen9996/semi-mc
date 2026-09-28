@@ -91,6 +91,9 @@ models:
     o: 1
     q: 1
     rescale_factor: 100.0
+  garch_t_pu:             # garch_t + per-path parameter draws (MODEL_NOTES 18)
+    covariance_scale: 1.0 # 0 reproduces garch_t exactly
+    max_redraws: 10
   earnings_jumps:
     base_model: garch_t
     min_earnings_observations: 8

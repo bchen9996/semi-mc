@@ -86,6 +86,16 @@ def fit_gjr_garch_t(
         implied by the last observation; ``standardized_residuals`` are the in-sample
         ``e_t / sigma_t``, which have unit variance by construction.
     """
+    result, scaled = _fit_arch_gjr_t(log_returns, p, o, q, rescale_factor, label)
+    params, next_variance, standardized, _ = _unpack_fit(result, scaled, rescale_factor, label)
+    return params, next_variance, standardized
+
+
+def _fit_arch_gjr_t(
+    log_returns: pd.Series, p: int, o: int, q: int, rescale_factor: float, label: str
+):  # noqa: ANN202 -- returns (arch ARCHModelResult, scaled demeaned returns)
+    """The optimizer call itself, shared by :func:`fit_gjr_garch_t` and
+    :class:`GJRGarchTParamUncertaintyModel` (which also needs the fit's covariance)."""
     from arch import arch_model
 
     series = log_returns.dropna()
@@ -102,7 +112,16 @@ def fit_gjr_garch_t(
             result = model.fit(disp="off", show_warning=False)
         except Exception as exc:  # noqa: BLE001 - surfaced as a typed error
             raise GarchFitError(f"{label}: GARCH optimizer failed: {exc}") from exc
+    return result, scaled
 
+
+def _unpack_fit(
+    result, scaled: pd.Series, rescale_factor: float, label: str
+) -> tuple[dict[str, float], float, pd.Series, dict[str, float]]:  # noqa: ANN001
+    """Unscaled parameters, next-step variance and standardized residuals from an arch
+    result, plus the scaled-unit filter state (last residual, last conditional
+    variance) the parameter-uncertainty model needs to re-derive the next-step variance
+    under each drawn parameter set."""
     raw = {k: float(v) for k, v in result.params.items()}
     omega = raw.get("omega", np.nan)
     alpha = raw.get("alpha[1]", 0.0)
@@ -129,7 +148,8 @@ def fit_gjr_garch_t(
         "loglikelihood": float(result.loglikelihood),
     }
     standardized = (scaled / result.conditional_volatility).dropna()
-    return params, next_variance_scaled / scale_sq, standardized
+    state = {"last_resid_scaled": last_resid, "last_variance_scaled": last_variance}
+    return params, next_variance_scaled / scale_sq, standardized, state
 
 
 class GJRGarchTModel(BaseReturnModel):
@@ -286,6 +306,216 @@ class GJRGarchTModel(BaseReturnModel):
                     )
                     for t in self.tickers
                 },
+            }
+        )
+        return info
+
+
+_PARAM_ORDER = ("omega", "alpha[1]", "gamma[1]", "beta[1]", "nu")
+
+
+class GJRGarchTParamUncertaintyModel(GJRGarchTModel):
+    """GJR-GARCH(1,1)-t with parameter uncertainty propagated into the paths
+    (MODEL_NOTES section 18). Everything about the fit is :class:`GJRGarchTModel`'s; the
+    difference is simulation: each path draws its own ``(omega, alpha, gamma, beta, nu)``
+    from the maximum-likelihood estimate's asymptotic normal approximation (``arch``'s
+    ``param_cov``), then runs the ordinary recursion under that set.
+
+    - **Invalid draws are redrawn**, up to ``max_redraws`` rounds (negative omega/alpha/
+      beta, ``alpha + gamma < 0``, persistence >= 1, ``nu <= MIN_NU``); anything still
+      invalid falls back to the point estimate. The share of paths that got a genuine
+      draw is reported in :meth:`describe` -- the normal approximation is poor near the
+      stationarity boundary, and this makes its failures visible. A ticker whose point
+      estimate is itself non-stationary gets no uncertainty (the parent model's
+      fallback applies unchanged).
+    - **The next-step variance is re-derived per draw** from the point fit's last
+      residual and filtered variance. Re-filtering the whole training series under each
+      draw would be exact but costs ``n_paths x T`` per ticker; the approximation keeps
+      the filter state and changes only the one-step update.
+    - **The drift contract holds exactly per path.** The base class adds
+      ``mu_A - V/2`` with ``V`` the *point* parameters' average variance; each path
+      here adds ``(V - V_i) / 2`` per day so its own drift is ``mu_A - V_i/2`` -- the
+      arithmetic drift is exact for every parameter set, not just on average.
+    - Draws are independent across tickers (the cross-ticker covariance of parameter
+      estimates is not estimated). ``covariance_scale`` multiplies the covariance: ``0``
+      reproduces ``garch_t`` exactly (a wiring check), ``1`` is the asymptotic estimate.
+    """
+
+    name = "garch_t_pu"
+
+    def __init__(
+        self,
+        covariance_scale: float = 1.0,
+        max_redraws: int = 10,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        if (self.p, self.o, self.q) != (1, 1, 1):
+            raise ValueError("garch_t_pu supports GJR-GARCH(1,1) only (p = o = q = 1)")
+        self.covariance_scale = float(covariance_scale)
+        self.max_redraws = int(max_redraws)
+        self._theta: dict[str, np.ndarray] = {}  # scaled-unit point estimate, _PARAM_ORDER
+        self._cov_cholesky: dict[str, np.ndarray | None] = {}
+        self._state: dict[str, dict[str, float]] = {}
+        self.last_valid_fraction: dict[str, float] = {}
+
+    def _fit_shape(self, log_returns: pd.DataFrame, context: FitContext) -> None:
+        standardized: dict[str, pd.Series] = {}
+        for ticker in self.tickers:
+            result, scaled = _fit_arch_gjr_t(
+                log_returns[ticker], self.p, self.o, self.q, self.rescale_factor, ticker
+            )
+            params, next_variance, std_resid, state = _unpack_fit(
+                result, scaled, self.rescale_factor, ticker
+            )
+            self.params[ticker] = params
+            self._h0[ticker] = next_variance
+            self._state[ticker] = state
+            standardized[ticker] = std_resid
+            self._theta[ticker] = np.array([float(result.params[k]) for k in _PARAM_ORDER])
+            cov = result.param_cov.loc[list(_PARAM_ORDER), list(_PARAM_ORDER)].to_numpy()
+            usable = (
+                self.covariance_scale > 0
+                and params["persistence"] < 1.0 - 1e-8
+                and np.isfinite(cov).all()
+            )
+            self._cov_cholesky[ticker] = (
+                nearest_psd_cholesky(cov * self.covariance_scale) if usable else None
+            )
+
+        if len(self.tickers) == 1 or self.force_independent:
+            self._resid_correlation = np.eye(len(self.tickers))
+        else:
+            frame = pd.DataFrame(standardized).dropna(how="any")
+            correlation = frame.loc[:, self.tickers].corr().fillna(0.0).to_numpy(dtype=float)
+            np.fill_diagonal(correlation, 1.0)
+            self._resid_correlation = correlation
+
+    # -- parameter draws ------------------------------------------------------------
+
+    @staticmethod
+    def _valid(draws: np.ndarray) -> np.ndarray:
+        omega, alpha, gamma, beta, nu = draws.T
+        return (
+            (omega > 0)
+            & (alpha >= 0)
+            & (alpha + gamma >= 0)
+            & (beta >= 0)
+            & (alpha + gamma / 2.0 + beta < 1.0 - 1e-6)
+            & (nu > MIN_NU)
+        )
+
+    def _draw_parameter_sets(
+        self, ticker: str, n_paths: int, rng: np.random.Generator
+    ) -> dict[str, np.ndarray]:
+        """Per-path parameters in unscaled daily units, each shape ``(n_paths,)``, plus
+        ``h1`` (next-step variance) and ``valid`` (bool: a genuine draw, not fallback)."""
+        theta = self._theta[ticker]
+        chol = self._cov_cholesky[ticker]
+        draws = np.broadcast_to(theta, (n_paths, theta.size)).copy()
+        valid = np.zeros(n_paths, dtype=bool)
+        if chol is not None:
+            pending = np.arange(n_paths)
+            for _ in range(self.max_redraws + 1):
+                if pending.size == 0:
+                    break
+                candidate = theta + rng.standard_normal((pending.size, theta.size)) @ chol.T
+                ok = self._valid(candidate)
+                draws[pending[ok]] = candidate[ok]
+                valid[pending[ok]] = True
+                pending = pending[~ok]
+            # Anything still pending keeps the point estimate already in `draws`.
+
+        scale_sq = self.rescale_factor**2
+        omega_s, alpha, gamma, beta, nu = draws.T
+        state = self._state[ticker]
+        e_last = state["last_resid_scaled"]
+        h_last = state["last_variance_scaled"]
+        h1_scaled = omega_s + (alpha + gamma * (e_last < 0)) * e_last**2 + beta * h_last
+        return {
+            "omega": omega_s / scale_sq,
+            "alpha": alpha,
+            "gamma": gamma,
+            "beta": beta,
+            "nu": nu,
+            "h1": np.maximum(h1_scaled / scale_sq, 1e-14),
+            "valid": valid,
+        }
+
+    @staticmethod
+    def _average_variance(sets: dict[str, np.ndarray], horizon: int) -> np.ndarray:
+        """Per-path mean conditional variance over ``horizon`` (daily units), the same
+        closed form :meth:`GJRGarchTModel.annualized_variance` uses, vectorized."""
+        persistence = sets["alpha"] + sets["gamma"] / 2.0 + sets["beta"]
+        long_run = sets["omega"] / (1.0 - persistence)
+        geometric = (1.0 - persistence**horizon) / (horizon * (1.0 - persistence))
+        return np.maximum(long_run + (sets["h1"] - long_run) * geometric, 1e-14)
+
+    # -- simulation -----------------------------------------------------------------
+
+    def _simulate_zero_mean(
+        self, n_paths: int, horizon: int, rng: np.random.Generator
+    ) -> np.ndarray:
+        if all(self._cov_cholesky[t] is None for t in self.tickers):
+            return super()._simulate_zero_mean(n_paths, horizon, rng)
+
+        sets = {t: self._draw_parameter_sets(t, n_paths, rng) for t in self.tickers}
+        self.last_valid_fraction = {t: float(sets[t]["valid"].mean()) for t in self.tickers}
+        innovations = self._draw_innovations_per_path(sets, n_paths, horizon, rng)
+        tdpy = self.context.trading_days_per_year if self.context else 252
+        point_variance = self.annualized_variance(horizon) / tdpy
+
+        out = np.empty((n_paths, horizon, len(self.tickers)), dtype=float)
+        for index, ticker in enumerate(self.tickers):
+            par = sets[ticker]
+            variance = par["h1"].copy()
+            # The GARCH recursion is inherently sequential in time; paths stay vectorized.
+            for step in range(horizon):
+                shock = np.sqrt(variance) * innovations[:, step, index]
+                out[:, step, index] = shock
+                variance = (
+                    par["omega"]
+                    + (par["alpha"] + par["gamma"] * (shock < 0.0)) * shock**2
+                    + par["beta"] * variance
+                )
+                np.maximum(variance, 1e-14, out=variance)
+            if self._cov_cholesky[ticker] is not None:
+                ito = 0.5 * (point_variance[ticker] - self._average_variance(par, horizon))
+                out[:, :, index] += ito[:, None]
+        return out
+
+    def _draw_innovations_per_path(
+        self,
+        sets: dict[str, dict[str, np.ndarray]],
+        n_paths: int,
+        horizon: int,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        """As :meth:`GJRGarchTModel._draw_innovations`, with each path's own ``nu``."""
+        n_tickers = len(self.tickers)
+        if n_tickers == 1:
+            nu = np.maximum(sets[self.tickers[0]]["nu"], MIN_NU)[:, None]
+            raw = rng.standard_t(df=nu, size=(n_paths, horizon))
+            return (raw / np.sqrt(nu / (nu - 2.0)))[:, :, None]
+
+        assert self._resid_correlation is not None
+        cholesky = nearest_psd_cholesky(self._resid_correlation)
+        normals = rng.standard_normal(size=(n_paths, horizon, n_tickers)) @ cholesky.T
+        uniforms = stats.norm.cdf(normals)
+        np.clip(uniforms, 1e-12, 1 - 1e-12, out=uniforms)
+        out = np.empty_like(uniforms)
+        for index, ticker in enumerate(self.tickers):
+            nu = np.maximum(sets[ticker]["nu"], MIN_NU)[:, None]
+            out[:, :, index] = stats.t.ppf(uniforms[:, :, index], df=nu) / np.sqrt(nu / (nu - 2.0))
+        return out
+
+    def describe(self) -> dict:
+        info = super().describe()
+        info.update(
+            {
+                "covariance_scale": self.covariance_scale,
+                "uncertainty_applied": {t: self._cov_cholesky[t] is not None for t in self.tickers},
+                "last_valid_fraction": dict(self.last_valid_fraction),
             }
         )
         return info
