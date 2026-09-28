@@ -2322,9 +2322,15 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       spend summary for recalibrating the $10 placeholder. New `IntradayLedger.briefs_for`.
       Its first real run (2026-09-23..25) passed 2/8, and surfaced two more findings
       beyond the timezone bug: **no `eod.md` has ever been committed** (`reports/` holds
-      only one `weekly_review.md`) -- eod-review either never fired or failed every day;
-      the Actions run history (not visible locally, no `gh` CLI) is the next place to
-      look; and every job that did run landed 3-5 hours after its cron (research at
+      only one `weekly_review.md`) -- **explained and fixed the same day**: not a failed
+      job, a clean skip. `run_eod_review` returned "nothing to review yet today" whenever
+      a day had no proposals and no closes, which the timezone bug made every day; it
+      exited 0 with nothing to commit. Beyond that one cause, the skip was a design flaw:
+      a legitimately quiet day also lost its report and its placebo comparison, which the
+      brief wants in every daily report. Now a quiet day writes the mechanical report
+      (blotter, P&L, benchmarks incl. placebo, scorecard numbers, monitor cadence) and
+      skips only the Reviewer's model call, with each Reviewer-only section saying so
+      rather than showing the false "not yet built" placeholder; and every job that did run landed 3-5 hours after its cron (research at
       ~17:29 UTC vs. 12:30 scheduled, both days), so research and open-batch both ran
       after midday Central, not before the open. Opening a ledger applies pending schema
       migrations (as every command does), so running this locally modifies

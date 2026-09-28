@@ -1136,6 +1136,8 @@ class EodReviewResult:
     reflections_updated: int = 0
     playbook_proposal_written: bool = False
     skipped_reason: str | None = None
+    # The report was written but the Reviewer deliberately not called (a quiet day).
+    reviewer_skipped_reason: str | None = None
 
 
 def run_eod_review(
@@ -1159,12 +1161,17 @@ def run_eod_review(
     `category`/`process_grade`/`lesson` fields Phase 9a's `reflect.py` left `None`), the
     closing market report, and a playbook proposal.
 
-    Skips without spending anything if there's nothing to review yet today (no proposals
-    and no reflections) -- there's nothing for the Reviewer to grade before the loop has
-    actually run a day, the same "nothing to do" shape `run_research`'s own idempotency
-    check has, just framed around emptiness rather than a prior run. Idempotent per
-    `as_of` for a real day: if today's reflections already carry a non-null `category`,
-    this already ran (mirrors `run_research`'s `watchlist_for(as_of)`-non-empty check).
+    On a quiet day (no proposals and no reflections) the mechanical report is still
+    written -- blotter, P&L, benchmarks including the placebo, scorecard numbers, monitor
+    cadence -- but the Reviewer is not called: there is nothing to grade, so nothing
+    worth paying for. Changed 2026-09-27: this used to skip the whole report, so every
+    Stage-1 day (zero proposals, before the `_intraday_now` timezone fix) produced no
+    eod.md at all, and a legitimately quiet day lost its placebo comparison -- the brief
+    wants it in every daily report, and "the agent held back while the placebo traded"
+    is exactly the kind of day it exists to measure. Idempotent per `as_of` for a graded
+    day: if today's reflections already carry a non-null `category`, this already ran
+    (mirrors `run_research`'s `watchlist_for(as_of)`-non-empty check); a quiet-day re-run
+    just rewrites the same mechanical report.
 
     `shadow_ledger` is optional -- `None` skips the placebo benchmark gracefully (Phase 7
     might not be enabled in every deployment) rather than requiring a second ledger no
@@ -1172,8 +1179,7 @@ def run_eod_review(
     """
     proposals_today = ledger.proposals_for(as_of)
     reflections_today = ledger.reflections_for(as_of)
-    if not proposals_today and not reflections_today:
-        return EodReviewResult(skipped_reason="nothing to review yet today")
+    nothing_to_grade = not proposals_today and not reflections_today
     if any(r["content"].get("category") is not None for r in reflections_today):
         return EodReviewResult(skipped_reason=f"eod_review already ran for {as_of}")
 
@@ -1195,34 +1201,6 @@ def run_eod_review(
     intraday = config.intraday
     research_cfg = intraday.research
     tickers = config.universe.tickers
-
-    # `news_lookback_hours` (16h, tuned for the Researcher's overnight coverage) reaches
-    # well back past this session's own 08:30 open when called near the 15:15 close --
-    # already covers the whole trading day, so no separate lookback config is needed.
-    news_start = now - dt.timedelta(hours=research_cfg.news_lookback_hours)
-    articles = news_client.get_news(tickers, start=news_start, end=now)
-    clean_text = {
-        article.id: (
-            sanitize_and_log(
-                article.headline, ledger=ledger, source=article.source, context="eod_review news"
-            ),
-            sanitize_and_log(
-                article.summary, ledger=ledger, source=article.source, context="eod_review news"
-            ),
-        )
-        for article in articles
-    }
-    capped_articles = _cap_news_per_symbol(articles, research_cfg.max_headlines_per_symbol)
-    news_sections = [
-        {
-            "headline": clean_text[article.id][0],
-            "summary": clean_text[article.id][1],
-            "symbols": article.symbols,
-            "created_at": str(article.created_at),
-            "source": article.source,
-        }
-        for article in capped_articles
-    ]
 
     soxx_return = None
     try:
@@ -1259,6 +1237,49 @@ def run_eod_review(
 
     scorecard = process_scorecard(ledger, intraday, as_of)
     attribution = day_attribution(reflections_today, soxx_return)
+
+    if nothing_to_grade:
+        reviewer_note = "nothing to grade today"
+        report = build_eod_report(
+            ledger,
+            as_of,
+            benchmarks=benchmarks,
+            process_scorecard=scorecard,
+            attribution=attribution,
+            reviewer_note=f"{reviewer_note} (no proposals and no closed trades)",
+        )
+        out_path = config.path(intraday.reports_dir) / str(pd.Timestamp(as_of).date()) / "eod.md"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(render_eod_markdown(report), encoding="utf-8")
+        return EodReviewResult(report_path=str(out_path), reviewer_skipped_reason=reviewer_note)
+
+    # `news_lookback_hours` (16h, tuned for the Researcher's overnight coverage) reaches
+    # well back past this session's own 08:30 open when called near the 15:15 close --
+    # already covers the whole trading day, so no separate lookback config is needed.
+    news_start = now - dt.timedelta(hours=research_cfg.news_lookback_hours)
+    articles = news_client.get_news(tickers, start=news_start, end=now)
+    clean_text = {
+        article.id: (
+            sanitize_and_log(
+                article.headline, ledger=ledger, source=article.source, context="eod_review news"
+            ),
+            sanitize_and_log(
+                article.summary, ledger=ledger, source=article.source, context="eod_review news"
+            ),
+        )
+        for article in articles
+    }
+    capped_articles = _cap_news_per_symbol(articles, research_cfg.max_headlines_per_symbol)
+    news_sections = [
+        {
+            "headline": clean_text[article.id][0],
+            "summary": clean_text[article.id][1],
+            "symbols": article.symbols,
+            "created_at": str(article.created_at),
+            "source": article.source,
+        }
+        for article in capped_articles
+    ]
 
     playbook_path = config.path(intraday.playbook_path)
     playbook_current = (
