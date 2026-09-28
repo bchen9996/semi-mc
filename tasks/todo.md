@@ -2377,18 +2377,16 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
 
 ## Known gaps (deliberate, with reasons)
 
-- [ ] **`garch_t` simulates occasional explosive paths at long horizons** (found
-      2026-09-27 while backtesting `garch_t_pu`, see research_log.md and MODEL_NOTES
-      section 18). Fits with `nu` below 4 (infinite innovation kurtosis -- AMD at
-      2018-11-30: alpha 0.32, nu 3.3) or persistence at 1 (INTC at 2025-04-30) produce a
-      few paths with absurd moves: a single-day log return of 8.96 (a 7,800x day) in one
-      reproduction. Medians and coverage barely notice; the backtest's energy-form CRPS is
-      dominated by them (two cells made `garch_t`'s 252-day mean CRPS 31% worse than gbm,
-      where its median CRPS is 4% better). **Not fixed -- owner decision**: every fix
-      changes the flagship model's behaviour (a cap on simulated conditional variance, a
-      floor on `nu` such as 4.1, or clipping standardized innovations), which is the
-      "changing the default assumptions" ask-first boundary. The forecast journal's
-      quantile-grid CRPS is insensitive to it by construction.
+- [x] **`garch_t` simulated occasional explosive paths at long horizons -- fixed
+      2026-09-27** (owner chose option (b)). Fits with `nu` below 4 (AMD at 2018-11-30:
+      alpha 0.32, nu 3.3) or persistence at 1 (INTC at 2025-04-30) produced a few absurd
+      paths (a 7,800x day in one reproduction) that dominated the backtest's energy-form
+      CRPS while barely moving quantiles. Now each simulated conditional variance is
+      capped at `models.garch_t.variance_cap_multiple` (2.0, fixed before backtesting)
+      times the fit's in-sample peak. Backtest before/after: 252-day mean CRPS 0.473 ->
+      0.334 (gbm 0.333), every other number unchanged past the fourth decimal
+      (research_log.md). Not addressed: single extreme t innovations at `nu` near 3 can
+      still produce a very large one-day move (the cap bounds variance, not innovations).
 - [x] **Parameter uncertainty tried, no improvement** (2026-09-27): `garch_t_pu`
       (MODEL_NOTES section 18) draws each path's GARCH parameters from the MLE's asymptotic
       covariance, restricted to the stationary region. Backtested at 21/63/126/252 days

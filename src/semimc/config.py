@@ -191,6 +191,11 @@ class GarchModelConfig(_Base):
     o: int = Field(1, ge=0)
     q: int = Field(1, ge=1)
     rescale_factor: float = Field(100.0, gt=0)
+    # Caps each simulated conditional variance at this multiple of the fit's highest
+    # in-sample conditional variance; 0 disables. Added 2026-09-27 after explosive
+    # long-horizon paths (nu < 4, or persistence at 1) -- MODEL_NOTES section 3. The 2.0
+    # was fixed before any backtest was run with it, not tuned on one.
+    variance_cap_multiple: float = Field(2.0, ge=0)
 
 
 class GarchParamUncertaintyConfig(_Base):

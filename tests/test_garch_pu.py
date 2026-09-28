@@ -122,3 +122,61 @@ def test_build_model_wires_the_config(config):
     assert isinstance(model, GJRGarchTParamUncertaintyModel)
     assert model.covariance_scale == 0.5
     assert model.max_redraws == 3
+
+
+# -- the simulated-variance cap (GJRGarchTModel, inherited by garch_t_pu) -----------------
+
+
+def test_default_cap_is_twice_the_in_sample_peak_conditional_variance(panel, context):
+    from semimc.models.garch_t import _fit_arch_gjr_t
+
+    model = GJRGarchTModel().fit(panel.loc[:, ["NVDA"]], context)
+    result, _ = _fit_arch_gjr_t(panel["NVDA"], 1, 1, 1, 100.0, "NVDA")
+    peak = float(result.conditional_volatility.max() ** 2) / 100.0**2
+    assert model._variance_cap["NVDA"] == pytest.approx(2.0 * peak)
+
+
+def test_the_cap_bounds_every_simulated_step(panel, context):
+    # A deliberately tight cap (a tenth of the in-sample peak) so it binds on every path:
+    # the cross-path std of each day's shock can then never exceed sqrt(cap).
+    model = GJRGarchTModel(variance_cap_multiple=0.1).fit(panel.loc[:, ["NVDA"]], context)
+    shocks = model._simulate_zero_mean(20_000, 40, np.random.default_rng(4))[:, 1:, 0]
+    cap = model._variance_cap["NVDA"]
+    assert (shocks.std(axis=0) <= np.sqrt(cap) * 1.05).all()
+
+
+@pytest.mark.parametrize("disabled", [None, 0.0])
+def test_a_disabled_cap_matches_a_cap_too_high_to_bind(panel, context, disabled):
+    off = GJRGarchTModel(variance_cap_multiple=disabled).fit(panel.loc[:, ["NVDA"]], context)
+    huge = GJRGarchTModel(variance_cap_multiple=1e12).fit(panel.loc[:, ["NVDA"]], context)
+    assert off._variance_cap == {}
+    np.testing.assert_array_equal(
+        off.simulate(400, 60, np.random.default_rng(9)),
+        huge.simulate(400, 60, np.random.default_rng(9)),
+    )
+
+
+def test_the_cap_applies_to_garch_t_pu_paths_too(panel, context):
+    pu = GJRGarchTParamUncertaintyModel(variance_cap_multiple=0.1).fit(
+        panel.loc[:, ["NVDA"]], context
+    )
+    shocks = pu.simulate(20_000, 40, np.random.default_rng(4))[:, 1:, 0]
+    cap = pu._variance_cap["NVDA"]
+    # simulate() adds drift and the per-path Ito term; both are tiny next to sqrt(cap).
+    assert (shocks.std(axis=0) <= np.sqrt(cap) * 1.1).all()
+
+
+def test_config_zero_disables_the_cap(config):
+    cfg = config.model_copy(
+        update={
+            "models": config.models.model_copy(
+                update={
+                    "garch_t": config.models.garch_t.model_copy(
+                        update={"variance_cap_multiple": 0.0}
+                    )
+                }
+            )
+        }
+    )
+    assert build_model("garch_t", cfg).variance_cap_multiple is None
+    assert build_model("garch_t", config).variance_cap_multiple == 2.0

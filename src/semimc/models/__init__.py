@@ -115,6 +115,7 @@ def build_model(
             o=config.models.garch_t.o,
             q=config.models.garch_t.q,
             rescale_factor=config.models.garch_t.rescale_factor,
+            variance_cap_multiple=config.models.garch_t.variance_cap_multiple,
             dtype=dtype,
         ),
         "garch_t_pu": lambda: GJRGarchTParamUncertaintyModel(
@@ -124,6 +125,7 @@ def build_model(
             o=config.models.garch_t.o,
             q=config.models.garch_t.q,
             rescale_factor=config.models.garch_t.rescale_factor,
+            variance_cap_multiple=config.models.garch_t.variance_cap_multiple,
             dtype=dtype,
         ),
         "factor": lambda: FactorModel(dtype=dtype),
