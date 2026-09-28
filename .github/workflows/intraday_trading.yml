@@ -32,12 +32,18 @@ name: Intraday trading (S4)
 # GitHub-scheduled firings a day all landing on time, one successful firing now keeps
 # checking and committing on its own every 5 minutes for up to ~5.5 hours (comfortably
 # under GitHub-hosted runners' hard 6-hour job cap) or until the trading day's own close,
-# whichever comes first -- see the job's own step comment for the loop itself. The `*/5`
-# cron trigger is unchanged and now pure redundancy: an overlapping second loop is
-# harmless (each iteration's own fetch/reset/push-retry already handles concurrent
-# writers safely, the same pattern every other job here uses), which is exactly why
-# `monitor` was pulled out of the shared concurrency group -- a 5.5-hour-long loop must
-# not block `cycle`/`carry` from running for the rest of the session.
+# whichever comes first -- see the job's own step comment for the loop itself. An
+# overlapping second loop is harmless (each iteration's own fetch/reset/push-retry already
+# handles concurrent writers safely), which is why `monitor` sits outside the shared
+# concurrency group -- a 5.5-hour-long loop must not block `cycle`/`carry`.
+#
+# **Since 2026-09-27 `monitor` has no cron and runs only on demand** (owner decision):
+# the repo is private, so Actions minutes are metered, and the loop was ~385 of the
+# schedule's ~500 minutes a day. Every `cycle` runs the same invalidation/time-stop check
+# (`intraday/jobs.py::run_cycle`), so with cycles triggered on time externally
+# (docs/external_scheduler.md) shadow stops are enforced within ~20 minutes -- which
+# makes Stage 1's shadow stop-outs slightly worse than live ones, a conservative bias --
+# and from Stage 2 on real stop orders rest at Alpaca regardless of any job.
 #
 # **External triggering (added 2026-09-27).** GitHub delivers this repo's `schedule`
 # events 4-5 hours late -- every morning job in both workflows landed in a burst around
@@ -130,8 +136,11 @@ name: Intraday trading (S4)
     - cron: "15 13 * * 1-5"
     # open-batch: ~08:30 Central.
     - cron: "30 13 * * 1-5"
-    # monitor: every 5 minutes, ~08:35-15:00 Central -- no LLM call, cheap to run often.
-    - cron: "*/5 13-20 * * 1-5"
+    # monitor: no cron (owner decision 2026-09-27, to keep private-repo Actions minutes
+    # down -- each late firing started a loop of up to 5.5 hours). Every `cycle` already
+    # runs the same invalidation/time-stop check, so shadow stops are enforced within
+    # ~20 minutes; from Stage 2 on, real stop orders rest at Alpaca regardless. The job
+    # stays available on demand via workflow_dispatch (job: monitor).
     # cycle: every 20 minutes, ~08:35-14:50 Central. Upper bound widened to hour 20 (not
     # 19) -- found 2026-09-26: under CST (after 2026-11-01's DST change), a 13-19 UTC range
     # maps to Central 07:00-13:55, cutting off ~55 minutes before the real ~14:50 close.
@@ -292,7 +301,7 @@ jobs:
           exit 1
 
   monitor:
-    if: github.event.schedule == '*/5 13-20 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'monitor')
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'monitor'
     runs-on: ubuntu-latest
     timeout-minutes: 340
     steps:

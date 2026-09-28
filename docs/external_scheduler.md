@@ -25,19 +25,19 @@ The repo is **private**, so Actions minutes are metered: 2,000 a month on GitHub
 3,000 on Pro. Past that, runs either stop or are billed at about $0.008 a minute, depending
 on your spending limit (**Settings -> Billing and plans -> Plans and usage**).
 
-A rough estimate of what the full schedule uses, per trading day:
+A rough estimate of what the schedule below uses, per trading day:
 
 | what | minutes/day |
 |---|---|
-| `monitor` loop (two invocations covering 08:35-15:00 CT) | ~385 |
 | `cycle`, 18 runs at ~3 min each (checkout, `uv sync`, claude CLI install, run) | ~55 |
 | other intraday jobs (preflight, research, preopen, open-batch, carry, eod-review) | ~20 |
 | paper `decide-and-execute`, `mark` (x2 sleeves every 30 min), `report` | ~45 |
-| **total** | **~500** |
+| **total** | **~120** |
 
-That's about **10,500 minutes a month**, far over the free allowance. The monitor loop is
-three quarters of it. Before setting this up, decide on the monitor. There's more on it
-under "The monitor loop" at the end.
+That's about **2,500 minutes a month**: a few dollars over GitHub Free's allowance, inside
+Pro's. The `monitor` loop would add ~385 minutes a day (~8,000 a month), which is why it
+has no schedule (owner decision 2026-09-27; see "The monitor loop" at the end). Late
+fallback-cron runs add a little on top.
 
 ---
 
@@ -100,8 +100,6 @@ uses the same request settings:
 | `research` | 07:30 | `30 7 * * 1-5` | runs once per day |
 | `preopen` | 08:15 | `15 8 * * 1-5` | |
 | `open-batch` | 08:32 | `32 8 * * 1-5` | 2 min after the open, so pretrade sees the market open; runs once per day |
-| `monitor` | 08:35 | `35 8 * * 1-5` | first loop, runs ~5.5 h to ~14:05 (see "The monitor loop") |
-| `monitor` | 14:00 | `0 14 * * 1-5` | second loop, covers the last hour; stops at 15:00 CT |
 | `cycle` | every 20 min, 09:00-14:40 | `*/20 9-14 * * 1-5` | the open-batch covers 08:30 |
 | `carry` | 14:45 | `45 14 * * 1-5` | |
 | `eod-review` | 15:15 | `15 15 * * 1-5` | one Reviewer call per day |
@@ -127,41 +125,37 @@ market, the same as it does today.
   table's times, each running one job.
 - **After the close:** run the readiness report (`tasks/todo.md` has the exact command). Its
   "first activity (UTC)" column should read about 11:45 (06:45 CT), not 17:29. The monitor
-  column should show checks about 5 minutes apart.
+  column should show checks about 20 minutes apart (each cycle records one).
 - **On cron-job.org:** each job's execution history should show HTTP 204. Anything else is
   a failed trigger.
 
 ## The late cron copies
 
 The original crons still fire, hours late. The once-per-day guards make most of those
-no-ops, but two kinds still do work and use minutes:
-
-- A late `cycle` cron runs an extra Trader cycle mid-afternoon, capped by the daily budget.
-- A late `monitor` cron starts another loop of up to 5.5 hours. It's harmless to results
-  but costly in minutes.
-
-Once the external triggers have run cleanly for about a week, consider removing the
-`cycle` and `monitor` crons from `intraday_trading.yml` (their `if:` conditions keep working
-for dispatch without them). The single-fire jobs' crons are cheap to keep as a fallback.
+no-ops. The one kind that still does work is a late `cycle` cron: an extra Trader cycle
+mid-afternoon, capped by the daily budget, costing a few minutes of runner time and about
+a cent of model spend each. Once the external triggers have run cleanly for about a week,
+consider removing the `cycle` cron from `intraday_trading.yml` (its `if:` condition keeps
+working for dispatch without it). The single-fire jobs' crons are cheap to keep as a
+fallback. `monitor` already has no cron.
 
 ## The monitor loop
 
-`monitor` enforces invalidation and time stops every 5 minutes. `cycle` already runs the
-same check at the start of every cycle (`intraday/jobs.py::run_cycle`), so with reliable
-20-minute cycles the loop adds 5-minute granularity between cycles, and only for
-**shadow** positions: from Stage 2 on, real stop-loss orders rest at Alpaca and trigger
-regardless of any job.
+`monitor` enforces invalidation and time stops every 5 minutes for up to 5.5 hours per run.
+`cycle` already runs the same check at the start of every cycle (`intraday/jobs.py::run_cycle`),
+so with reliable 20-minute cycles the loop only adds 5-minute granularity between cycles,
+and only for **shadow** positions: from Stage 2 on, real stop-loss orders rest at Alpaca and
+trigger regardless of any job.
 
-The options, from most protective to cheapest:
+**Chosen 2026-09-27: rely on `cycle`'s check; `monitor` has no schedule.** Shadow stops are
+enforced within about 20 minutes. A shadow position can therefore overshoot its stop for up
+to ~20 minutes, making Stage 1's stopped-out trades slightly worse than live ones would be:
+a conservative bias when deciding on promotion. Zero extra minutes.
 
-1. **Keep both `monitor` entries** (as in the table). Shadow protection within 5 minutes.
-   About 385 minutes a day.
-2. **Replace the loop with single-shot triggers every 5 minutes.** Same cadence, but each
-   run pays the setup overhead. Roughly 100-150 minutes a day, but about 80 scheduler
-   entries a day. This needs a small workflow change: a single-iteration mode.
-3. **Drop the `monitor` entries and rely on `cycle`'s check.** Shadow protection within
-   about 20 minutes. Zero extra minutes. The brief's "minute monitor" becomes a 20-minute
-   one for Stage 1 only.
+The alternatives, if that changes:
 
-This is a cost-vs-shadow-fidelity decision for you. It doesn't change anything once real
-orders are live.
+- **5-minute loop:** add cron-job.org entries for `monitor` at 08:35 and 14:00 CT (two
+  loops cover the session; the loop stops itself at 15:00 CT). About 385 minutes a day.
+- **Single-shot every 5 minutes:** same cadence at roughly 100-150 minutes a day, from one
+  scheduler entry (`*/5 8-14 * * 1-5`). This needs a small workflow change first: a
+  single-check mode for the `monitor` job.
