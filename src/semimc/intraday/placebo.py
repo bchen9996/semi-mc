@@ -116,6 +116,16 @@ def run_placebo_cycle(
     except KillSwitchActive as exc:
         return PlaceboCycleResult(skipped_reason=str(exc))
 
+    # Mirrors `jobs.py::run_cycle`'s once-a-day open-batch guard, so the control group
+    # never gets a second opening draw the real agent is denied. The placebo makes no
+    # model call; an open-batch proposal on its own ledger is its record of having run.
+    if cycle == "open_batch" and any(
+        row["cycle"] == "open_batch" for row in shadow_ledger.proposals_for(as_of)
+    ):
+        return PlaceboCycleResult(
+            skipped_reason=f"open_batch already ran for {pd.Timestamp(as_of).date()}"
+        )
+
     held_symbols = {p.symbol for p in shadow_broker.list_positions()}
     held_quotes = quote_map(held_symbols, market_data, now)
     prices = {symbol: midpoint_price(quote) for symbol, quote in held_quotes.items()}

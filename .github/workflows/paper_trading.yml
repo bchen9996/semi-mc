@@ -10,6 +10,17 @@ name: Paper trading
 # non-rebalance day's `decide` is a fast no-op via its own cadence guard
 # (live/decide.py::run_decide) -- cron does not need to land on exactly the right day.
 #
+# **External triggering (added 2026-09-27).** GitHub delivers this repo's `schedule`
+# events 4-5 hours late -- every morning job in both workflows landed in a burst around
+# 17:10-18:20 UTC during Stage 1, whatever its cron said (tasks/todo.md). The reliable
+# fix is outside GitHub: an external scheduler calls the `workflow_dispatch` API at the
+# exact minute with `{"ref": "main", "inputs": {"job": "<job>"}}`, and each job below
+# runs only for its own name. The crons stay as a fallback -- every job here is already
+# idempotent or safely repeatable, so a late cron firing after the external one is a
+# no-op or a harmless re-check. A manual "Run workflow" click now runs exactly the one
+# job picked, not every job at once (which is what the old bare `workflow_dispatch`
+# condition on each job did). Setup steps: docs/external_scheduler.md.
+#
 # Trading stays off by default even once this runs on a schedule: config/paper.yaml ships
 # with paper.registered_accounts empty and every sleeve's trading_enabled false. Both must
 # be deliberately edited before `paper execute` can do anything but decline at pretrade.
@@ -26,7 +37,16 @@ name: Paper trading
 # own comment.
 
 "on":
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Which job to run (external scheduler or manual run)"
+        required: true
+        type: choice
+        options:
+          - decide-and-execute
+          - mark
+          - report
   schedule:
     # decide + execute: every weekday, ~9-10am ET depending on DST.
     - cron: "0 14 * * 1-5"
@@ -40,7 +60,7 @@ permissions:
 
 jobs:
   decide-and-execute:
-    if: github.event.schedule == '0 14 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '0 14 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'decide-and-execute')
     runs-on: ubuntu-latest
     concurrency:
       # Shared with the mark job below -- both write ledger/paper.sqlite3 and commit it,
@@ -115,7 +135,7 @@ jobs:
           exit 1
 
   mark:
-    if: github.event.schedule == '*/30 14-20 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '*/30 14-20 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'mark')
     runs-on: ubuntu-latest
     concurrency:
       group: paper-trading-ledger-write
@@ -164,7 +184,7 @@ jobs:
           exit 1
 
   report:
-    if: github.event.schedule == '30 21 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '30 21 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'report')
     runs-on: ubuntu-latest
     strategy:
       matrix:

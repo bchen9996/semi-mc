@@ -1642,3 +1642,77 @@ def test_run_weekly_review_never_calls_a_model_or_a_broker(config, tmp_path):
     result = run_weekly_review(cfg, ledger, AS_OF)
     assert result.report_path is not None
     ledger.close()
+
+
+# -- once-a-day guards for jobs that an external trigger and a late cron may both fire ----
+
+
+def test_open_batch_runs_once_per_day_even_when_triggered_twice(config, tmp_path):
+    # External scheduler on time + GitHub's cron copy hours later (added 2026-09-27): the
+    # second pass must not make another Trader call or open a second batch.
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    calls, client = _recording_llm_client(_result_json(structured_output={"proposals": []}))
+    broker = FakeBroker()
+
+    first = run_cycle("open_batch", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+    second = run_cycle("open_batch", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+
+    assert first.skipped_reason is None
+    assert second.skipped_reason == f"open_batch already ran for {AS_OF.date()}"
+    assert len(calls) == 1
+    ledger.close()
+
+
+def test_the_open_batch_guard_leaves_ordinary_cycles_alone(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    calls, client = _recording_llm_client(_result_json(structured_output={"proposals": []}))
+    broker = FakeBroker()
+
+    run_cycle("open_batch", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+    later = run_cycle("cycle_1500", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+
+    assert later.skipped_reason is None
+    assert len(calls) == 2
+    ledger.close()
+
+
+def test_eod_review_pays_for_one_reviewer_call_per_day_even_with_nothing_graded(
+    config, tmp_path, market
+):
+    # A day with a proposal but no close: no reflection gets a category, so the old
+    # graded-reflection check alone let a second trigger call the Reviewer again.
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_proposal(AS_OF, "open_batch", "NVDA", "open", "rejected", {}, reason="x")
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+    calls, client = _recording_llm_client(_reviewer_response(reflection_id=0))
+
+    def review():
+        return run_eod_review(
+            cfg,
+            _FakeMarketData(),
+            _FakeNewsClient(),
+            market,
+            paper_ledger,
+            None,
+            ledger,
+            client,
+            AS_OF,
+            "eod_review",
+            NOW,
+        )
+
+    first = review()
+    second = review()
+
+    assert first.skipped_reason is None
+    assert second.skipped_reason == f"eod_review already ran for {AS_OF}"
+    assert len(calls) == 1
+    paper_ledger.close()
+    ledger.close()
