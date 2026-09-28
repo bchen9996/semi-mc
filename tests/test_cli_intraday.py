@@ -363,14 +363,16 @@ def test_shadow_broker_state_persists_across_two_separate_invocations(
     assert "NVDA" in second.output
 
 
-def test_eod_review_skips_cleanly_with_nothing_to_review(tmp_path, fake_intraday_env):
+def test_eod_review_on_a_quiet_day_writes_a_report_without_a_model_call(
+    tmp_path, fake_intraday_env
+):
     """`intraday.reports_dir` and `paper.ledger_path` must both be redirected here --
     otherwise this command would resolve them against the real project root and either
     write into the real repo's `reports/` directory or open the real `paper.sqlite3`
     (`CLAUDE.md`'s own `signals --holdout` gotcha, the exact reason `reports_dir` is a
     `--set`-overridable config field rather than a literal in `cli.py`). An empty ledger
-    has nothing to review (`run_eod_review`'s own "nothing to review yet today" skip,
-    Phase 9b) -- no report is written and no model call is made."""
+    has nothing to grade: the mechanical report (benchmarks, placebo, blotter) is still
+    written, but the Reviewer is never called (`run_eod_review`, changed 2026-09-27)."""
     result = runner.invoke(
         app,
         ["intraday", "eod-review"]
@@ -383,8 +385,9 @@ def test_eod_review_skips_cleanly_with_nothing_to_review(tmp_path, fake_intraday
         ),
     )
     assert result.exit_code == 0, result.output
-    assert "Skipped: nothing to review yet today" in result.output
-    assert not (tmp_path / "reports").exists()
+    assert "Wrote" in result.output
+    assert "No Reviewer call: nothing to grade today" in result.output
+    assert len(list((tmp_path / "reports").rglob("eod.md"))) == 1
 
 
 def test_eod_review_grades_the_day_and_writes_a_full_report(

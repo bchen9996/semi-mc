@@ -76,6 +76,10 @@ class EodReport:
     attribution_narrative: str | None = None
     closing_market_report: str | None = None
     playbook_proposal: str | None = None
+    # Set when the Reviewer was deliberately not called (a quiet day: nothing to grade)
+    # -- rendered in place of each Reviewer-only section, so the report says why a
+    # section is empty instead of the "not yet built" placeholder, which would be false.
+    reviewer_note: str | None = None
 
 
 def s0_day_return(paper_ledger: Any, as_of: pd.Timestamp) -> float | None:
@@ -158,6 +162,7 @@ def build_eod_report(
     attribution_narrative: str | None = None,
     closing_market_report: str | None = None,
     playbook_proposal: str | None = None,
+    reviewer_note: str | None = None,
 ) -> EodReport:
     proposals = ledger.proposals_for(as_of)
     reflections = ledger.reflections_for(as_of)
@@ -189,6 +194,7 @@ def build_eod_report(
         attribution_narrative=attribution_narrative,
         closing_market_report=closing_market_report,
         playbook_proposal=playbook_proposal,
+        reviewer_note=reviewer_note,
     )
 
 
@@ -202,6 +208,9 @@ def _money(value: float | None) -> str:
 
 def render_eod_markdown(report: EodReport) -> str:
     lines = [f"# S4 end-of-day report: {report.as_of.date()}", ""]
+    no_reviewer = (
+        f"No Reviewer call today: {report.reviewer_note}." if report.reviewer_note else None
+    )
 
     lines.append("## Blotter")
     if report.proposals:
@@ -244,7 +253,9 @@ def render_eod_markdown(report: EodReport) -> str:
             lines.append("")
             lines.append(report.attribution_narrative)
     else:
-        lines.append("Not yet built (Phase 9b -- needs the Reviewer's own synthesis).")
+        lines.append(
+            no_reviewer or "Not yet built (Phase 9b -- needs the Reviewer's own synthesis)."
+        )
 
     lines.append("")
     lines.append("## Benchmarks for the day")
@@ -262,7 +273,9 @@ def render_eod_markdown(report: EodReport) -> str:
     if report.closing_market_report:
         lines.append(report.closing_market_report)
     else:
-        lines.append("Not yet built (Phase 9b -- needs the Reviewer's own synthesis).")
+        lines.append(
+            no_reviewer or "Not yet built (Phase 9b -- needs the Reviewer's own synthesis)."
+        )
 
     lines.append("")
     lines.append("## Process scorecard")
@@ -296,7 +309,10 @@ def render_eod_markdown(report: EodReport) -> str:
             lines.append("")
             lines.append(report.process_scorecard_narrative)
     else:
-        lines.append("Not yet built (Phase 9b -- needs the Reviewer's own reflection grading).")
+        lines.append(
+            no_reviewer
+            or "Not yet built (Phase 9b -- needs the Reviewer's own reflection grading)."
+        )
 
     lines.append("")
     lines.append("## Monitor cadence")
@@ -316,6 +332,6 @@ def render_eod_markdown(report: EodReport) -> str:
         # not the same as "the Reviewer never ran," which is the `None` fallback below).
         lines.append(report.playbook_proposal)
     else:
-        lines.append("Not yet built (Phase 9b).")
+        lines.append(no_reviewer or "Not yet built (Phase 9b).")
 
     return "\n".join(lines) + "\n"

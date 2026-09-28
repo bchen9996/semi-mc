@@ -2205,8 +2205,8 @@ def intraday_eod_review(
     """The Reviewer: grades the day and writes `reports/YYYY-MM-DD/eod.md` -- the day's
     blotter, P&L, attribution, benchmarks (SOXX, S0, the placebo, "do nothing"), closing
     market report, process scorecard, and any playbook proposal (`run_eod_review`,
-    Phase 9b). Idempotent per trading day, and skips cleanly with nothing to review yet
-    (see `run_eod_review`'s docstring) -- same shape as `research`'s own idempotency.
+    Phase 9b). Idempotent per trading day; on a quiet day (nothing to grade) it still
+    writes the mechanical report but makes no model call (see `run_eod_review`).
     """
     cfg = _setup(config, set_, verbose)
     from .data import load_market_data
@@ -2247,6 +2247,9 @@ def intraday_eod_review(
         typer.echo(f"Skipped: {result.skipped_reason}")
         return
     typer.echo(f"Wrote {result.report_path}")
+    if result.reviewer_skipped_reason is not None:
+        typer.echo(f"No Reviewer call: {result.reviewer_skipped_reason}")
+        return
     typer.echo(f"Reflections graded: {result.reflections_updated}")
     if result.playbook_proposal_written:
         typer.echo("Playbook proposal written to proposals/")

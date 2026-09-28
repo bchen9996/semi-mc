@@ -13,6 +13,7 @@ import datetime as dt
 import json
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -1401,11 +1402,18 @@ def _reviewer_response(reflection_id: int, playbook_proposal: str | None = None)
     )
 
 
-def test_run_eod_review_skips_with_nothing_to_review_yet(config, tmp_path, market):
+def test_run_eod_review_on_a_quiet_day_writes_the_mechanical_report_without_a_model_call(
+    config, tmp_path, market
+):
+    # Found 2026-09-27: this used to skip the whole report on a day with no proposals and
+    # no closes -- so every Stage-1 day (zero proposals, see the timezone fix) produced no
+    # eod.md at all, and a legitimately quiet day would lose its placebo comparison, the
+    # one day it arguably matters most. Now: the report is written, the Reviewer is not
+    # called (nothing to grade, nothing worth paying for).
     cfg = _eod_review_config(config, tmp_path)
     ledger = _ledger(tmp_path)
     paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
-    client = _sequenced_llm_client(_result_json())
+    calls, client = _recording_llm_client(_result_json())
 
     result = run_eod_review(
         cfg,
@@ -1421,8 +1429,16 @@ def test_run_eod_review_skips_with_nothing_to_review_yet(config, tmp_path, marke
         NOW,
     )
 
-    assert result.skipped_reason == "nothing to review yet today"
-    assert not (tmp_path / "reports").exists()
+    assert result.skipped_reason is None
+    assert result.reviewer_skipped_reason == "nothing to grade today"
+    assert calls == []
+    assert ledger.model_calls_for(AS_OF) == []
+    text = Path(result.report_path).read_text(encoding="utf-8")
+    assert "No proposals today." in text
+    assert "## Benchmarks for the day" in text
+    assert "Placebo (T6 control)" in text
+    assert "No Reviewer call today: nothing to grade today" in text
+    assert "Not yet built" not in text
     paper_ledger.close()
     ledger.close()
 
