@@ -271,6 +271,13 @@ intraday:
     evidence_min_trading_days: 10
     evidence_min_trades: 20
     review_after_days: 30   # placeholder -- brief gives no number, see config.py's caveat
+  readiness:   # Stage 1 -> 2 "clean trading day" rule, owner decision 2026-09-29 (config.py)
+    max_cycle_gap_minutes: 30.0
+    open_batch_grace_minutes: 10.0
+    session_edge_minutes: 30.0
+    clean_days_required: 3     # ... if the streak includes accepted proposals
+    clean_days_if_sparse: 5    # ... if it doesn't
+    excluded_days: []          # market holidays and owner-excused outages: neither count nor reset
   kill_switch_path: runs/intraday/KILL_SWITCH
   ledger_path: ledger/intraday.sqlite3
   shadow_ledger_path: ledger/intraday_shadow.sqlite3

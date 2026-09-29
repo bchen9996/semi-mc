@@ -22,6 +22,17 @@ The evidence checks map onto the brief's own success criteria:
 - The per-day spend cap the brief says to recalibrate from shadow logging -> observed
   spend per day against `budget.max_cost_usd_per_day`.
 
+**Clean trading days** (owner decision 2026-09-29, `IntradayReadinessConfig`) score each
+day pass/fail on what the ledger can show: research finished before the open, the
+open-batch Trader call ran within a grace period of the open, cycle checks covered the
+whole session with no gap over the threshold, no error incidents, an eod report filed
+under that date, spend within the cap, and the placebo ran. A trade is not required on a
+given day -- `no_trade` after looking is a legitimate outcome; proposals count across the
+streak instead. `carry` is not checked separately: on a day with no positions it records
+nothing, so the eod report stands in for "the end of day completed". Session edges are
+the regular 09:30-16:00 New York hours; a half-day session will fail the coverage check,
+which the owner judges by eye (no market calendar here, same as below).
+
 **Missed days are inferred, not known.** The ledger records activity, not the
 schedule, and this module has no market calendar (no broker dependency, same as
 `weekly_summary`). A weekday with no activity at all is reported as "no activity
@@ -31,9 +42,10 @@ rather than guessing which.
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +53,10 @@ import pandas as pd
 
 from ..config import IntradayConfig
 from .ledger import IntradayLedger
+
+_EXCHANGE_TZ = "America/New_York"
+_SESSION_OPEN = dt.time(9, 30)
+_SESSION_CLOSE = dt.time(16, 0)
 
 # "AMD: no quote available" and "SMCI: no quote available" are one failure mode, not two.
 _SYMBOL_PREFIX = re.compile(r"^[A-Z][A-Z.\-]{0,9}: ")
@@ -71,6 +87,16 @@ class DayEvidence:
     incidents_error: int
     incidents_warning: int
     eod_report: bool
+    placebo_ran: bool = False
+    # True when the owner listed this date in `readiness.excluded_days`: it neither counts
+    # toward nor resets the clean-day streak.
+    excluded: bool = False
+    # Why this day is not clean; empty means clean. Always empty for an excluded day.
+    clean_failures: tuple[str, ...] = ()
+
+    @property
+    def clean(self) -> bool:
+        return not self.excluded and not self.clean_failures
 
     @property
     def any_activity(self) -> bool:
@@ -110,6 +136,10 @@ class StageReadiness:
     incident_kinds: list[tuple[str, str, int]]
     spend_cap_usd: float
     checks: list[EvidenceCheck] = field(default_factory=list)
+    # The consecutive clean days ending at the most recent non-excluded day, oldest first,
+    # and how many proposals were accepted across them.
+    clean_streak: list[str] = field(default_factory=list)
+    clean_streak_accepted: int = 0
 
 
 def _sleeve_result(reflections: list[dict[str, Any]]) -> SleeveResult:
@@ -127,7 +157,95 @@ def _in_window(value: str, since: pd.Timestamp, as_of: pd.Timestamp) -> bool:
     return since <= day <= as_of
 
 
-def _day_evidence(ledger: IntradayLedger, day: pd.Timestamp, reports_dir: Path) -> DayEvidence:
+def _utc(value: str) -> pd.Timestamp:
+    stamp = pd.Timestamp(value)
+    return stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+
+
+def _session_edge(day: pd.Timestamp, at: dt.time) -> pd.Timestamp:
+    return pd.Timestamp(dt.datetime.combine(day.date(), at)).tz_localize(_EXCHANGE_TZ)
+
+
+def _clean_failures(
+    ledger: IntradayLedger,
+    config: IntradayConfig,
+    day: pd.Timestamp,
+    evidence: DayEvidence,
+) -> tuple[str, ...]:
+    """Every reason ``day`` is not a clean trading day (`IntradayReadinessConfig`)."""
+    rules = config.readiness
+    local = config.schedule.timezone
+    if not evidence.any_activity:
+        return ("no activity recorded (a holiday belongs in readiness.excluded_days)",)
+
+    def at_local(stamp: pd.Timestamp) -> str:
+        return stamp.tz_convert(local).strftime("%H:%M")
+
+    open_at = _session_edge(day, _SESSION_OPEN)
+    close_at = _session_edge(day, _SESSION_CLOSE)
+    failures: list[str] = []
+
+    briefs = [_utc(b["created_at"]) for b in ledger.briefs_for(day)]
+    if not briefs:
+        failures.append("no research brief")
+    elif min(briefs) >= open_at:
+        failures.append(f"research finished at {at_local(min(briefs))}, after the open")
+
+    open_calls = [
+        _utc(c["created_at"])
+        for c in ledger.model_calls_for(day)
+        if c["cycle"] == "open_batch" and c["role"] == "trader"
+    ]
+    grace = pd.Timedelta(minutes=rules.open_batch_grace_minutes)
+    if not open_calls:
+        failures.append("no open-batch Trader call")
+    elif min(open_calls) > open_at + grace:
+        failures.append(
+            f"open-batch Trader call at {at_local(min(open_calls))}, more than "
+            f"{rules.open_batch_grace_minutes:g} min after the open"
+        )
+
+    # Recomputed from `checked_at` rather than read from `gap_seconds`, which spans every
+    # check that day -- an evening test run would otherwise count as a session gap.
+    edge = pd.Timedelta(minutes=rules.session_edge_minutes)
+    checks = sorted(
+        stamp
+        for stamp in (_utc(c["checked_at"]) for c in ledger.monitor_checks_for(day))
+        if open_at <= stamp <= close_at
+    )
+    if not checks:
+        failures.append("no cycle ran during the session")
+    else:
+        if checks[0] > open_at + edge:
+            failures.append(f"first cycle check at {at_local(checks[0])}, late in the morning")
+        if checks[-1] < close_at - edge:
+            failures.append(f"last cycle check at {at_local(checks[-1])}, early in the afternoon")
+        gaps = [(b - a).total_seconds() / 60.0 for a, b in zip(checks, checks[1:], strict=False)]
+        if gaps and max(gaps) > rules.max_cycle_gap_minutes:
+            failures.append(
+                f"a {max(gaps):.0f}-min gap between cycle checks "
+                f"(max {rules.max_cycle_gap_minutes:g})"
+            )
+
+    if evidence.incidents_error:
+        failures.append(f"{evidence.incidents_error} error incident(s)")
+    if not evidence.eod_report:
+        failures.append("no eod report filed under this date")
+    cap = config.budget.max_cost_usd_per_day
+    if evidence.spend_usd > cap:
+        failures.append(f"spend ${evidence.spend_usd:.2f} over the ${cap:.2f} cap")
+    if not evidence.placebo_ran:
+        failures.append("the placebo did not run")
+    return tuple(failures)
+
+
+def _day_evidence(
+    ledger: IntradayLedger,
+    placebo_ledger: IntradayLedger | None,
+    config: IntradayConfig,
+    day: pd.Timestamp,
+    reports_dir: Path,
+) -> DayEvidence:
     watchlist = ledger.watchlist_for(day)
     calls = ledger.model_calls_for(day)
     proposals = ledger.proposals_for(day)
@@ -138,7 +256,7 @@ def _day_evidence(ledger: IntradayLedger, day: pd.Timestamp, reports_dir: Path) 
     timestamps = [c["created_at"] for c in calls] + [i["created_at"] for i in incidents]
     first = min((pd.Timestamp(t) for t in timestamps), default=None)
 
-    return DayEvidence(
+    evidence = DayEvidence(
         date=str(day.date()),
         research_brief=bool(ledger.briefs_for(day)),
         watchlist_candidates=len(watchlist),
@@ -152,7 +270,26 @@ def _day_evidence(ledger: IntradayLedger, day: pd.Timestamp, reports_dir: Path) 
         incidents_error=sum(1 for i in incidents if i["severity"] == "error"),
         incidents_warning=sum(1 for i in incidents if i["severity"] == "warning"),
         eod_report=(reports_dir / str(day.date()) / "eod.md").exists(),
+        # The placebo sets its session-open equity on its first cycle of the day, whether
+        # or not it finds a candidate to trade.
+        placebo_ran=placebo_ledger is not None
+        and placebo_ledger.session_open_equity(day) is not None,
     )
+    if day.date() in set(config.readiness.excluded_days):
+        return replace(evidence, excluded=True)
+    return replace(evidence, clean_failures=_clean_failures(ledger, config, day, evidence))
+
+
+def _clean_streak(days: list[DayEvidence]) -> list[DayEvidence]:
+    """Consecutive clean days counting back from the latest; excluded days are skipped."""
+    streak: list[DayEvidence] = []
+    for day in reversed(days):
+        if day.excluded:
+            continue
+        if not day.clean:
+            break
+        streak.append(day)
+    return streak[::-1]
 
 
 def stage_readiness(
@@ -169,7 +306,7 @@ def stage_readiness(
     since = pd.Timestamp(since).normalize()
     as_of = pd.Timestamp(as_of).normalize()
     weekdays = pd.bdate_range(since, as_of)
-    days = [_day_evidence(ledger, day, reports_dir) for day in weekdays]
+    days = [_day_evidence(ledger, placebo_ledger, config, day, reports_dir) for day in weekdays]
 
     agent_reflections = [
         r for r in ledger.all_reflections() if _in_window(r["as_of"], since, as_of)
@@ -192,6 +329,7 @@ def stage_readiness(
         for row in ledger.incidents_for(day):
             incident_counts[(row["severity"], incident_kind(row["message"]))] += 1
 
+    streak = _clean_streak(days)
     report = StageReadiness(
         since=since,
         as_of=as_of,
@@ -201,6 +339,8 @@ def stage_readiness(
         rejection_reasons=reasons.most_common(),
         incident_kinds=[(sev, kind, n) for (sev, kind), n in incident_counts.most_common()],
         spend_cap_usd=config.budget.max_cost_usd_per_day,
+        clean_streak=[d.date for d in streak],
+        clean_streak_accepted=sum(d.proposals_accepted for d in streak),
     )
     report.checks.extend(_evidence_checks(report, config))
     return report
@@ -253,6 +393,20 @@ def _evidence_checks(report: StageReadiness, config: IntradayConfig) -> list[Evi
             else f"{report.placebo.closed_trades} placebo trades closed",
         ),
     ]
+    rules = config.readiness
+    streak, accepted = len(report.clean_streak), report.clean_streak_accepted
+    checks.append(
+        EvidenceCheck(
+            "Stage 2 clean-day streak",
+            streak >= rules.clean_days_if_sparse
+            or (streak >= rules.clean_days_required and accepted > 0),
+            f"{streak} consecutive clean day(s)"
+            + (f" ending {report.clean_streak[-1]}" if streak else "")
+            + f", {accepted} accepted proposal(s) in the streak; needs "
+            f"{rules.clean_days_required} with accepted proposals (read them before "
+            f"promoting) or {rules.clean_days_if_sparse} without",
+        )
+    )
     peak = max((d.spend_usd for d in report.days), default=0.0)
     checks.append(
         EvidenceCheck(
@@ -292,6 +446,22 @@ def render_stage_readiness_markdown(report: StageReadiness) -> str:
     for check in report.checks:
         mark = "PASS" if check.passed else "FAIL"
         lines.append(f"- **{mark}** {check.name} -- {check.detail}")
+
+    lines += ["", "## Stage 2 clean days", ""]
+    lines.append(
+        "A clean day: research before the open, the open batch on time, cycles across the "
+        "whole session, no error incidents, an eod report, spend within the cap, and the "
+        "placebo ran. A trade is not required on any one day."
+    )
+    lines.append("")
+    lines.append("| date | clean | why not |")
+    lines.append("|---|---|---|")
+    for d in report.days:
+        if d.excluded:
+            lines.append(f"| {d.date} | excluded | listed in readiness.excluded_days |")
+        else:
+            why = "; ".join(d.clean_failures) or "-"
+            lines.append(f"| {d.date} | {'yes' if d.clean else 'no'} | {why} |")
 
     lines += ["", "## Agent vs. placebo (closed trades in the window)", ""]
     lines.append("| sleeve | closed trades | P&L gross | P&L net | win rate |")
