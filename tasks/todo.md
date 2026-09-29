@@ -2356,8 +2356,31 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       enforced within ~20 minutes (a conservative bias on Stage 1's stop-outs; irrelevant
       from Stage 2, where real stops rest at Alpaca). Remaining schedule: ~120 min/day,
       ~2,500/month.
+      **External triggers live 2026-09-29** (cron-job.org; first on-time session
+      2026-09-30). Setup took two days of owner-side fixes: jobs defaulted to GET (GitHub
+      answers 404), then lost three of four headers on re-save (401), plus a body typo
+      (422) -- all on cron-job.org, none in the repo. 2026-09-28 and -29 therefore ran on
+      late crons only (research 14:48 and 13:13 CT) and are not clean days.
+      **Owner decision 2026-09-29: Stage 1 ends on consecutive clean trading days, not
+      the calendar.** Promote after **3** consecutive clean days if the streak includes
+      accepted proposals (which the owner reads first), or **5** if it doesn't. Why: Stage
+      2 is still paper money, so the shadow stage's job is proving the plumbing and that
+      the agent proposes sensibly; the 20-closed-trade threshold judges the strategy and
+      can keep accumulating during Stage 2. A clean day: research finished before the
+      open; the open-batch Trader call within 10 min of the open; cycle checks across the
+      whole session with no gap over 30 min; no error incidents (warnings are fine); an eod
+      report filed under that date; spend within the cap; the placebo ran. A trade on any
+      one day is not required. A failed day resets the streak; market holidays and outages
+      the owner judges outside the project's control go in
+      `intraday.readiness.excluded_days` (neither count nor reset -- a written record, not a
+      silent skip). `semimc intraday readiness` scores each day and the streak
+      (`intraday/readiness.py`, "Stage 2 clean days"); run it after the close. Known gaps:
+      `carry` leaves no trace on a quiet day, so the eod report stands in for it; a
+      half-day session fails the coverage check and needs excluding by hand; a late cron
+      copy running after 19:00 CT is dated the next day (`_intraday_as_of` uses the
+      runner's UTC clock -- fix proposed, not yet approved).
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
-      Stage 1's evidence looks good; "half budget" is a plain edit to `intraday.risk`'s
+      Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).
 - [ ] Stage 3 -- equities, full budget.
 - [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded). **Built

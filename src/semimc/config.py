@@ -569,6 +569,28 @@ class IntradayPlaceboConfig(_Base):
     starting_equity: float = Field(100_000.0, gt=0)
 
 
+class IntradayReadinessConfig(_Base):
+    """The Stage 1 -> Stage 2 "clean trading day" rule (`intraday/readiness.py`), an owner
+    decision of 2026-09-29 that replaced the brief's fixed "shadow, 2 weeks": promote after
+    `clean_days_required` consecutive clean days if the streak includes accepted
+    proposals, else after `clean_days_if_sparse`. Stage 2 is still paper money, so the
+    shadow stage's job is proving the plumbing, not the strategy (tasks/todo.md).
+
+    The minute thresholds follow the schedule, not research: cycles run every 20 minutes,
+    so a 30-minute gap means one missed trigger; the open batch fires at 08:32 CT, so 10
+    minutes of grace covers runner setup. `excluded_days` is the owner's written record of
+    days that neither count nor reset the streak -- market holidays (this module has no
+    market calendar) and outages the owner judged outside the project's control.
+    """
+
+    max_cycle_gap_minutes: float = Field(30.0, gt=0)
+    open_batch_grace_minutes: float = Field(10.0, ge=0)
+    session_edge_minutes: float = Field(30.0, ge=0)
+    clean_days_required: int = Field(3, ge=1)
+    clean_days_if_sparse: int = Field(5, ge=1)
+    excluded_days: list[dt.date] = Field(default_factory=list)
+
+
 class IntradayConfig(_Base):
     """S4: the LLM-driven intraday agent sleeve (BRIEF_INTRADAY.md). Deliberately not a
     `PaperConfig.sleeves` entry -- its LLM-proposed trades don't fit `Decision.weights`'s
@@ -601,6 +623,7 @@ class IntradayConfig(_Base):
     research: IntradayResearchConfig = Field(default_factory=IntradayResearchConfig)
     placebo: IntradayPlaceboConfig = Field(default_factory=IntradayPlaceboConfig)
     playbook: IntradayPlaybookConfig = Field(default_factory=IntradayPlaybookConfig)
+    readiness: IntradayReadinessConfig = Field(default_factory=IntradayReadinessConfig)
     # Separate sentinel from paper.kill_switch_path -- S4 can be halted independently of
     # s0/s3 and vice versa.
     kill_switch_path: str = "runs/intraday/KILL_SWITCH"

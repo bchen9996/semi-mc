@@ -208,9 +208,184 @@ def test_render_includes_every_section_and_keeps_the_day_table_rectangular(tmp_p
         "## Why proposals were rejected",
         "## Incidents by kind",
         "## Model spend",
+        "## Stage 2 clean days",
     ):
         assert heading in text
-    table = [line for line in text.splitlines() if line.startswith("| 2026-")]
-    assert len(table) == 2
-    header = next(line for line in text.splitlines() if line.startswith("| date |"))
-    assert {line.count("|") for line in table} == {header.count("|")}
+    for section in ("## Day by day", "## Stage 2 clean days"):
+        body = text.split(section, 1)[1].split("\n## ", 1)[0].splitlines()
+        table = [line for line in body if line.startswith("| 2026-")]
+        assert len(table) == 2
+        header = next(line for line in body if line.startswith("| date |"))
+        assert {line.count("|") for line in table} == {header.count("|")}
+
+
+# -- Stage 2 clean trading days (owner rule, 2026-09-29) -----------------------------------
+
+
+def _at(day: pd.Timestamp, hhmm: str) -> str:
+    """A New York wall-clock time on ``day`` as the UTC ISO string the ledger stores."""
+    local = pd.Timestamp(f"{day.date()} {hhmm}").tz_localize("America/New_York")
+    return local.tz_convert("UTC").isoformat()
+
+
+def _clean_day(ledger, placebo, day, reports, pinned_clock, *, accepted=0, skip=()):
+    """Everything a clean day needs, timed like the external schedule: research at 08:30
+    ET, the open batch at 09:33 ET, cycles every 20 min from 10:00 to 15:40 ET."""
+    import datetime as dt
+
+    if "research" not in skip:
+        pinned_clock(_at(day, "08:30"))
+        ledger.record_brief(day, {"text": "brief"})
+    if "open_batch" not in skip:
+        pinned_clock(_at(day, "09:33"))
+        ledger.record_model_call(day, "open_batch", "trader", "haiku", "h", 1, 1, 0.01)
+    checks = ["09:33"] + [f"{h:02d}:{m:02d}" for h in range(10, 16) for m in (0, 20, 40)]
+    for hhmm in checks:
+        if hhmm in skip:
+            continue
+        ledger.record_monitor_check(day, "cycle", dt.datetime.fromisoformat(_at(day, hhmm)))
+    for n in range(accepted):
+        ledger.record_proposal(day, "cycle", f"S{n}", "open", "accepted", {})
+    if "placebo" not in skip:
+        placebo.record_session_open_equity(day, 100_000.0)
+    if "eod" not in skip:
+        (reports / str(day.date())).mkdir(parents=True, exist_ok=True)
+        (reports / str(day.date()) / "eod.md").write_text("x", encoding="utf-8")
+
+
+@pytest.fixture
+def two_ledgers(tmp_path):
+    return (
+        IntradayLedger(tmp_path / "intraday.sqlite3"),
+        IntradayLedger(tmp_path / "intraday_shadow.sqlite3"),
+        tmp_path / "reports",
+    )
+
+
+def test_an_on_time_day_is_clean(two_ledgers, pinned_clock):
+    ledger, placebo, reports = two_ledgers
+    _clean_day(ledger, placebo, MON, reports, pinned_clock)
+    report = stage_readiness(ledger, placebo, IntradayConfig(), reports, MON, MON)
+    [day] = report.days
+    assert day.clean, day.clean_failures
+    assert report.clean_streak == [str(MON.date())]
+
+
+@pytest.mark.parametrize(
+    ("skip", "expected"),
+    [
+        (("research",), "no research brief"),
+        (("open_batch",), "no open-batch Trader call"),
+        (("placebo",), "the placebo did not run"),
+        (("eod",), "no eod report filed under this date"),
+        (("12:00", "12:20"), "a 60-min gap between cycle checks"),
+        (tuple(f"15:{m:02d}" for m in (0, 20, 40)), "early in the afternoon"),
+    ],
+)
+def test_each_missing_piece_fails_the_day_with_its_reason(
+    two_ledgers, pinned_clock, skip, expected
+):
+    ledger, placebo, reports = two_ledgers
+    _clean_day(ledger, placebo, MON, reports, pinned_clock, skip=skip)
+    [day] = stage_readiness(ledger, placebo, IntradayConfig(), reports, MON, MON).days
+    assert not day.clean
+    assert any(expected in reason for reason in day.clean_failures), day.clean_failures
+
+
+def test_late_research_and_a_late_open_batch_fail_the_day(two_ledgers, pinned_clock):
+    ledger, placebo, reports = two_ledgers
+    _clean_day(ledger, placebo, MON, reports, pinned_clock, skip=("research", "open_batch"))
+    pinned_clock(_at(MON, "14:13"))  # Monday 2026-09-29's late GitHub cron, roughly
+    ledger.record_brief(MON, {"text": "late"})
+    ledger.record_model_call(MON, "open_batch", "trader", "haiku", "h", 1, 1, 0.01)
+    [day] = stage_readiness(ledger, placebo, IntradayConfig(), reports, MON, MON).days
+    assert any("after the open" in r for r in day.clean_failures)
+    assert any("min after the open" in r for r in day.clean_failures)
+
+
+def test_an_evening_check_outside_the_session_is_not_a_gap(two_ledgers, pinned_clock):
+    import datetime as dt
+
+    ledger, placebo, reports = two_ledgers
+    _clean_day(ledger, placebo, MON, reports, pinned_clock)
+    ledger.record_monitor_check(MON, "cycle", dt.datetime.fromisoformat(_at(MON, "20:25")))
+    [day] = stage_readiness(ledger, placebo, IntradayConfig(), reports, MON, MON).days
+    assert day.clean, day.clean_failures
+
+
+def test_an_error_incident_or_overspend_fails_the_day(two_ledgers, pinned_clock):
+    ledger, placebo, reports = two_ledgers
+    _clean_day(ledger, placebo, MON, reports, pinned_clock)
+    pinned_clock(_at(MON, "11:00"))
+    ledger.record_incident("error", "malformed trader proposal")
+    ledger.record_model_call(MON, "cycle", "trader", "haiku", "h", 1, 1, 5.0)
+    config = IntradayConfig(budget={"max_cost_usd_per_day": 2.0})
+    [day] = stage_readiness(ledger, placebo, config, reports, MON, MON).days
+    assert "1 error incident(s)" in day.clean_failures
+    assert any("over the $2.00 cap" in r for r in day.clean_failures)
+
+
+def test_a_warning_incident_does_not_fail_the_day(two_ledgers, pinned_clock):
+    ledger, placebo, reports = two_ledgers
+    _clean_day(ledger, placebo, MON, reports, pinned_clock)
+    pinned_clock(_at(MON, "11:00"))
+    ledger.record_incident("warning", "AMD: spread 80bps exceeds max_spread_bps 50.0")
+    [day] = stage_readiness(ledger, placebo, IntradayConfig(), reports, MON, MON).days
+    assert day.clean, day.clean_failures
+
+
+def _week(ledger, placebo, reports, pinned_clock, days, accepted=0):
+    for day in days:
+        _clean_day(ledger, placebo, day, reports, pinned_clock, accepted=accepted)
+
+
+WEEK = list(pd.bdate_range("2026-10-05", "2026-10-09"))
+
+
+def test_three_clean_days_with_accepted_proposals_meet_the_rule(two_ledgers, pinned_clock):
+    ledger, placebo, reports = two_ledgers
+    _week(ledger, placebo, reports, pinned_clock, WEEK[:3], accepted=1)
+    report = stage_readiness(ledger, placebo, IntradayConfig(), reports, WEEK[0], WEEK[2])
+    assert report.clean_streak_accepted == 3
+    assert _check(report, "Stage 2 clean-day streak").passed
+
+
+def test_three_clean_days_without_proposals_need_five(two_ledgers, pinned_clock):
+    ledger, placebo, reports = two_ledgers
+    _week(ledger, placebo, reports, pinned_clock, WEEK[:3])
+    report = stage_readiness(ledger, placebo, IntradayConfig(), reports, WEEK[0], WEEK[2])
+    assert not _check(report, "Stage 2 clean-day streak").passed
+
+    _week(ledger, placebo, reports, pinned_clock, WEEK[3:])
+    report = stage_readiness(ledger, placebo, IntradayConfig(), reports, WEEK[0], WEEK[4])
+    assert len(report.clean_streak) == 5
+    assert _check(report, "Stage 2 clean-day streak").passed
+
+
+def test_a_failed_day_resets_the_streak(two_ledgers, pinned_clock):
+    ledger, placebo, reports = two_ledgers
+    _week(ledger, placebo, reports, pinned_clock, [WEEK[0], WEEK[2], WEEK[3]], accepted=1)
+    _clean_day(ledger, placebo, WEEK[1], reports, pinned_clock, skip=("eod",))
+    report = stage_readiness(ledger, placebo, IntradayConfig(), reports, WEEK[0], WEEK[3])
+    assert report.clean_streak == [str(WEEK[2].date()), str(WEEK[3].date())]
+    assert not _check(report, "Stage 2 clean-day streak").passed
+
+
+def test_an_excluded_day_neither_counts_nor_resets(two_ledgers, pinned_clock):
+    ledger, placebo, reports = two_ledgers
+    # WEEK[1] left silent (say, a market holiday) and listed by the owner.
+    _week(ledger, placebo, reports, pinned_clock, [WEEK[0], WEEK[2], WEEK[3]], accepted=1)
+    config = IntradayConfig(readiness={"excluded_days": [WEEK[1].date()]})
+    report = stage_readiness(ledger, placebo, config, reports, WEEK[0], WEEK[3])
+    assert report.days[1].excluded and not report.days[1].clean
+    assert len(report.clean_streak) == 3
+    assert _check(report, "Stage 2 clean-day streak").passed
+    assert "| excluded |" in render_stage_readiness_markdown(report)
+
+
+def test_a_silent_unexcluded_day_resets_the_streak(two_ledgers, pinned_clock):
+    ledger, placebo, reports = two_ledgers
+    _week(ledger, placebo, reports, pinned_clock, [WEEK[0], WEEK[2]], accepted=1)
+    report = stage_readiness(ledger, placebo, IntradayConfig(), reports, WEEK[0], WEEK[2])
+    assert any("no activity recorded" in r for r in report.days[1].clean_failures)
+    assert report.clean_streak == [str(WEEK[2].date())]
