@@ -181,7 +181,10 @@ compared to a closed form, the closed form is written out in the test.
   `regression.quantile_regression`, `tsa.regime_switching.markov_regression`,
   `stats.sandwich_covariance`) imports fine on its own — import those directly.
   `tests/test_imports.py` runs every module in a fresh subprocess and would catch a
-  regression here.
+  regression here. The blocking itself is Smart App Control (see the "DLL load failed" gotcha below);
+  the Code Integrity log shows `_kalman_filter` and `_qn` each blocked once, on 2026-09-15.
+  Keeping `statsmodels.api` out still helps: every extra compiled module loaded is one more
+  file Smart App Control can refuse.
 - **`uv run semimc ...` can fail with `Failed to spawn: semimc ... An Application Control
   policy has blocked this file. (os error 4551)`** on this machine -- the same Windows
   Application Control mechanism as the `statsmodels.api` gotcha above, this time blocking
@@ -190,7 +193,30 @@ compared to a closed form, the closed form is written out in the test.
   2026-09-19. Workaround: `uv run python -m semimc.cli ...` instead of `uv run semimc
   ...` -- runs the identical `typer` app without going through the blocked `.exe`.
   Unaffected: the GitHub Actions workflow (`.github/workflows/paper_trading.yml`), which
-  runs on Linux (`ubuntu-latest`), where this Windows-only policy doesn't exist.
+  runs on Linux (`ubuntu-latest`), where this Windows-only policy doesn't exist. Same
+  mechanism as the next gotcha: the Code Integrity log records Smart App Control blocking
+  `semimc.exe` twice on 2026-09-19, with no later attempts logged, since everything has
+  used `python -m` since then.
+- **A test fails with `ImportError: DLL load failed ... An Application Control policy has
+  blocked this file`: re-run it before debugging anything.** Diagnosed 2026-09-29 from the
+  Windows Code Integrity log (`Microsoft-Windows-CodeIntegrity/Operational`, event 3077).
+  **Smart App Control** is on for this machine. It blocks unsigned compiled files that
+  Microsoft's cloud reputation service doesn't vouch for, and many `.pyd` extensions in
+  `.venv` are unsigned. The blocks come in **bursts**: one file refused for roughly 20-40
+  minutes, then allowed again with nothing changed. On 2026-09-29, 13 tests (the
+  `signals` CLI tests and `test_signals_forecasting.py`) failed on
+  `sklearn/preprocessing/_csr_polynomial_expansion` from 17:16 to 17:50 and passed
+  unchanged once the burst ended. Since 2026-09-15 it has hit about 18 different files:
+  scipy (7), scikit-learn (3), statsmodels (3), matplotlib, curl_cffi, `pytest.exe` and
+  `semimc.exe`. So it is not one bad file, and dropping a dependency won't fix it (scipy
+  and statsmodels are blocked too, and the project can't run without them). Smart App
+  Control has no per-folder exclusions. The only complete fix is turning it off (Windows
+  Security → App & browser control → Smart App Control), an owner decision, since on some
+  Windows 11 versions it can't be turned back on without resetting Windows. Owner's
+  choice as of 2026-09-29: left on. To check whether a failure is this and not a real
+  one, look for the blocked path in that log:
+  `Get-WinEvent -LogName Microsoft-Windows-CodeIntegrity/Operational -MaxEvents 50 |
+  Where-Object Id -eq 3077`. GitHub Actions runs on Linux and is never affected.
 - **A demeaned series divided by a time-varying scale is not zero-mean.** HAR's
   standardized residuals looked demeaned (numerator was `x - x.mean()`) but dividing by a
   scale that correlates with return sign reintroduces a small mean, and bootstrapping that
