@@ -58,6 +58,11 @@ _EXCHANGE_TZ = "America/New_York"
 _SESSION_OPEN = dt.time(9, 30)
 _SESSION_CLOSE = dt.time(16, 0)
 
+# Only these change a position. `hold`/`no_trade` pass validation trivially, so counting
+# them as "accepted proposals" would let a streak of holds meet the 3-day rule -- found
+# 2026-09-29, when all three of the day's "accepted proposals" were holds.
+_TRADE_ACTIONS = frozenset({"open", "add", "trim", "close"})
+
 # "AMD: no quote available" and "SMCI: no quote available" are one failure mode, not two.
 _SYMBOL_PREFIX = re.compile(r"^[A-Z][A-Z.\-]{0,9}: ")
 
@@ -72,7 +77,9 @@ def incident_kind(message: str) -> str:
 
 @dataclass(frozen=True)
 class DayEvidence:
-    """What the ledger shows actually happened on one weekday."""
+    """What the ledger shows actually happened on one weekday. ``proposals_accepted``/
+    ``proposals_rejected`` count trade actions only (``_TRADE_ACTIONS``); ``holds`` counts
+    the Trader's ``hold``/``no_trade`` answers."""
 
     date: str
     research_brief: bool
@@ -87,6 +94,7 @@ class DayEvidence:
     incidents_error: int
     incidents_warning: int
     eod_report: bool
+    holds: int = 0
     placebo_ran: bool = False
     # True when the owner listed this date in `readiness.excluded_days`: it neither counts
     # toward nor resets the clean-day streak.
@@ -105,7 +113,7 @@ class DayEvidence:
             self.research_brief
             or self.trader_calls > 0
             or self.monitor_checks > 0
-            or self.proposals_accepted + self.proposals_rejected > 0
+            or self.proposals_accepted + self.proposals_rejected + self.holds > 0
             or self.incidents_error + self.incidents_warning > 0
         )
 
@@ -251,6 +259,7 @@ def _day_evidence(
     proposals = ledger.proposals_for(day)
     checks = ledger.monitor_checks_for(day)
     incidents = ledger.incidents_for(day)
+    trades = [p for p in proposals if p["action"] in _TRADE_ACTIONS]
 
     gaps = [c["gap_seconds"] / 60.0 for c in checks if c["gap_seconds"] is not None]
     timestamps = [c["created_at"] for c in calls] + [i["created_at"] for i in incidents]
@@ -261,8 +270,8 @@ def _day_evidence(
         research_brief=bool(ledger.briefs_for(day)),
         watchlist_candidates=len(watchlist),
         trader_calls=sum(1 for c in calls if c["role"] == "trader"),
-        proposals_accepted=sum(1 for p in proposals if p["status"] == "accepted"),
-        proposals_rejected=sum(1 for p in proposals if p["status"] == "rejected"),
+        proposals_accepted=sum(1 for p in trades if p["status"] == "accepted"),
+        proposals_rejected=sum(1 for p in trades if p["status"] == "rejected"),
         monitor_checks=len(checks),
         max_monitor_gap_minutes=max(gaps) if gaps else None,
         first_activity_utc=first.tz_convert("UTC").strftime("%H:%M") if first is not None else None,
@@ -270,6 +279,7 @@ def _day_evidence(
         incidents_error=sum(1 for i in incidents if i["severity"] == "error"),
         incidents_warning=sum(1 for i in incidents if i["severity"] == "warning"),
         eod_report=(reports_dir / str(day.date()) / "eod.md").exists(),
+        holds=len(proposals) - len(trades),
         # The placebo sets its session-open equity on its first cycle of the day, whether
         # or not it finds a candidate to trade.
         placebo_ran=placebo_ledger is not None
@@ -375,10 +385,11 @@ def _evidence_checks(report: StageReadiness, config: IntradayConfig) -> list[Evi
             f"{sum(d.incidents_error for d in report.days)} error incident(s)",
         ),
         EvidenceCheck(
-            "The agent produced proposals",
+            "The agent proposed trades",
             sum(d.proposals_accepted + d.proposals_rejected for d in report.days) > 0,
             f"{sum(d.proposals_accepted for d in report.days)} accepted, "
-            f"{sum(d.proposals_rejected for d in report.days)} rejected",
+            f"{sum(d.proposals_rejected for d in report.days)} rejected "
+            f"(plus {sum(d.holds for d in report.days)} hold/no-trade answers)",
         ),
         EvidenceCheck(
             f"At least {min_trades} closed trades (playbook evidence threshold)",
@@ -402,8 +413,8 @@ def _evidence_checks(report: StageReadiness, config: IntradayConfig) -> list[Evi
             or (streak >= rules.clean_days_required and accepted > 0),
             f"{streak} consecutive clean day(s)"
             + (f" ending {report.clean_streak[-1]}" if streak else "")
-            + f", {accepted} accepted proposal(s) in the streak; needs "
-            f"{rules.clean_days_required} with accepted proposals (read them before "
+            + f", {accepted} accepted trade proposal(s) in the streak; needs "
+            f"{rules.clean_days_required} with accepted trade proposals (read them before "
             f"promoting) or {rules.clean_days_if_sparse} without",
         )
     )
@@ -479,20 +490,20 @@ def render_stage_readiness_markdown(report: StageReadiness) -> str:
 
     lines += ["", "## Day by day", ""]
     lines.append(
-        "| date | research | watchlist | trader calls | accepted | rejected | "
+        "| date | research | watchlist | trader calls | accepted | rejected | holds | "
         "monitor checks | longest gap (m) | first activity (UTC) | spend ($) | "
         "errors | warnings | eod report |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for d in report.days:
         if not d.any_activity:
-            lines.append(f"| {d.date} | no activity recorded (holiday or missed run) |" + " |" * 11)
+            lines.append(f"| {d.date} | no activity recorded (holiday or missed run) |" + " |" * 12)
             continue
         gap = f"{d.max_monitor_gap_minutes:.0f}" if d.max_monitor_gap_minutes is not None else "-"
         lines.append(
             f"| {d.date} | {'yes' if d.research_brief else 'no'} | {d.watchlist_candidates} | "
             f"{d.trader_calls} | {d.proposals_accepted} | {d.proposals_rejected} | "
-            f"{d.monitor_checks} | {gap} | {d.first_activity_utc or '-'} | "
+            f"{d.holds} | {d.monitor_checks} | {gap} | {d.first_activity_utc or '-'} | "
             f"{d.spend_usd:.2f} | {d.incidents_error} | {d.incidents_warning} | "
             f"{'yes' if d.eod_report else 'no'} |"
         )

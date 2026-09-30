@@ -2363,7 +2363,10 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       late crons only (research 14:48 and 13:13 CT) and are not clean days.
       **Owner decision 2026-09-29: Stage 1 ends on consecutive clean trading days, not
       the calendar.** Promote after **3** consecutive clean days if the streak includes
-      accepted proposals (which the owner reads first), or **5** if it doesn't. Why: Stage
+      accepted trade proposals (which the owner reads first), or **5** if it doesn't.
+      Trade proposals means open/add/trim/close: `hold`/`no_trade` answers pass
+      validation trivially and are counted separately (the first version counted them,
+      and 2026-09-29's three "accepted proposals" were all holds). Why: Stage
       2 is still paper money, so the shadow stage's job is proving the plumbing and that
       the agent proposes sensibly; the 20-closed-trade threshold judges the strategy and
       can keep accumulating during Stage 2. A clean day: research finished before the

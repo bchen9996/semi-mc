@@ -115,7 +115,7 @@ def test_rejection_reasons_split_joined_validator_failures_and_count_them(tmp_pa
     assert report.rejection_reasons == [("a", 2), ("b", 1)]
     assert report.days[0].proposals_accepted == 1
     assert report.days[0].proposals_rejected == 2
-    assert _check(report, "The agent produced proposals").passed
+    assert _check(report, "The agent proposed trades").passed
 
 
 def test_incidents_are_grouped_by_severity_and_kind(tmp_path, pinned_clock):
@@ -228,7 +228,7 @@ def _at(day: pd.Timestamp, hhmm: str) -> str:
     return local.tz_convert("UTC").isoformat()
 
 
-def _clean_day(ledger, placebo, day, reports, pinned_clock, *, accepted=0, skip=()):
+def _clean_day(ledger, placebo, day, reports, pinned_clock, *, accepted=0, holds=0, skip=()):
     """Everything a clean day needs, timed like the external schedule: research at 08:30
     ET, the open batch at 09:33 ET, cycles every 20 min from 10:00 to 15:40 ET."""
     import datetime as dt
@@ -246,6 +246,8 @@ def _clean_day(ledger, placebo, day, reports, pinned_clock, *, accepted=0, skip=
         ledger.record_monitor_check(day, "cycle", dt.datetime.fromisoformat(_at(day, hhmm)))
     for n in range(accepted):
         ledger.record_proposal(day, "cycle", f"S{n}", "open", "accepted", {})
+    for n in range(holds):
+        ledger.record_proposal(day, "cycle", f"H{n}", "hold", "accepted", {})
     if "placebo" not in skip:
         placebo.record_session_open_equity(day, 100_000.0)
     if "eod" not in skip:
@@ -389,3 +391,17 @@ def test_a_silent_unexcluded_day_resets_the_streak(two_ledgers, pinned_clock):
     report = stage_readiness(ledger, placebo, IntradayConfig(), reports, WEEK[0], WEEK[2])
     assert any("no activity recorded" in r for r in report.days[1].clean_failures)
     assert report.clean_streak == [str(WEEK[2].date())]
+
+
+def test_holds_are_not_accepted_trade_proposals(two_ledgers, pinned_clock):
+    # 2026-09-29's three "accepted proposals" were all holds; a streak of those must
+    # need five clean days, like a streak with no proposals at all.
+    ledger, placebo, reports = two_ledgers
+    for day in WEEK[:3]:
+        _clean_day(ledger, placebo, day, reports, pinned_clock, holds=2)
+    report = stage_readiness(ledger, placebo, IntradayConfig(), reports, WEEK[0], WEEK[2])
+    assert [d.holds for d in report.days] == [2, 2, 2]
+    assert [d.proposals_accepted for d in report.days] == [0, 0, 0]
+    assert report.clean_streak_accepted == 0
+    assert not _check(report, "Stage 2 clean-day streak").passed
+    assert not _check(report, "The agent proposed trades").passed
