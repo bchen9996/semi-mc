@@ -69,7 +69,8 @@ jobs:
             fi
             uv run semimc journal score --config config/paper.yaml
             git add journal/
-            git commit -m "forecast journal: $(date -u +%F)"
+            # The session date, as in cli.py::_trading_day: the day rolls over at 04:00 New York.
+            git commit -m "forecast journal: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
               exit 0
             fi

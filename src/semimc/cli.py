@@ -1494,8 +1494,30 @@ def signals(
 # ---------------------------------------------------------------------------------------
 
 
+# A job's default date is the session it belongs to, and a trading day starts with
+# pre-market at 04:00 New York time, not at midnight: anything after the close and before
+# 04:00 belongs to the session that just ended. This used to be `pd.Timestamp.now()`,
+# which on GitHub's runners is UTC and already tomorrow from 20:00 New York time, so a late
+# cron copy or an evening test run filed itself under the next day and could take that
+# day's run-once slot. Found 2026-09-30: test runs at 23:52 Central (00:52 New York) all
+# wrote rows dated 2026-10-01 -- which is why the rollover is 04:00, not midnight.
+_EXCHANGE_TZ = "America/New_York"
+_TRADING_DAY_ROLLOVER = pd.Timedelta(hours=4)
+
+
+def _trading_day(now: pd.Timestamp | None = None) -> pd.Timestamp:
+    """The current session's date as a naive midnight, the same shape an explicit
+    `--as-of` parses to. `now` (aware, or naive read as UTC) is for tests; it defaults to
+    the clock."""
+    stamp = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize("UTC")
+    local = stamp.tz_convert(_EXCHANGE_TZ) - _TRADING_DAY_ROLLOVER
+    return local.normalize().tz_localize(None)
+
+
 def _paper_as_of(value: str | None) -> pd.Timestamp:
-    return pd.Timestamp(value) if value else pd.Timestamp.now().normalize()
+    return pd.Timestamp(value) if value else _trading_day()
 
 
 def _paper_now(cfg: Config):  # noqa: ANN001 -- returns dt.datetime
@@ -1714,7 +1736,7 @@ def paper_report(
 
     out_dir = cfg.runs_path / sleeve
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"report_{pd.Timestamp.now():%Y%m%d}.md"
+    out_path = out_dir / f"report_{_trading_day():%Y%m%d}.md"
     out_path.write_text(markdown, encoding="utf-8")
     typer.echo(f"Written to {out_path}")
 
@@ -1806,7 +1828,7 @@ def paper_evaluate(
 
 
 def _intraday_as_of(value: str | None) -> pd.Timestamp:
-    return pd.Timestamp(value) if value else pd.Timestamp.now().normalize()
+    return pd.Timestamp(value) if value else _trading_day()
 
 
 def _intraday_now():  # noqa: ANN001 -- returns dt.datetime

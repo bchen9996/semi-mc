@@ -2379,9 +2379,8 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       silent skip). `semimc intraday readiness` scores each day and the streak
       (`intraday/readiness.py`, "Stage 2 clean days"); run it after the close. Known gaps:
       `carry` leaves no trace on a quiet day, so the eod report stands in for it; a
-      half-day session fails the coverage check and needs excluding by hand; a late cron
-      copy running after 19:00 CT is dated the next day (`_intraday_as_of` uses the
-      runner's UTC clock -- fix proposed, not yet approved).
+      half-day session fails the coverage check and needs excluding by hand. (A third, a
+      job run after 19:00 CT being dated the next day, was fixed 2026-10-01; see below.)
       **2026-09-30: first clean day (streak 1), but no trades.** Every external trigger
       fired on the minute. The Researcher's watchlist was one name (JBL, from the news,
       not in the universe), and the Trader answered hold/no_trade 16 times, nearly every
@@ -2405,6 +2404,18 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       open past the close. **All 11 cron-job.org entries live 2026-09-30** (the eight
       intraday and three paper jobs in `docs/external_scheduler.md`, each test-run to a
       204), so 2026-10-01 is the first session with every job triggered on time.
+      **Date fix 2026-10-01 (owner-approved).** Those evening test runs (23:52 CT) all
+      wrote rows dated 2026-10-01: `_intraday_as_of`/`_paper_as_of` took `pd.Timestamp.now()`,
+      which on GitHub's runners is UTC, already tomorrow from 20:00 New York time. Harmless
+      that night (a quiet-day eod.md and paper snapshots the next real run overwrites), but
+      a late cron copy could take the next day's run-once slot. Both now default to the
+      session date (`cli.py::_trading_day`): the New York date, rolling over at 04:00
+      (pre-market) rather than midnight, so anything between the close and 04:00 belongs to
+      the session that just ended. The plain New York date was the first version and would
+      not have caught these runs: 23:52 CT is 00:52 in New York. Nothing is scheduled
+      between midnight and 04:00 New York (preflight, the earliest job, is 07:45). The bot
+      commit messages in all three workflows use the same rule; the cycle/monitor commit
+      times stay UTC.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

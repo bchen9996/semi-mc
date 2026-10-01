@@ -200,7 +200,8 @@ jobs:
               echo "nothing to commit"
               exit 0
             fi
-            git commit -m "intraday preflight: $(date -u +%F)"
+            # The session date, as in cli.py::_trading_day: the day rolls over at 04:00 New York.
+            git commit -m "intraday preflight: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
               exit 0
             fi
@@ -250,7 +251,7 @@ jobs:
               echo "nothing to commit"
               exit 0
             fi
-            git commit -m "intraday research: $(date -u +%F)"
+            git commit -m "intraday research: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
               exit 0
             fi
@@ -291,7 +292,7 @@ jobs:
               echo "nothing to commit"
               exit 0
             fi
-            git commit -m "intraday preopen: $(date -u +%F)"
+            git commit -m "intraday preopen: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
               exit 0
             fi
@@ -353,7 +354,7 @@ jobs:
                 iteration_ok=1
                 break
               fi
-              git commit -m "intraday monitor: $(date -u +%F) $(date -u +%H:%M)"
+              git commit -m "intraday monitor: $(TZ=America/New_York date -d '4 hours ago' +%F) $(date -u +%H:%M)"
               if git push; then
                 iteration_ok=1
                 break
@@ -419,7 +420,7 @@ jobs:
               echo "nothing to commit"
               exit 0
             fi
-            git commit -m "intraday open-batch: $(date -u +%F)"
+            git commit -m "intraday open-batch: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
               exit 0
             fi
@@ -468,7 +469,7 @@ jobs:
               echo "nothing to commit"
               exit 0
             fi
-            git commit -m "intraday cycle: $(date -u +%F) $(date -u +%H:%M)"
+            git commit -m "intraday cycle: $(TZ=America/New_York date -d '4 hours ago' +%F) $(date -u +%H:%M)"
             if git push; then
               exit 0
             fi
@@ -510,7 +511,7 @@ jobs:
               echo "nothing to commit"
               exit 0
             fi
-            git commit -m "intraday carry: $(date -u +%F)"
+            git commit -m "intraday carry: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
               exit 0
             fi
@@ -566,7 +567,7 @@ jobs:
               echo "nothing to commit"
               exit 0
             fi
-            git commit -m "intraday eod-review: $(date -u +%F)"
+            git commit -m "intraday eod-review: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
               exit 0
             fi
@@ -609,7 +610,7 @@ jobs:
               echo "nothing to commit"
               exit 0
             fi
-            git commit -m "intraday weekly-review: $(date -u +%F)"
+            git commit -m "intraday weekly-review: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
               exit 0
             fi

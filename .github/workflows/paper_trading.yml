@@ -125,7 +125,8 @@ jobs:
               echo "nothing to commit"
               exit 0
             fi
-            git commit -m "paper decide/execute: ${{ matrix.sleeve }} $(date -u +%F)"
+            # The session date, as in cli.py::_trading_day: the day rolls over at 04:00 New York.
+            git commit -m "paper decide/execute: ${{ matrix.sleeve }} $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
               exit 0
             fi
@@ -174,7 +175,7 @@ jobs:
               echo "nothing to commit"
               exit 0
             fi
-            git commit -m "paper mark: ${{ matrix.sleeve }} $(date -u +%F)"
+            git commit -m "paper mark: ${{ matrix.sleeve }} $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
               exit 0
             fi
