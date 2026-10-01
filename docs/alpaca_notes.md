@@ -104,6 +104,20 @@ real account is flagged as such, not guessed at.
   pulling 15-min-delayed SIP minute bars for the after-the-fact cost analysis T5
   mentions -- to be checked in Phase 6 against the real account's actual plan.
 
+- **S4 calls added 2026-09-30, both `feed=DataFeed.IEX`** (`execution/market_data.py`):
+  `get_stock_latest_trade(StockLatestTradeRequest(symbol_or_symbols=[...]))` for the
+  pre-market fallback (`AlpacaMarketDataClient.latest_trades`), and
+  `get_stock_bars(StockBarsRequest(..., timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+  adjustment=Adjustment.SPLIT))` for the Trader's `session` section
+  (`AlpacaMarketDataClient.bars`, about two weeks of 5-minute bars per cycle for the
+  symbols in view). Signatures checked against the installed alpaca-py 0.44.0; **not yet
+  verified against the real account**. The first research and cycle runs on 2026-10-01
+  are the test: the research `info` incident (`premarket moves: N/14 tickers priced`) and
+  a non-empty `session` section in the Trader's context, or a `session bars unavailable`
+  warning saying why not. Why IEX: the free plan's SIP data is 15 minutes delayed, too
+  stale for an intraday trigger. IEX volume is a small slice of the tape, so relative
+  volume compares IEX only with IEX (`intraday/session.py`).
+
 ## Options (S4, `BRIEF_INTRADAY.md`)
 
 Both of the brief's own options gates are unresolved -- recorded here per its instruction,

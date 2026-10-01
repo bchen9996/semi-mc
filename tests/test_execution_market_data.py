@@ -256,3 +256,55 @@ def test_options_from_env_defaults_to_s4s_own_key_pair(monkeypatch):
     client = AlpacaOptionsMarketDataClient.from_env()
     assert client._data is not None
     assert client._trading is not None
+
+
+# -- latest trades and bars (2026-09-30: pre-market fallback, the Trader's session data) ---
+
+
+def test_latest_trades_returns_price_and_timestamp_per_symbol_from_iex():
+    from alpaca.data.enums import DataFeed
+    from alpaca.data.models.trades import Trade
+
+    client = MagicMock()
+    client.get_stock_latest_trade.return_value = {
+        "NVDA": Trade.model_construct(symbol="NVDA", timestamp=AT, price=190.5, size=10),
+        "AMD": None,
+    }
+    trades = AlpacaMarketDataClient(client).latest_trades(["NVDA", "AMD"])
+
+    assert trades == {"NVDA": (190.5, AT)}
+    request = client.get_stock_latest_trade.call_args.args[0]
+    assert request.symbol_or_symbols == ["NVDA", "AMD"]
+    assert request.feed == DataFeed.IEX
+
+
+def test_latest_trades_and_bars_make_no_request_for_no_symbols():
+    client = MagicMock()
+    data = AlpacaMarketDataClient(client)
+    assert data.latest_trades([]) == {}
+    assert data.bars([], AT, AT) == {}
+    client.get_stock_latest_trade.assert_not_called()
+    client.get_stock_bars.assert_not_called()
+
+
+def test_bars_requests_split_adjusted_iex_bars_with_utc_bounds():
+    from alpaca.data.enums import Adjustment, DataFeed
+    from alpaca.data.timeframe import TimeFrameUnit
+
+    bar = Bar.model_construct(
+        symbol="NVDA", timestamp=AT, open=1.0, high=2.0, low=0.5, close=1.5, volume=10.0
+    )
+    client = MagicMock()
+    client.get_stock_bars.return_value = BarSet.model_construct(data={"NVDA": [bar]})
+    naive_start = (AT - dt.timedelta(days=5)).replace(tzinfo=None)
+
+    out = AlpacaMarketDataClient(client).bars(["NVDA"], naive_start, AT, minutes=5)
+
+    assert out == {"NVDA": [bar]}
+    request = client.get_stock_bars.call_args.args[0]
+    assert request.timeframe.amount == 5
+    assert request.timeframe.unit == TimeFrameUnit.Minute
+    assert request.adjustment == Adjustment.SPLIT
+    assert request.feed == DataFeed.IEX
+    # alpaca-py stores request times as naive UTC; a naive bound must arrive unshifted.
+    assert request.start.replace(tzinfo=None) == naive_start

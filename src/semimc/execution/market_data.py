@@ -44,11 +44,17 @@ from dataclasses import dataclass
 from typing import Literal
 
 from alpaca.common.exceptions import APIError
-from alpaca.data.enums import DataFeed, OptionsFeed
+from alpaca.data.enums import Adjustment, DataFeed, OptionsFeed
 from alpaca.data.historical import OptionHistoricalDataClient, StockHistoricalDataClient
-from alpaca.data.models import Quote
-from alpaca.data.requests import OptionBarsRequest, OptionChainRequest, StockQuotesRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.models import Bar, Quote
+from alpaca.data.requests import (
+    OptionBarsRequest,
+    OptionChainRequest,
+    StockBarsRequest,
+    StockLatestTradeRequest,
+    StockQuotesRequest,
+)
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import ContractType
 from dotenv import load_dotenv
@@ -131,6 +137,56 @@ class AlpacaMarketDataClient:
         midpoint (``arrival_price``) can't provide. Same nearest-quote lookup, same
         ``None``-on-no-coverage contract."""
         return self._nearest_quote(symbol, at, window, feed)
+
+    def latest_trades(
+        self, symbols: list[str], feed: DataFeed = DataFeed.IEX
+    ) -> dict[str, tuple[float, dt.datetime]]:
+        """Each symbol's most recent trade on ``feed``: ``(price, aware-UTC timestamp)``.
+        Added 2026-09-30 for `intraday/jobs.py::premarket_moves`, whose 07:30 CT quote
+        lookup came back empty for every ticker: a +/-5 minute window rarely holds an IEX
+        pre-market quote, while the latest trade is whatever printed last, however long
+        ago. That can be yesterday's after-hours print, so the caller checks the
+        timestamp. A symbol with no trade at all is absent."""
+        if not symbols:
+            return {}
+        response = self._client.get_stock_latest_trade(
+            StockLatestTradeRequest(symbol_or_symbols=list(symbols), feed=feed)
+        )
+        return {
+            symbol: (float(trade.price), trade.timestamp)
+            for symbol, trade in response.items()
+            if trade is not None and trade.price
+        }
+
+    def bars(
+        self,
+        symbols: list[str],
+        start: dt.datetime,
+        end: dt.datetime,
+        minutes: int = 5,
+        feed: DataFeed = DataFeed.IEX,
+    ) -> dict[str, list[Bar]]:
+        """``minutes``-minute bars per symbol in ``[start, end]``, oldest first, split-
+        adjusted so a split inside the lookback can't read as a crash. Naive bounds are
+        UTC. Feeds `intraday/session.py` (2026-09-30): the Trader had only a midpoint, so
+        a Researcher trigger like "holds the opening range on above-average volume" could
+        never be checked. IEX volume is IEX's own slice of the tape (a few percent of all
+        trading), which is why the session module compares it only with IEX volume."""
+        if not symbols:
+            return {}
+        start = start if start.tzinfo else start.replace(tzinfo=dt.UTC)
+        end = end if end.tzinfo else end.replace(tzinfo=dt.UTC)
+        response = self._client.get_stock_bars(
+            StockBarsRequest(
+                symbol_or_symbols=list(symbols),
+                start=start,
+                end=end,
+                timeframe=TimeFrame(minutes, TimeFrameUnit.Minute),
+                adjustment=Adjustment.SPLIT,
+                feed=feed,
+            )
+        )
+        return {symbol: list(rows) for symbol, rows in response.data.items()}
 
 
 def _api_status_code(exc: APIError) -> int | None:

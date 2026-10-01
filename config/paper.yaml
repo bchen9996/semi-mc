@@ -263,6 +263,10 @@ intraday:
     preopen_lookback_hours: 2.0
     earnings_lookahead_days: 5
     max_headlines_per_symbol: 5
+  session_data:   # the Trader's `session` section (intraday/session.py); starting choices
+    bar_minutes: 5
+    opening_range_minutes: 30
+    volume_lookback_sessions: 10
   placebo:
     stop_distance_pct: 0.02
     time_stop_minutes: 120
