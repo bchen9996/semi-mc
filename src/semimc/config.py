@@ -533,6 +533,19 @@ class IntradayResearchConfig(_Base):
     max_headlines_per_symbol: int = Field(5, gt=0)
 
 
+class IntradaySessionDataConfig(_Base):
+    """The Trader's `session` section (`intraday/session.py`, added 2026-09-30): bar
+    size, how long the opening range runs, and how many earlier sessions set "normal"
+    volume for the time of day. Starting choices, not researched figures, same caveat as
+    `IntradayRiskConfig.max_spread_bps`. 30 minutes matches the Researcher's own habit of
+    writing "after the first 15-30 minutes" triggers; 10 sessions is two weeks.
+    """
+
+    bar_minutes: int = Field(5, gt=0)
+    opening_range_minutes: int = Field(30, gt=0)
+    volume_lookback_sessions: int = Field(10, gt=0)
+
+
 class IntradayPlaybookConfig(_Base):
     """`PLAYBOOK.md`'s accept/reject/retire knobs (`BRIEF_INTRADAY.md`'s "Self-improvement
     rules" and its "Playbook change threshold" default), Phase 10.
@@ -621,6 +634,7 @@ class IntradayConfig(_Base):
     options: IntradayOptionsConfig = Field(default_factory=IntradayOptionsConfig)
     models: IntradayModelsConfig = Field(default_factory=IntradayModelsConfig)
     research: IntradayResearchConfig = Field(default_factory=IntradayResearchConfig)
+    session_data: IntradaySessionDataConfig = Field(default_factory=IntradaySessionDataConfig)
     placebo: IntradayPlaceboConfig = Field(default_factory=IntradayPlaceboConfig)
     playbook: IntradayPlaybookConfig = Field(default_factory=IntradayPlaybookConfig)
     readiness: IntradayReadinessConfig = Field(default_factory=IntradayReadinessConfig)

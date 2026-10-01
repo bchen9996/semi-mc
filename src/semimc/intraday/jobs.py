@@ -68,6 +68,7 @@ from .pretrade import IntradayPretradeContext, check_intraday_pretrade, check_sp
 from .proposals import OPEN_OR_ADD_ACTIONS, TradeProposal, ValidationContext, validate_proposal
 from .reflect import _entry_and_proposal, record_mechanical_reflection
 from .security import sanitize_and_log
+from .session import session_snapshot
 
 
 def midpoint_price(quote: Any) -> float | None:
@@ -314,11 +315,44 @@ def run_preflight(
 # -- research (Phase 6) ------------------------------------------------------------------
 
 
+def _session_context(
+    symbols: list[str],
+    market_data: AlpacaMarketDataClient,
+    config: IntradayConfig,
+    ledger: IntradayLedger,
+    now: dt.datetime,
+) -> dict[str, dict[str, Any]]:
+    """The Trader's `session` section (`intraday/session.py`) for the symbols in view.
+    One bars request covers today and the volume lookback: `volume_lookback_sessions`
+    trading days need about 7/5 as many calendar days, plus slack for holidays. A failed
+    request is a warning and an empty section -- the cycle still runs on prices alone,
+    as it did before this existed."""
+    if not symbols:
+        return {}
+    settings = config.session_data
+    now_utc = now if now.tzinfo else now.replace(tzinfo=dt.UTC)
+    calendar_days = settings.volume_lookback_sessions * 7 // 5 + 5
+    try:
+        bars = market_data.bars(
+            symbols,
+            start=now_utc - dt.timedelta(days=calendar_days),
+            end=now_utc,
+            minutes=settings.bar_minutes,
+        )
+    except Exception as exc:  # noqa: BLE001 - missing context must not cost the cycle
+        ledger.record_incident("warning", f"session bars unavailable: {exc}")
+        return {}
+    return session_snapshot(
+        bars, now_utc, settings.opening_range_minutes, settings.volume_lookback_sessions
+    )
+
+
 def premarket_moves(
     tickers: list[str],
     market_data_pit: MarketData,
     market_data: AlpacaMarketDataClient,
     now: dt.datetime,
+    diagnostics: dict[str, list[str]] | None = None,
 ) -> dict[str, float]:
     """Percent move from the last cached close to the latest Alpaca quote at `now`.
     `market_data_pit`'s cache is refreshed by the workflow's own `semimc fetch` step
@@ -332,26 +366,70 @@ def premarket_moves(
     care what time of day it's called at. `eod_report.py`'s SOXX benchmark (Phase 9a)
     reuses it exactly this way, which is also why this dropped its leading underscore --
     a second real caller outside `jobs.py`, not `jobs.py`-private anymore (same reasoning
-    Phase 7 already used renaming `_turnover_so_far_usd`)."""
+    Phase 7 already used renaming `_turnover_so_far_usd`).
+
+    **A missing quote falls back to today's latest trade** (2026-09-30): the 07:30 CT
+    research run got no pre-market move for any ticker, since a +/-5 minute window
+    rarely holds an IEX pre-market quote. Only a trade printed on `now`'s New York date
+    and not after `now` is used, so yesterday's after-hours print never stands in for
+    this morning. `diagnostics`, when passed, collects which tickers had no prior close,
+    were priced from a trade, or got no price at all -- what `run_research` logs so the
+    next empty result says why."""
     prior_close = market_data_pit.spot(tickers)
     moves: dict[str, float] = {}
+    trades: dict[str, float] | None = None  # fetched once, only if some quote is missing
+    notes: dict[str, list[str]] = {"no_prior_close": [], "from_trade": [], "no_price": []}
     for ticker in tickers:
         prior = prior_close.get(ticker)
         if prior is None or pd.isna(prior) or prior <= 0:
+            notes["no_prior_close"].append(ticker)
             continue
         current = midpoint_price(market_data.latest_quote(ticker, at=now))
         if current is None:
+            if trades is None:
+                trades = _todays_trade_prices(tickers, market_data, now)
+            current = trades.get(ticker)
+            if current is not None:
+                notes["from_trade"].append(ticker)
+        if current is None:
+            notes["no_price"].append(ticker)
             continue
         moves[ticker] = (current - prior) / prior
+    if diagnostics is not None:
+        diagnostics.update(notes)
     return moves
+
+
+def _todays_trade_prices(
+    tickers: list[str], market_data: AlpacaMarketDataClient, now: dt.datetime
+) -> dict[str, float]:
+    """Latest trade per ticker, kept only if it printed on `now`'s New York date, at or
+    before `now`. A failed lookup is an empty result, never a crash -- the same tolerance
+    as a single missing quote."""
+    try:
+        latest = market_data.latest_trades(tickers)
+    except Exception:  # noqa: BLE001 - a fallback must never take research down with it
+        return {}
+    now_utc = pd.Timestamp(now if now.tzinfo else now.replace(tzinfo=dt.UTC))
+    today = now_utc.tz_convert("America/New_York").date()
+    prices: dict[str, float] = {}
+    for ticker, (price, printed_at) in latest.items():
+        stamp = pd.Timestamp(printed_at)
+        stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp
+        if stamp <= now_utc and stamp.tz_convert("America/New_York").date() == today:
+            prices[ticker] = price
+    return prices
 
 
 def _upcoming_earnings(
     tickers: list[str], market_data_pit: MarketData, as_of: pd.Timestamp, lookahead_days: int
 ) -> dict[str, str]:
-    """Nearest scheduled report date within `lookahead_days`, per ticker with one. The
-    report *date* is known ahead of time (`data/earnings.py`'s own point-in-time
-    reasoning); only the *reaction* is what the Researcher has to weigh -- not a leak."""
+    """Nearest scheduled report date within `lookahead_days`, per ticker with one,
+    **including today**. The report *date* is known ahead of time (`data/earnings.py`'s
+    own point-in-time reasoning); only the *reaction* is what the Researcher has to weigh
+    -- not a leak. Found 2026-09-30: this used `date > today`, so a same-day report (the
+    one that matters most to a day's trading) was dropped -- MU reported after that day's
+    close and the Researcher was told nothing was coming up."""
     if market_data_pit.earnings is None:
         return {}
     stamp = pd.Timestamp(as_of).normalize()
@@ -359,7 +437,7 @@ def _upcoming_earnings(
     upcoming: dict[str, str] = {}
     for ticker in tickers:
         rows = market_data_pit.earnings.for_ticker(ticker)
-        future = rows[(rows["date"] > stamp) & (rows["date"] <= horizon)]
+        future = rows[(rows["date"] >= stamp) & (rows["date"] <= horizon)]
         if not future.empty:
             upcoming[ticker] = str(pd.Timestamp(future.iloc[0]["date"]).date())
     return upcoming
@@ -485,7 +563,22 @@ def run_research(
         for article in capped_articles
     ]
 
-    premarket_moves_today = premarket_moves(tickers, market_data_pit, market_data, now)
+    premarket_notes: dict[str, list[str]] = {}
+    premarket_moves_today = premarket_moves(
+        tickers, market_data_pit, market_data, now, diagnostics=premarket_notes
+    )
+    # One line per morning saying how many pre-market moves the Researcher actually got,
+    # and why the rest are missing -- 2026-09-30's brief said "data is thin" with no way
+    # to tell which input had failed.
+    summary = f"premarket moves: {len(premarket_moves_today)}/{len(tickers)} tickers priced"
+    for label, key in (
+        ("from latest trade", "from_trade"),
+        ("no prior close", "no_prior_close"),
+        ("no price", "no_price"),
+    ):
+        if premarket_notes.get(key):
+            summary += f"; {label}: {', '.join(premarket_notes[key])}"
+    ledger.record_incident("info", summary)
     upcoming_earnings = _upcoming_earnings(
         tickers, market_data_pit, as_of, research_cfg.earnings_lookahead_days
     )
@@ -814,6 +907,7 @@ def run_cycle(
 
     symbols_in_view = {row["symbol"] for row in tradable_watchlist} | set(positions_notional)
     headlines = ledger.recent_headlines_for(as_of, list(symbols_in_view)) if symbols_in_view else []
+    session = _session_context(sorted(symbols_in_view), market_data, intraday, ledger, now)
 
     try:
         context = build_trader_context(
@@ -825,6 +919,7 @@ def run_cycle(
             positions_notional,
             prices,
             headlines=headlines,
+            session=session,
         )
         response = invoke_role(
             "trader",

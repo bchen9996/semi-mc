@@ -69,6 +69,12 @@ class _FakeMarketData:
         price = self._quotes.get(symbol)
         return _FakeQuote(price) if price is not None else None
 
+    def latest_trades(self, symbols):
+        return {}
+
+    def bars(self, symbols, start, end, minutes=5):
+        return {}
+
 
 class _FakeNewsClient:
     def __init__(self, articles: list | None = None):

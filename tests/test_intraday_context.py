@@ -106,7 +106,7 @@ def test_build_trader_context_includes_rejected_proposals_with_reasons(tmp_path)
     ledger.close()
 
 
-def test_build_trader_context_marks_watchlist_prices_and_headlines_as_untrusted(tmp_path):
+def test_build_trader_context_marks_feed_sourced_sections_as_untrusted(tmp_path):
     ledger = _ledger(tmp_path)
     config = IntradayConfig()
 
@@ -114,7 +114,8 @@ def test_build_trader_context_marks_watchlist_prices_and_headlines_as_untrusted(
         AS_OF, "cycle_1", config, ledger, watchlist=[], positions={}, prices={}
     )
 
-    assert set(bundle.payload["untrusted"]) == {"watchlist", "prices", "headlines"}
+    # `session` (2026-09-30) comes from the same market-data feed as `prices`.
+    assert set(bundle.payload["untrusted"]) == {"watchlist", "prices", "headlines", "session"}
     assert "positions" not in bundle.payload["untrusted"]
     ledger.close()
 
@@ -327,3 +328,17 @@ def test_reviewer_output_json_schema_requires_every_field():
         "playbook_proposal",
     ]
     assert schema["properties"]["reflection_updates"]["type"] == "array"
+
+
+def test_build_trader_context_carries_the_session_section(tmp_path):
+    ledger = _ledger(tmp_path)
+    session = {"NVDA": {"open": 190.0, "relative_volume": 1.4}}
+
+    with_session = build_trader_context(
+        AS_OF, "cycle_1", IntradayConfig(), ledger, [], {}, {}, session=session
+    )
+    without = build_trader_context(AS_OF, "cycle_1", IntradayConfig(), ledger, [], {}, {})
+
+    assert with_session.payload["sections"]["session"] == session
+    assert without.payload["sections"]["session"] == {}
+    ledger.close()

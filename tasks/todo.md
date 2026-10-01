@@ -2382,6 +2382,27 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       half-day session fails the coverage check and needs excluding by hand; a late cron
       copy running after 19:00 CT is dated the next day (`_intraday_as_of` uses the
       runner's UTC clock -- fix proposed, not yet approved).
+      **2026-09-30: first clean day (streak 1), but no trades.** Every external trigger
+      fired on the minute. The Researcher's watchlist was one name (JBL, from the news,
+      not in the universe), and the Trader answered hold/no_trade 16 times, nearly every
+      answer citing "no volume data" or "no opening range data": its context held one
+      midpoint per symbol, so a trigger like "holds direction on above-average volume
+      after 15-30 minutes" could never be checked. The Researcher's brief opened with
+      "data is thin", and two inputs really were empty. Fixed the same day (owner-
+      approved): (1) `_upcoming_earnings` used `date > today`, so a same-day report was
+      dropped -- MU reported after that close and the Researcher was told nothing was
+      coming up (the options earnings gate shared the helper and was missing same-day
+      prints too); (2) pre-market moves were empty for every ticker, most likely because
+      a +/-5 minute window rarely holds an IEX pre-market quote -- a missing quote now
+      falls back to the latest trade printed that New York day, and research logs an
+      `info` incident saying how many tickers got a move and why the rest didn't; (3) the
+      Trader gets a new `session` section (`intraday/session.py`): open, opening range,
+      high/low, VWAP and IEX relative volume against the same time of day over the last
+      10 sessions, from 5-minute IEX bars. Unverified against the real account until the
+      2026-10-01 runs (`docs/alpaca_notes.md`). Still open: `carry` and `eod-review` have
+      no cron-job.org entry yet, so both ran hours late (carry at 18:13 CT) -- harmless
+      with no positions, but once the agent trades, a late carry leaves intraday positions
+      open past the close.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

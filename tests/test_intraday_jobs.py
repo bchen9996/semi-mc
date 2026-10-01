@@ -82,11 +82,26 @@ class _FakeQuote:
 class _FakeMarketData:
     quotes: dict[str, _FakeQuote] = field(default_factory=dict)
     raises: bool = False
+    # symbol -> (price, timestamp), what `AlpacaMarketDataClient.latest_trades` returns.
+    trades: dict[str, tuple[float, dt.datetime]] = field(default_factory=dict)
+    # symbol -> bar objects, what `AlpacaMarketDataClient.bars` returns.
+    bars_by_symbol: dict[str, list] = field(default_factory=dict)
+    bars_raise: bool = False
+    bar_requests: list[dict] = field(default_factory=list)
 
     def latest_quote(self, symbol: str, at: dt.datetime):
         if self.raises:
             raise RuntimeError("data feed unreachable")
         return self.quotes.get(symbol)
+
+    def latest_trades(self, symbols):
+        return {s: self.trades[s] for s in symbols if s in self.trades}
+
+    def bars(self, symbols, start, end, minutes=5):
+        self.bar_requests.append({"symbols": list(symbols), "start": start, "end": end})
+        if self.bars_raise:
+            raise RuntimeError("bars endpoint unreachable")
+        return {s: self.bars_by_symbol[s] for s in symbols if s in self.bars_by_symbol}
 
 
 def _quote(price: float, spread: float = 0.05, at: dt.datetime = NOW) -> _FakeQuote:
@@ -1715,4 +1730,153 @@ def test_eod_review_pays_for_one_reviewer_call_per_day_even_with_nothing_graded(
     assert second.skipped_reason == f"eod_review already ran for {AS_OF}"
     assert len(calls) == 1
     paper_ledger.close()
+    ledger.close()
+
+
+# -- 2026-09-30: same-day earnings, the pre-market trade fallback, the Trader's session ---
+
+
+def test_upcoming_earnings_includes_a_report_due_today():
+    """MU reported after the 2026-09-30 close and the Researcher was told nothing was
+    coming up: the lookup used `date > today`."""
+    from types import SimpleNamespace
+
+    from semimc.data.earnings import EarningsCalendar
+    from semimc.intraday.jobs import _upcoming_earnings
+
+    events = pd.DataFrame(
+        {
+            "ticker": ["MU", "MU", "NVDA"],
+            "date": pd.to_datetime(["2026-06-24", "2026-09-30", "2026-11-19"]),
+            "timing": ["amc", "amc", "amc"],
+        }
+    )
+    pit = SimpleNamespace(earnings=EarningsCalendar(events))
+    upcoming = _upcoming_earnings(["MU", "NVDA"], pit, pd.Timestamp("2026-09-30"), 5)
+    assert upcoming == {"MU": "2026-09-30"}
+
+
+def test_premarket_moves_fall_back_to_a_trade_printed_today_only():
+    from types import SimpleNamespace
+
+    from semimc.intraday.jobs import premarket_moves
+
+    now = dt.datetime(2026, 9, 30, 12, 31)  # 07:31 Central, naive UTC like _intraday_now
+    pit = SimpleNamespace(
+        spot=lambda tickers: {"NVDA": 100.0, "AMD": 50.0, "MU": 1000.0, "TSM": 200.0}
+    )
+    market_data = _FakeMarketData(
+        quotes={"TSM": _quote(202.0, at=now)},
+        trades={
+            "NVDA": (101.0, dt.datetime(2026, 9, 30, 12, 10, tzinfo=dt.UTC)),  # 08:10 ET today
+            # 20:30 ET on the 29th: the UTC date is today, the New York date is not.
+            "AMD": (55.0, dt.datetime(2026, 9, 30, 0, 30, tzinfo=dt.UTC)),
+            "MU": (1100.0, dt.datetime(2026, 9, 30, 12, 40, tzinfo=dt.UTC)),  # after `now`
+        },
+    )
+    notes: dict[str, list[str]] = {}
+
+    moves = premarket_moves(
+        ["NVDA", "AMD", "MU", "TSM", "INTC"], pit, market_data, now, diagnostics=notes
+    )
+
+    assert moves == {"NVDA": pytest.approx(0.01), "TSM": pytest.approx(0.01)}
+    assert notes == {"no_prior_close": ["INTC"], "from_trade": ["NVDA"], "no_price": ["AMD", "MU"]}
+
+
+def test_premarket_moves_survive_a_failed_trade_lookup():
+    from types import SimpleNamespace
+
+    from semimc.intraday.jobs import premarket_moves
+
+    class _Failing(_FakeMarketData):
+        def latest_trades(self, symbols):
+            raise RuntimeError("trades endpoint down")
+
+    pit = SimpleNamespace(spot=lambda tickers: {"NVDA": 100.0})
+    assert premarket_moves(["NVDA"], pit, _Failing(), NOW) == {}
+
+
+def test_run_research_logs_how_many_premarket_moves_it_got(config, tmp_path, market):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"morning_brief": "quiet", "watchlist": []})
+    )
+
+    run_research(
+        cfg,
+        FakeBroker(),
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        market,
+        ledger,
+        client,
+        AS_OF,
+        "research",
+        NOW,
+    )
+
+    [note] = [i for i in ledger.incidents() if i["message"].startswith("premarket moves:")]
+    assert note["severity"] == "info"
+    assert f"0/{len(cfg.universe.tickers)} tickers priced" in note["message"]
+    assert "no price:" in note["message"]
+    ledger.close()
+
+
+def _session_bars(day: dt.date, closes: list[float]) -> list:
+    """5-minute bars from 09:30 New York (13:30 UTC in daylight time), one per close."""
+    from types import SimpleNamespace
+
+    start = dt.datetime(day.year, day.month, day.day, 13, 30, tzinfo=dt.UTC)
+    return [
+        SimpleNamespace(
+            timestamp=start + dt.timedelta(minutes=5 * i),
+            open=c,
+            high=c + 0.5,
+            low=c - 0.5,
+            close=c,
+            volume=100.0,
+            vwap=None,
+        )
+        for i, c in enumerate(closes)
+    ]
+
+
+def test_run_cycle_gives_the_trader_session_data_for_symbols_in_view(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="opening-range breakout")
+    now = dt.datetime(2026, 9, 21, 14, 12)  # 10:12 New York
+    market_data = _FakeMarketData(
+        quotes={"NVDA": _quote(190.0, at=now)},
+        bars_by_symbol={"NVDA": _session_bars(AS_OF.date(), [186, 187, 188, 187, 186, 187, 190])},
+    )
+    calls, client = _recording_llm_client(_result_json())
+
+    run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, now)
+
+    assert market_data.bar_requests[0]["symbols"] == ["NVDA"]
+    session = json.loads(calls[0]["stdin"])["sections"]["session"]
+    assert session["NVDA"]["open"] == 186
+    assert session["NVDA"]["opening_range"]["complete"] is True
+    assert session["NVDA"]["last_vs_opening_range"] == "above"
+    ledger.close()
+
+
+def test_run_cycle_still_runs_when_session_bars_are_unavailable(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)}, bars_raise=True)
+    calls, client = _recording_llm_client(_result_json())
+
+    run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, NOW)
+
+    assert len(calls) == 1
+    assert json.loads(calls[0]["stdin"])["sections"]["session"] == {}
+    assert any(
+        i["severity"] == "warning" and i["message"].startswith("session bars unavailable")
+        for i in ledger.incidents()
+    )
     ledger.close()
