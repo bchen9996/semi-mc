@@ -2399,10 +2399,12 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       Trader gets a new `session` section (`intraday/session.py`): open, opening range,
       high/low, VWAP and IEX relative volume against the same time of day over the last
       10 sessions, from 5-minute IEX bars. Unverified against the real account until the
-      2026-10-01 runs (`docs/alpaca_notes.md`). Still open: `carry` and `eod-review` have
-      no cron-job.org entry yet, so both ran hours late (carry at 18:13 CT) -- harmless
+      2026-10-01 runs (`docs/alpaca_notes.md`). `carry` and `eod-review` had no
+      cron-job.org entry that day, so both ran hours late (carry at 18:13 CT) -- harmless
       with no positions, but once the agent trades, a late carry leaves intraday positions
-      open past the close.
+      open past the close. **All 11 cron-job.org entries live 2026-09-30** (the eight
+      intraday and three paper jobs in `docs/external_scheduler.md`, each test-run to a
+      204), so 2026-10-01 is the first session with every job triggered on time.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).
