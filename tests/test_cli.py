@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
+from semimc import cli
 from semimc.cli import app
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -544,6 +545,37 @@ def fake_alpaca_broker(monkeypatch):
         classmethod(lambda cls: broker),
     )
     return broker
+
+
+@pytest.mark.parametrize(
+    ("now_utc", "expected"),
+    [
+        ("2026-09-30 21:00", "2026-09-30"),  # 17:00 New York, after the close
+        # 2026-09-30's evening test runs: 23:52 Central, 00:52 New York, 04:52 UTC.
+        ("2026-10-01 04:52", "2026-09-30"),
+        ("2026-10-01 07:59", "2026-09-30"),  # 03:59 New York: still the 30th's session
+        ("2026-10-01 08:00", "2026-10-01"),  # 04:00 New York: pre-market, the next day
+        ("2026-10-01 11:45", "2026-10-01"),  # preflight, 07:45 New York
+        # Standard time (UTC-5): the day turns at 09:00 UTC, not 08:00.
+        ("2026-12-01 08:30", "2026-11-30"),
+        ("2026-12-01 09:00", "2026-12-01"),
+    ],
+)
+def test_the_default_as_of_is_the_session_date_not_the_utc_date(now_utc, expected):
+    day = cli._trading_day(pd.Timestamp(now_utc, tz="UTC"))
+    assert day == pd.Timestamp(expected)
+    assert day.tzinfo is None  # the same shape an explicit --as-of parses to
+
+
+def test_a_naive_now_is_read_as_utc():
+    assert cli._trading_day(pd.Timestamp("2026-10-01 04:52")) == pd.Timestamp("2026-09-30")
+
+
+def test_paper_and_intraday_jobs_default_to_the_session_date(monkeypatch):
+    monkeypatch.setattr(cli, "_trading_day", lambda: pd.Timestamp("2026-09-30"))
+    assert cli._paper_as_of(None) == pd.Timestamp("2026-09-30")
+    assert cli._intraday_as_of(None) == pd.Timestamp("2026-09-30")
+    assert cli._intraday_as_of("2026-09-21") == pd.Timestamp("2026-09-21")
 
 
 def test_paper_decide_freezes_a_decision(workspace):
