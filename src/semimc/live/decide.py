@@ -79,8 +79,17 @@ def run_decide(
 ) -> DecideResult:
     """Compute and freeze one sleeve's decision for ``as_of``, unless it's already been
     decided this rebalance period (skip) or a *different* decision already exists for this
-    exact day (refuse, unless ``force``)."""
+    exact day (refuse, unless ``force``).
+
+    The decision sees closes strictly before ``as_of`` (``MarketData.before``), never
+    ``as_of``'s own row: the job runs at 10:05 New York, when that row is a partial bar
+    whose "close" is just the latest trade. Found 2026-10-01: s3's decision was built on a
+    35-minute-old bar, and GitHub's late copy of the same job that afternoon saw a
+    different bar, computed a different decision, and failed on the refusal below. Using
+    the last completed close makes every run for a day agree, whenever it runs.
+    ``data_vintage`` records that close."""
     as_of = pd.Timestamp(as_of)
+    market = market.before(as_of)
     sleeve_config = config.paper.sleeves.get(sleeve)
     rebalance_frequency = sleeve_config.rebalance_frequency if sleeve_config is not None else "ME"
 

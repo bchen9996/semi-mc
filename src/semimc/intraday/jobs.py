@@ -65,7 +65,13 @@ from .orders import (
     submit_order_with_fault_isolation,
 )
 from .pretrade import IntradayPretradeContext, check_intraday_pretrade, check_spread_gate
-from .proposals import OPEN_OR_ADD_ACTIONS, TradeProposal, ValidationContext, validate_proposal
+from .proposals import (
+    OPEN_OR_ADD_ACTIONS,
+    TradeProposal,
+    ValidationContext,
+    validate_proposal,
+    whole_shares,
+)
 from .reflect import _entry_and_proposal, record_mechanical_reflection
 from .security import sanitize_and_log
 from .session import session_snapshot
@@ -874,7 +880,14 @@ def run_cycle(
         )
         try:
             entry_request = build_entry_order(
-                per_tranche, as_of, cycle, price, account.equity, intraday, tranche=next_tranche
+                per_tranche,
+                as_of,
+                cycle,
+                price,
+                account.equity,
+                intraday,
+                tranche=next_tranche,
+                at_least_one_share=True,
             )
         except ValueError as exc:
             result.order_failures.append(str(exc))
@@ -1047,7 +1060,11 @@ def run_cycle(
             if price is None:
                 result.order_failures.append(f"{proposal.symbol}: no price to size entry")
                 continue
-            tranches = max(1, intraday.risk.entry_tranches)
+            # "Two tranches for a full-size position" (brief): split only as far as every
+            # piece still buys a whole share. A size worth one share goes in whole; one worth
+            # none was already rejected by validate_proposal.
+            full_shares = whole_shares(proposal.size_pct, account.equity, price)
+            tranches = max(1, min(intraday.risk.entry_tranches, full_shares))
             tranche_proposal = proposal.model_copy(
                 update={"size_pct": proposal.size_pct / tranches}
             )

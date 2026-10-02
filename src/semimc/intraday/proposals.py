@@ -15,6 +15,7 @@ returns every failure found (not just the first) as a plain list of strings.
 from __future__ import annotations
 
 import datetime as dt
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -32,6 +33,12 @@ if TYPE_CHECKING:
     from .options import OptionPricing, OptionQuote
 
 OPEN_OR_ADD_ACTIONS = ("open", "add")
+
+
+def whole_shares(size_pct: float, equity: float, price: float) -> int:
+    """How many whole shares `size_pct` of `equity` buys at `price` -- the one rounding
+    rule validation, tranche-splitting and `orders.py::build_entry_order` all share."""
+    return math.floor(size_pct * equity / price)
 
 
 class TradeProposal(BaseModel):
@@ -301,5 +308,20 @@ def validate_proposal(proposal: TradeProposal, context: ValidationContext) -> li
     projected_turnover = (context.turnover_so_far_usd + proposed_notional) / context.equity
     if projected_turnover > risk.daily_turnover_pct:
         failures.append(f"daily_turnover_pct ({risk.daily_turnover_pct:.4f}) would be exceeded")
+
+    # Entries are whole shares (`orders.py::build_entry_order`). Rejecting here, rather
+    # than failing at order construction, puts the reason in front of the Trader next
+    # cycle -- on 2026-10-01 two MU entries (2% and 1.5% of $100k, one share $1,081) got
+    # through as accepted proposals and then failed their cycles outright.
+    price = context.prices.get(proposal.symbol)
+    if (
+        proposal.instrument == "equity"
+        and price is not None
+        and whole_shares(proposal.size_pct, context.equity, price) < 1
+    ):
+        failures.append(
+            f"size_pct {proposal.size_pct:.4f} buys no whole share of {proposal.symbol} "
+            f"at {price:.2f}; one share is {price / context.equity:.4f} of equity"
+        )
 
     return failures

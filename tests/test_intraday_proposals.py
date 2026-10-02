@@ -172,6 +172,31 @@ def test_gross_cap_is_enforced(tmp_path):
     assert any("gross_cap_pct" in f for f in failures)
 
 
+def _mu_open(size_pct: float) -> TradeProposal:
+    # 2026-10-01's case: MU at $1,081 on a $100k account, invalidation ~1.5% away.
+    return _open(symbol="MU", size_pct=size_pct, limit_price=1081.0, invalidation_price=1065.0)
+
+
+def test_a_size_worth_less_than_one_whole_share_is_rejected_with_the_minimum(tmp_path):
+    context = _context(tmp_path, prices={"MU": 1081.0})
+    failures = validate_proposal(_mu_open(0.0075), context)  # $750 < one share
+    assert any("buys no whole share of MU at 1081.00" in f for f in failures)
+    assert any("one share is 0.0108 of equity" in f for f in failures)
+
+
+def test_a_size_worth_one_whole_share_passes_the_share_check(tmp_path):
+    context = _context(tmp_path, prices={"MU": 1081.0})
+    failures = validate_proposal(_mu_open(0.011), context)  # $1,100 -> 1 share
+    assert not any("whole share" in f for f in failures)
+
+
+def test_the_share_check_needs_a_price(tmp_path):
+    # No quote for MU: nothing to size against, so this check stays silent (run_cycle
+    # reports "no price to size entry" for the order itself).
+    failures = validate_proposal(_mu_open(0.0075), _context(tmp_path))
+    assert not any("whole share" in f for f in failures)
+
+
 def test_net_long_cap_is_enforced(tmp_path):
     config = IntradayConfig(risk={"net_long_cap_pct": 0.5})
     context = _context(tmp_path, config=config, positions={"AMD": 48_000.0})

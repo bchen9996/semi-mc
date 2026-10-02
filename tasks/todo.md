@@ -2416,6 +2416,31 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       between midnight and 04:00 New York (preflight, the earliest job, is 07:45). The bot
       commit messages in all three workflows use the same rule; the cycle/monitor commit
       times stay UTC.
+      **2026-10-01: not a clean day (streak back to 0).** Every external trigger fired on
+      time, and the session data worked: the Trader's holds now cite the opening range and
+      VWAP ("inside OR and below VWAP (609.26)") instead of "no volume data". But the
+      12:40 and 13:40 CT cycles failed. The Trader proposed MU at 2% and 1.5% of $100k;
+      split into two tranches, each piece ($1,000 and $750) was less than one $1,081 share,
+      so `build_entry_order` raised, the cycle exited 1, and `set -e` stopped the workflow
+      before its commit. Both cycles' rows were lost (the proposals, their model-call cost,
+      the check itself), leaving a 40-minute gap (12:20 to 13:00 CT). Separately, GitHub's
+      late copy of paper decide failed for s3 and vol_twin_shadow ("a different decision
+      already exists"). The 10:05 ET decisions had been built on that day's partial price
+      bar (data vintage 2026-10-01, the bar ~35 minutes old), and by the afternoon the bar
+      had changed. Nothing traded twice. s3's 10-01 decision (4.31% per name, 60% invested)
+      stands; it placed no orders, every holding being within `minimum_trade_pct` of target.
+      Also seen: IEX spreads on MU and AMD ran 75-470 bps against the 50 bps gate most
+      cycles, and pre-market moves priced 3 of 14 tickers. Fixed the same day
+      (owner-approved): (1) every ledger-writing step in both workflows commits what the
+      command wrote and then exits with its status, so a failure still emails but never
+      loses rows (a failed paper decide still skips execute); (2) `validate_proposal`
+      rejects an equity entry worth less than one whole share, with one share's fraction of
+      equity in the reason; `run_cycle` splits an entry into at most as many tranches as it
+      has whole shares, and a later tranche buys at least one share if the price rose since
+      the first; `trader.md` now says `size_pct` is a fraction and entries are whole shares;
+      (3) `run_decide` sees only closes before `as_of` (`MarketData.before`), so every run
+      for a day computes the same decision and a late duplicate is a quiet no-op.
+      `data_vintage` now records that last close, not the newest row in the cache.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

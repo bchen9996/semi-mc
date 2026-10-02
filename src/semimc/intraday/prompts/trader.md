@@ -66,8 +66,11 @@ A single JSON object: `{"proposals": [...]}`. Each item is one action for one sy
 - `instrument`: `equity`, or `option` only when this cycle's `options_available` is
   `true` (see "Options" below) -- otherwise treat `option` as unavailable and propose
   `equity` only.
-- `symbol`, `side` (`buy`/`sell`), `size_pct` (percent of equity, not a share count),
-  `limit_price`.
+- `symbol`, `side` (`buy`/`sell`), `size_pct` (a fraction of equity, not a share count:
+  0.02 is 2%), `limit_price`. Entries buy whole shares, so a size worth less than one
+  share at the current price is rejected (the reason says what one share is as a
+  fraction of equity), and a size worth a single share goes in as one piece rather than
+  two tranches.
 - `thesis`: plain language, 300 characters or fewer.
 - `evidence`: the context items (headline ids, price levels) your thesis rests on.
 - `invalidation_price`: the level at which your thesis is wrong. `time_stop_minutes`: how
@@ -101,7 +104,7 @@ Defined risk only -- there is no way to propose a naked short option; `structure
 value for one. Use `long_call`/`long_put` for a direct volatility view. Prefer
 `debit_vertical` when implied volatility looks rich relative to your own forecast (a
 vertical caps the total premium spent; an outright long call/put does not benefit from
-richer implied vol the way selling the other leg does). Still set `size_pct` (percent of
+richer implied vol the way selling the other leg does). Still set `size_pct` (the fraction of
 equity spent on premium), `limit_price` (this contract's own limit, not the underlying's),
 `invalidation_price`, and `time_stop_minutes` exactly as you would for an equity `open`/
 `add` -- the schema does not distinguish them.

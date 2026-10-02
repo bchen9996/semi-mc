@@ -99,9 +99,12 @@ jobs:
         # insertions into it -- on a rejected push, re-fetch the latest ledger and re-run
         # decide/execute against it instead, reconciling at the application level (both are
         # already idempotent: decide's own cadence-skip, execute's same-decision no-op).
-        # `set -e` still fails the step immediately on a genuine command failure (e.g.
-        # missing credentials) -- only the push race is retried, so Phase 7's "an incident
-        # fails the job" behavior is unchanged.
+        # A genuine command failure (e.g. missing credentials) still fails the job, so
+        # Phase 7's "an incident fails the job" behavior is unchanged -- but only after
+        # committing whatever the command already wrote (an execute that submitted some
+        # orders before failing). Plain `set -e` stopped before the commit and lost those
+        # rows, which is how two intraday cycles lost theirs on 2026-10-01. A failed decide
+        # skips execute. Only the push race is retried.
         env:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
@@ -112,23 +115,24 @@ jobs:
           for attempt in 1 2 3; do
             git fetch origin main
             git reset --hard origin/main
+            status=0
             echo "::group::decide"
-            uv run semimc paper decide --sleeve ${{ matrix.sleeve }} --config config/paper.yaml
+            uv run semimc paper decide --sleeve ${{ matrix.sleeve }} --config config/paper.yaml || status=$?
             echo "::endgroup::"
-            if [ "${{ matrix.sleeve }}" = "s0" ] || [ "${{ matrix.sleeve }}" = "s3" ]; then
+            if [ "$status" = 0 ] && { [ "${{ matrix.sleeve }}" = "s0" ] || [ "${{ matrix.sleeve }}" = "s3" ]; }; then
               echo "::group::execute"
-              uv run semimc paper execute --sleeve ${{ matrix.sleeve }} --config config/paper.yaml
+              uv run semimc paper execute --sleeve ${{ matrix.sleeve }} --config config/paper.yaml || status=$?
               echo "::endgroup::"
             fi
             git add ledger/paper.sqlite3
             if git diff --cached --quiet; then
               echo "nothing to commit"
-              exit 0
+              exit "$status"
             fi
             # The session date, as in cli.py::_trading_day: the day rolls over at 04:00 New York.
             git commit -m "paper decide/execute: ${{ matrix.sleeve }} $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
-              exit 0
+              exit "$status"
             fi
             echo "push rejected (attempt $attempt/3) -- refetching and retrying"
           done
@@ -169,15 +173,17 @@ jobs:
           for attempt in 1 2 3; do
             git fetch origin main
             git reset --hard origin/main
-            uv run semimc paper mark --sleeve ${{ matrix.sleeve }} --config config/paper.yaml
+            # A failing mark still commits what it wrote, then fails the job (see above).
+            status=0
+            uv run semimc paper mark --sleeve ${{ matrix.sleeve }} --config config/paper.yaml || status=$?
             git add ledger/paper.sqlite3
             if git diff --cached --quiet; then
               echo "nothing to commit"
-              exit 0
+              exit "$status"
             fi
             git commit -m "paper mark: ${{ matrix.sleeve }} $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
-              exit 0
+              exit "$status"
             fi
             echo "push rejected (attempt $attempt/3) -- refetching and retrying"
           done

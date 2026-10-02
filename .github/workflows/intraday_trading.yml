@@ -194,16 +194,19 @@ jobs:
           for attempt in 1 2 3; do
             git fetch origin main
             git reset --hard origin/main
-            uv run semimc intraday preflight --config config/paper.yaml
+            # A failing command still gets its ledger rows committed, then fails
+            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+            status=0
+            uv run semimc intraday preflight --config config/paper.yaml || status=$?
             git add ledger/intraday.sqlite3
             if git diff --cached --quiet; then
               echo "nothing to commit"
-              exit 0
+              exit "$status"
             fi
             # The session date, as in cli.py::_trading_day: the day rolls over at 04:00 New York.
             git commit -m "intraday preflight: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
-              exit 0
+              exit "$status"
             fi
             echo "push rejected (attempt $attempt/3) -- refetching and retrying"
           done
@@ -245,15 +248,18 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
             uv run semimc fetch --config config/paper.yaml
-            uv run semimc intraday research --config config/paper.yaml
+            # A failing command still gets its ledger rows committed, then fails
+            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+            status=0
+            uv run semimc intraday research --config config/paper.yaml || status=$?
             git add ledger/intraday.sqlite3
             if git diff --cached --quiet; then
               echo "nothing to commit"
-              exit 0
+              exit "$status"
             fi
             git commit -m "intraday research: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
-              exit 0
+              exit "$status"
             fi
             echo "push rejected (attempt $attempt/3) -- refetching and retrying"
           done
@@ -286,15 +292,18 @@ jobs:
           for attempt in 1 2 3; do
             git fetch origin main
             git reset --hard origin/main
-            uv run semimc intraday preopen --config config/paper.yaml
+            # A failing command still gets its ledger rows committed, then fails
+            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+            status=0
+            uv run semimc intraday preopen --config config/paper.yaml || status=$?
             git add ledger/intraday.sqlite3
             if git diff --cached --quiet; then
               echo "nothing to commit"
-              exit 0
+              exit "$status"
             fi
             git commit -m "intraday preopen: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
-              exit 0
+              exit "$status"
             fi
             echo "push rejected (attempt $attempt/3) -- refetching and retrying"
           done
@@ -413,16 +422,19 @@ jobs:
           for attempt in 1 2 3; do
             git fetch origin main
             git reset --hard origin/main
-            uv run semimc intraday open-batch --config config/paper.yaml
-            uv run semimc intraday placebo open-batch --config config/paper.yaml
+            # A failing command still gets its ledger rows committed, then fails
+            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+            status=0
+            uv run semimc intraday open-batch --config config/paper.yaml || status=$?
+            uv run semimc intraday placebo open-batch --config config/paper.yaml || status=$?
             git add ledger/intraday.sqlite3 ledger/intraday_shadow.sqlite3
             if git diff --cached --quiet; then
               echo "nothing to commit"
-              exit 0
+              exit "$status"
             fi
             git commit -m "intraday open-batch: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
-              exit 0
+              exit "$status"
             fi
             echo "push rejected (attempt $attempt/3) -- refetching and retrying"
           done
@@ -462,16 +474,19 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
             cycle_label="cycle_$(date -u +%H%M)"
-            uv run semimc intraday cycle --cycle "$cycle_label" --config config/paper.yaml
-            uv run semimc intraday placebo cycle --cycle "$cycle_label" --config config/paper.yaml
+            # A failing command still gets its ledger rows committed, then fails
+            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+            status=0
+            uv run semimc intraday cycle --cycle "$cycle_label" --config config/paper.yaml || status=$?
+            uv run semimc intraday placebo cycle --cycle "$cycle_label" --config config/paper.yaml || status=$?
             git add ledger/intraday.sqlite3 ledger/intraday_shadow.sqlite3
             if git diff --cached --quiet; then
               echo "nothing to commit"
-              exit 0
+              exit "$status"
             fi
             git commit -m "intraday cycle: $(TZ=America/New_York date -d '4 hours ago' +%F) $(date -u +%H:%M)"
             if git push; then
-              exit 0
+              exit "$status"
             fi
             echo "push rejected (attempt $attempt/3) -- refetching and retrying"
           done
@@ -504,16 +519,19 @@ jobs:
           for attempt in 1 2 3; do
             git fetch origin main
             git reset --hard origin/main
-            uv run semimc intraday carry --config config/paper.yaml
-            uv run semimc intraday placebo carry --config config/paper.yaml
+            # A failing command still gets its ledger rows committed, then fails
+            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+            status=0
+            uv run semimc intraday carry --config config/paper.yaml || status=$?
+            uv run semimc intraday placebo carry --config config/paper.yaml || status=$?
             git add ledger/intraday.sqlite3 ledger/intraday_shadow.sqlite3
             if git diff --cached --quiet; then
               echo "nothing to commit"
-              exit 0
+              exit "$status"
             fi
             git commit -m "intraday carry: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
-              exit 0
+              exit "$status"
             fi
             echo "push rejected (attempt $attempt/3) -- refetching and retrying"
           done
@@ -559,17 +577,20 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
             uv run semimc fetch --config config/paper.yaml
-            uv run semimc intraday eod-review --config config/paper.yaml
+            # A failing command still gets its ledger rows committed, then fails
+            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+            status=0
+            uv run semimc intraday eod-review --config config/paper.yaml || status=$?
             git add ledger/intraday.sqlite3
             [ -d reports ] && git add reports/ || true
             [ -d proposals ] && git add proposals/ || true
             if git diff --cached --quiet; then
               echo "nothing to commit"
-              exit 0
+              exit "$status"
             fi
             git commit -m "intraday eod-review: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
-              exit 0
+              exit "$status"
             fi
             echo "push rejected (attempt $attempt/3) -- refetching and retrying"
           done
@@ -603,16 +624,19 @@ jobs:
           for attempt in 1 2 3; do
             git fetch origin main
             git reset --hard origin/main
-            uv run semimc intraday weekly-review --config config/paper.yaml
+            # A failing command still gets its ledger rows committed, then fails
+            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+            status=0
+            uv run semimc intraday weekly-review --config config/paper.yaml || status=$?
             git add ledger/intraday.sqlite3
             [ -d reports ] && git add reports/ || true
             if git diff --cached --quiet; then
               echo "nothing to commit"
-              exit 0
+              exit "$status"
             fi
             git commit -m "intraday weekly-review: $(TZ=America/New_York date -d '4 hours ago' +%F)"
             if git push; then
-              exit 0
+              exit "$status"
             fi
             echo "push rejected (attempt $attempt/3) -- refetching and retrying"
           done
