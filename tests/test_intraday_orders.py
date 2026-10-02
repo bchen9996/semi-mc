@@ -115,6 +115,22 @@ def test_build_entry_order_raises_when_size_rounds_to_zero_shares():
         )
 
 
+def test_a_later_tranche_buys_one_share_when_a_price_rise_rounds_it_to_zero():
+    # One share's worth at the first tranche's price (1,000), then the price rose to 1,010.
+    proposal = _proposal(size_pct=0.01)
+    order = build_entry_order(
+        proposal,
+        AS_OF,
+        CYCLE,
+        price=1010.0,
+        equity=100_000.0,
+        config=IntradayConfig(),
+        tranche=2,
+        at_least_one_share=True,
+    )
+    assert order.qty == 1
+
+
 def test_build_entry_order_uses_a_collared_limit_price_past_the_quote_for_a_buy():
     proposal = _proposal(side="buy")
     config = IntradayConfig(risk={"equity_cost_bps_per_side": 8.0})

@@ -796,6 +796,97 @@ def test_run_cycle_submits_the_next_tranche_on_a_later_call(config, tmp_path):
     ledger.close()
 
 
+def _expensive_open(size_pct: float, price: float = 1000.0) -> dict:
+    return {
+        "action": "open",
+        "symbol": "MU",
+        "side": "buy",
+        "size_pct": size_pct,
+        "limit_price": price,
+        "thesis": "memory pricing",
+        "invalidation_price": price * 0.985,
+        "time_stop_minutes": 60,
+    }
+
+
+def test_run_cycle_enters_a_one_share_size_whole_instead_of_in_tranches(config, tmp_path):
+    """2026-10-01: 1.5% of $100k in two tranches was $750 a piece, less than one MU share,
+    and the cycle failed outright. One share's worth now goes in as a single piece."""
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=2)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "MU", thesis="test")
+    market_data = _FakeMarketData(quotes={"MU": _quote(1000.0)})
+    proposal = _expensive_open(0.015)  # $1,500 -> 1 whole share
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
+
+    result = run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, NOW)
+
+    assert result.order_failures == []
+    assert len(result.orders_submitted) == 1
+    order = ledger.get_order(result.orders_submitted[0])
+    assert order["tranche_total"] == 1
+    assert ledger.pending_tranche_for("MU") is None
+    ledger.close()
+
+
+def test_run_cycle_rejects_a_size_worth_no_whole_share_instead_of_failing(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=2)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "MU", thesis="test")
+    market_data = _FakeMarketData(quotes={"MU": _quote(1000.0)})
+    proposal = _expensive_open(0.0075)  # $750 < one share
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
+
+    result = run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, NOW)
+
+    assert result.order_failures == []
+    assert result.proposals_rejected == 1
+    assert "buys no whole share of MU" in ledger.proposals_for(AS_OF)[-1]["reason"]
+    ledger.close()
+
+
+def test_run_cycle_buys_one_share_for_a_later_tranche_after_a_price_rise(config, tmp_path):
+    # 2% of $100k at $1,000 is two shares, one per tranche; at $1,010 the second piece
+    # ($1,000) is worth 0.99 of a share and used to fail every cycle from then on.
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=2)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "MU", thesis="test")
+    broker = FakeBroker(now=NOW)
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [_expensive_open(0.02)]}),
+        _result_json(structured_output={"proposals": []}),
+    )
+
+    run_cycle(
+        "cycle_1",
+        cfg,
+        broker,
+        ledger,
+        _FakeMarketData(quotes={"MU": _quote(1000.0)}),
+        client,
+        AS_OF,
+        NOW,
+    )
+    later = NOW + dt.timedelta(minutes=20)
+    result2 = run_cycle(
+        "cycle_2",
+        cfg,
+        broker,
+        ledger,
+        _FakeMarketData(quotes={"MU": _quote(1010.0, at=later)}),
+        client,
+        AS_OF,
+        later,
+    )
+
+    assert result2.order_failures == []
+    assert len(result2.orders_submitted) == 1
+    order = ledger.get_order(result2.orders_submitted[0])
+    assert order["tranche_index"] == 2
+    assert order["qty"] == 1
+    ledger.close()
+
+
 def test_run_cycle_rejects_a_proposal_over_the_new_positions_budget(config, tmp_path):
     cfg = _tradeable_config(config, tmp_path, new_positions_per_day=0)
     ledger = _ledger(tmp_path)

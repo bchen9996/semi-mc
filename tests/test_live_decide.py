@@ -6,6 +6,7 @@ rebalance-cadence skip and the differing-decision-same-day refusal that
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 
 import pandas as pd
 import pytest
@@ -27,7 +28,8 @@ def test_first_decide_records_data_vintage_and_git_commit(config, market, ledger
     assert result.decision is not None
 
     row = ledger.get_decision("s0", pd.Timestamp("2023-01-05"))
-    assert row["data_vintage"] == str(market.last_date.date())
+    # The newest close the decision could see: the trading day before as_of.
+    assert row["data_vintage"] == "2023-01-04"
     # git_commit() may legitimately be None off a real checkout with no git available, but
     # this repo *is* a git checkout in CI/dev -- assert it's either a real hash or None,
     # never something that silently swallowed a different exception.
@@ -91,6 +93,28 @@ def test_force_overrides_the_differing_decision_refusal(config, market, ledger):
     )
     assert result.decision is not None
     assert result.decision.snapshot_hash != planted.snapshot_hash
+
+
+def test_a_decision_ignores_its_own_days_bar(config, market, ledger):
+    """2026-10-01: decide ran at 10:05 New York on a partial bar for that day, and a late
+    rerun that afternoon saw a different partial bar and refused to record. s3 sizes off
+    its volatility forecast, so a wild as_of row would move its weights if it were read."""
+    tickers = ["NVDA", "AMD"]
+    as_of = pd.Timestamp("2023-01-05")
+    first = run_decide("s3", market, config, tickers, as_of, ledger)
+
+    wild = market.prices.copy()
+    wild.loc[as_of, tickers] = wild.loc[as_of, tickers] * 1.5  # a different "partial bar"
+    rerun = run_decide("s3", replace(market, prices=wild), config, tickers, as_of, ledger)
+
+    assert rerun.decision.snapshot_hash == first.decision.snapshot_hash
+
+
+def test_market_data_before_drops_the_day_and_everything_after(market):
+    cut = market.before(pd.Timestamp("2023-01-05"))
+    assert cut.last_date == pd.Timestamp("2023-01-04")
+    assert cut.log_returns.index.max() == pd.Timestamp("2023-01-04")
+    assert all(frame.index.max() <= pd.Timestamp("2023-01-04") for frame in cut.ohlc.values())
 
 
 def test_git_commit_returns_none_outside_a_git_checkout(tmp_path, monkeypatch):

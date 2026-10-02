@@ -10,7 +10,7 @@ and :meth:`MarketData.context`, both of which take an ``as_of`` and refuse to lo
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
@@ -95,6 +95,27 @@ class MarketData:
     @property
     def last_date(self) -> pd.Timestamp:
         return pd.Timestamp(self.prices.index.max())
+
+    def before(self, date: pd.Timestamp) -> MarketData:
+        """A copy holding only rows dated strictly before ``date``.
+
+        For a live job running inside ``date``'s own session. The provider returns a row
+        for today once the market opens, with the latest trade standing in for a close that
+        hasn't happened, and ``training_window(date)`` includes ``date``'s row -- right for
+        an origin taken at the close, wrong at 10:00. Only ever removes rows, so it cannot
+        introduce look-ahead; ``training_window`` is still where the fit window is cut.
+        """
+        stamp = pd.Timestamp(date).normalize()
+
+        def keep(frame: pd.DataFrame) -> pd.DataFrame:
+            return frame if frame.empty else frame.loc[frame.index < stamp]
+
+        return replace(
+            self,
+            prices=keep(self.prices),
+            volumes=keep(self.volumes),
+            ohlc={name: keep(frame) for name, frame in self.ohlc.items()},
+        )
 
     def spot(
         self, tickers: list[str] | None = None, as_of: pd.Timestamp | None = None

@@ -35,7 +35,7 @@ from ..execution.broker import (
 from ..execution.orders import collared_limit_price, round_to_tick
 from ..execution.pretrade import check_order_tradable
 from .ledger import IntradayLedger
-from .proposals import OPEN_OR_ADD_ACTIONS, TradeProposal
+from .proposals import OPEN_OR_ADD_ACTIONS, TradeProposal, whole_shares
 
 
 def intraday_client_order_id(
@@ -62,13 +62,17 @@ def build_entry_order(
     config: IntradayConfig,
     attempt: int = 0,
     tranche: int = 1,
+    at_least_one_share: bool = False,
 ) -> OrderRequest:
     """One `open`/`add` proposal, one order, with a real stop resting at the broker the
     instant it fills -- this is what removes the need for a minute-level monitor process
     between GH Actions runs.
 
     Raises `ValueError` for any other `proposal.action` (see the module docstring for why
-    close/trim aren't built here) or if `size_pct` rounds to fewer than one whole share.
+    close/trim aren't built here) or if `size_pct` rounds to fewer than one whole share --
+    unless `at_least_one_share`, which a later tranche passes: `jobs.py::run_cycle` only
+    splits an entry into as many tranches as it has whole shares, but a price rise since
+    the first tranche can round a one-share piece down to zero.
 
     Whole-share `qty` always, never `notional` -- this project's existing sizing
     convention (`execution/orders.py::build_orders` does the same), and a hedge pending
@@ -85,7 +89,9 @@ def build_entry_order(
 
     # side/size_pct/limit_price/invalidation_price are all required for open/add by
     # TradeProposal's own model_validator, so they're never None here.
-    qty = math.floor(proposal.size_pct * equity / price)
+    qty = whole_shares(proposal.size_pct, equity, price)
+    if qty <= 0 and at_least_one_share:
+        qty = 1
     if qty <= 0:
         raise ValueError(
             f"size_pct {proposal.size_pct} is too small to buy a whole share of "
