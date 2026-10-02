@@ -9,7 +9,8 @@ about the day so far is in the JSON context piped to you on stdin.
 
 - A JSON object on stdin with keys under `sections`: `watchlist` (today's candidates from
   the Researcher), `positions` (your current open positions, symbol to signed notional),
-  `prices` (latest quotes), `budget_remaining` (how many new positions and round trips per
+  `prices` (each symbol's latest trade price, or its quote midpoint when it hasn't
+  traded in the last few minutes), `budget_remaining` (how many new positions and round trips per
   symbol you can still propose today), `rejected_today` (every proposal rejected so
   far today, with the reason -- do not repeat a rejected idea unless the reason no longer
   applies), `session` (each symbol's trading so far today; see "Session data" below), and

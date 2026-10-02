@@ -35,9 +35,8 @@ from ..execution.market_data import AlpacaMarketDataClient
 from ..execution.pretrade import KillSwitchActive, check_kill_switch
 from .jobs import (
     CarryResult,
+    current_prices,
     mark_broker_to_market,
-    midpoint_price,
-    quote_map,
     run_carry,
     turnover_so_far_usd,
 )
@@ -127,8 +126,7 @@ def run_placebo_cycle(
         )
 
     held_symbols = {p.symbol for p in shadow_broker.list_positions()}
-    held_quotes = quote_map(held_symbols, market_data, now)
-    prices = {symbol: midpoint_price(quote) for symbol, quote in held_quotes.items()}
+    prices = current_prices(held_symbols, market_data, now)
     check_invalidation_and_time_stops(
         intraday, shadow_broker, shadow_ledger, prices, as_of, cycle, now
     )
@@ -148,8 +146,7 @@ def run_placebo_cycle(
         return PlaceboCycleResult(skipped_reason="no eligible watchlist candidates")
 
     symbol = rng.choice(candidates)
-    quote = market_data.latest_quote(symbol, at=now)
-    price = midpoint_price(quote)
+    price = current_prices({symbol}, market_data, now).get(symbol)
     if price is None:
         return PlaceboCycleResult(
             proposed_symbol=symbol, skipped_reason=f"{symbol}: no quote available"

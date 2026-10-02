@@ -69,6 +69,9 @@ class _FakeMarketData:
         price = self._quotes.get(symbol)
         return _FakeQuote(price) if price is not None else None
 
+    def latest_quotes(self, symbols, feed="iex"):
+        return {s: q for s in symbols if (q := self.latest_quote(s, at=None)) is not None}
+
     def latest_trades(self, symbols):
         return {}
 

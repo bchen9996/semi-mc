@@ -449,6 +449,13 @@ class IntradayRiskConfig(_Base):
     # starting guess, not a researched figure, same caveat as max_cost_usd_per_day.
     max_spread_bps: float = Field(50.0, gt=0)
     max_quote_age_seconds: float = Field(30.0, gt=0)
+    # Which Alpaca feed's quote the spread gate measures. Not "iex": IEX is one exchange
+    # with a thin book in these names (MU/AMD quoted 75-470 bps wide on 2026-10-01, when
+    # the consolidated spread is a few cents), and Alpaca paper fills against the full
+    # consolidated quote. The free plan's consolidated (SIP) quote is 15 minutes old,
+    # "delayed_sip" -- fine for "is this name liquid", which is all the gate asks. "sip"
+    # is the real-time version, on a paid market-data plan.
+    spread_feed: Literal["delayed_sip", "sip", "iex"] = "delayed_sip"
 
 
 class IntradayScheduleConfig(_Base):

@@ -118,6 +118,21 @@ real account is flagged as such, not guessed at.
   stale for an intraday trigger. IEX volume is a small slice of the tape, so relative
   volume compares IEX only with IEX (`intraday/session.py`).
 
+- **S4 spread gate on the delayed consolidated quote, added 2026-10-01**
+  (`AlpacaMarketDataClient.latest_quotes`): `get_stock_latest_quote(
+  StockLatestQuoteRequest(symbol_or_symbols=[...], feed=DataFeed.DELAYED_SIP))`, set by
+  `intraday.risk.spread_feed`. Why: IEX is one exchange with a thin book in these names.
+  On 2026-10-01 its quote put MU and AMD 75-470 bps wide at nearly every cycle, failing
+  the 50 bps gate, while the consolidated spread for stocks this liquid is a few cents
+  and Alpaca paper fills against the consolidated quote. A 15-minute-old consolidated
+  spread still answers "is this name liquid". Prices now come from the latest IEX trade
+  (an existing call), which can't print outside the consolidated quote, falling back to
+  the IEX quote midpoint. **Not yet verified against the real account**: whether
+  `delayed_sip` is accepted on the latest-quote endpoint on the free plan. If it isn't,
+  every cycle logs a `delayed_sip quotes unavailable (...); spreads checked on the IEX
+  quote` warning and behaves as before. With a paid plan, `spread_feed: sip` makes the
+  check real-time.
+
 ## Options (S4, `BRIEF_INTRADAY.md`)
 
 Both of the brief's own options gates are unresolved -- recorded here per its instruction,

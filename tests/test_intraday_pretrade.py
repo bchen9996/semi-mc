@@ -11,6 +11,7 @@ from semimc.execution.fake_broker import FakeBroker
 from semimc.intraday.pretrade import (
     IntradayPretradeContext,
     check_intraday_pretrade,
+    check_price_age,
     check_spread_gate,
 )
 
@@ -173,6 +174,21 @@ def test_check_spread_gate_rejects_a_stale_quote():
     reason = check_spread_gate("NVDA", 190.0, 190.05, stale_time, NOW, config)
     assert reason is not None
     assert "old" in reason
+
+
+def test_check_spread_gate_can_check_the_spread_alone_for_a_quote_old_on_purpose():
+    # The free plan's consolidated quote is 15 minutes old by design (`risk.spread_feed`).
+    delayed = NOW - dt.timedelta(minutes=15)
+    config = IntradayConfig()
+    assert check_spread_gate("MU", 1081.0, 1081.1, delayed, NOW, config, check_age=False) is None
+    assert check_spread_gate("MU", 1081.0, 1081.1, delayed, NOW, config) is not None
+
+
+def test_check_price_age_names_what_went_stale():
+    config = IntradayConfig(risk={"max_quote_age_seconds": 30.0})
+    assert check_price_age("MU", NOW - dt.timedelta(seconds=10), NOW, config) is None
+    reason = check_price_age("MU", NOW - dt.timedelta(seconds=45), NOW, config, what="trade")
+    assert reason == "MU: trade is 45s old, exceeds max_quote_age_seconds 30.0"
 
 
 def test_check_spread_gate_rejects_an_invalid_quote():

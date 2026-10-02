@@ -233,6 +233,7 @@ intraday:
     entry_tranches: 2
     max_spread_bps: 50.0
     max_quote_age_seconds: 30.0
+    spread_feed: delayed_sip   # consolidated quote, 15 min old on the free plan; "sip" = real time (paid)
   schedule:
     timezone: America/Chicago
     cycle_interval_minutes: 20

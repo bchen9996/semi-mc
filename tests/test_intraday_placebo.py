@@ -58,6 +58,9 @@ class _FakeMarketData:
     def latest_quote(self, symbol: str, at: dt.datetime):
         return self.quotes.get(symbol)
 
+    def latest_trades(self, symbols):
+        return {}
+
 
 def _quote(price: float, spread: float = 0.05, at: dt.datetime = NOW) -> _FakeQuote:
     return _FakeQuote(bid_price=price - spread / 2, ask_price=price + spread / 2, timestamp=at)

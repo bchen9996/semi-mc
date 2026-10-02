@@ -51,6 +51,7 @@ from alpaca.data.requests import (
     OptionBarsRequest,
     OptionChainRequest,
     StockBarsRequest,
+    StockLatestQuoteRequest,
     StockLatestTradeRequest,
     StockQuotesRequest,
 )
@@ -137,6 +138,21 @@ class AlpacaMarketDataClient:
         midpoint (``arrival_price``) can't provide. Same nearest-quote lookup, same
         ``None``-on-no-coverage contract."""
         return self._nearest_quote(symbol, at, window, feed)
+
+    def latest_quotes(
+        self, symbols: list[str], feed: DataFeed | str = DataFeed.IEX
+    ) -> dict[str, Quote]:
+        """Each symbol's most recent quote on ``feed`` (a ``DataFeed`` or its value, e.g.
+        ``"delayed_sip"``), in one request. Added 2026-10-01 for
+        `intraday/jobs.py::_apply_spread_gate`, which by default reads the free plan's
+        consolidated quote, 15 minutes old, instead of IEX's own thin book. A symbol with
+        no quote is absent."""
+        if not symbols:
+            return {}
+        response = self._client.get_stock_latest_quote(
+            StockLatestQuoteRequest(symbol_or_symbols=list(symbols), feed=DataFeed(feed))
+        )
+        return {symbol: quote for symbol, quote in response.items() if quote is not None}
 
     def latest_trades(
         self, symbols: list[str], feed: DataFeed = DataFeed.IEX
