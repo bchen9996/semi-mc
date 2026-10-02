@@ -29,6 +29,13 @@ def test_intraday_defaults_to_shadow_mode():
     assert cfg.intraday.shadow_starting_equity == pytest.approx(100_000.0)
 
 
+def test_the_spread_gate_reads_the_delayed_consolidated_quote_by_default():
+    cfg = load_config()
+    assert cfg.intraday.risk.spread_feed == "delayed_sip"
+    with pytest.raises(ValueError, match="spread_feed"):
+        load_config(overrides=["intraday.risk.spread_feed=nasdaq"])
+
+
 def test_intraday_section_matches_the_briefs_defaults_table():
     cfg = load_config()
     assert cfg.intraday.budget.max_cost_usd_per_call == pytest.approx(1.0)
@@ -99,6 +106,8 @@ def test_paper_yaml_loads_intraday_at_rollout_stage_1():
     cfg = load_config(PROJECT_ROOT / "config" / "paper.yaml")
     assert cfg.intraday.trading_enabled is True
     assert cfg.intraday.registered_account == "PA33HJGNHLI7"
+    # The free plan's delayed consolidated quote for the spread gate, not IEX's own book.
+    assert cfg.intraday.risk.spread_feed == "delayed_sip"
     assert cfg.intraday.options.enabled is False
     assert cfg.intraday.options.shadow_pricing is False
     assert cfg.intraday.shadow_mode is True

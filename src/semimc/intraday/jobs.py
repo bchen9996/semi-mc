@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 from pydantic import ValidationError
@@ -64,7 +64,12 @@ from .orders import (
     find_and_cancel_resting_stop,
     submit_order_with_fault_isolation,
 )
-from .pretrade import IntradayPretradeContext, check_intraday_pretrade, check_spread_gate
+from .pretrade import (
+    IntradayPretradeContext,
+    check_intraday_pretrade,
+    check_price_age,
+    check_spread_gate,
+)
 from .proposals import (
     OPEN_OR_ADD_ACTIONS,
     TradeProposal,
@@ -86,18 +91,86 @@ def midpoint_price(quote: Any) -> float | None:
     return (quote.bid_price + quote.ask_price) / 2.0
 
 
-def quote_map(
+# How close to `now` an IEX trade must be to serve as a symbol's price: the same +/-5
+# minutes `AlpacaMarketDataClient.latest_quote` searches for a quote. Either side of
+# `now`, because a job reads its clock once at start and trades keep printing after.
+_TRADE_PRICE_WINDOW = dt.timedelta(minutes=5)
+
+
+@dataclass(frozen=True)
+class _Price:
+    value: float
+    observed_at: dt.datetime
+    source: Literal["trade", "quote"]
+
+
+def _recent_trades(
     symbols: set[str], market_data: AlpacaMarketDataClient, now: dt.datetime
-) -> dict[str, Any]:
-    """Best-effort quotes for `symbols` -- a symbol with no coverage is simply absent,
-    same "a single missing quote must not crash a whole report" tolerance
-    `market_data.py::arrival_price` already documents."""
-    quotes: dict[str, Any] = {}
-    for symbol in symbols:
+) -> dict[str, tuple[float, dt.datetime]]:
+    """Latest IEX trade per symbol, kept only inside `_TRADE_PRICE_WINDOW` of `now`. A
+    failed lookup is an empty result, never a crash, the same tolerance as a missing
+    quote: every symbol then falls back to its quote midpoint."""
+    try:
+        latest = market_data.latest_trades(sorted(symbols))
+    except Exception:  # noqa: BLE001 - a price fallback must never take a job down
+        return {}
+    now_utc = now if now.tzinfo else now.replace(tzinfo=dt.UTC)
+    recent: dict[str, tuple[float, dt.datetime]] = {}
+    for symbol, (price, printed_at) in latest.items():
+        stamp = printed_at if printed_at.tzinfo else printed_at.replace(tzinfo=dt.UTC)
+        if abs(stamp - now_utc) <= _TRADE_PRICE_WINDOW:
+            recent[symbol] = (price, stamp)
+    return recent
+
+
+def _prices(
+    symbols: set[str], market_data: AlpacaMarketDataClient, now: dt.datetime
+) -> dict[str, _Price]:
+    """Each symbol's current price: its latest IEX trade, else its IEX quote midpoint.
+
+    The trade comes first since 2026-10-01. IEX is one exchange, and in these names its
+    own book is thin: MU and AMD were quoted 75-470 bps wide when the consolidated spread
+    was a few cents, so the midpoint of IEX's quote can sit well away from the real price.
+    A trade on IEX can't print outside the consolidated quote, so it's the better
+    real-time price the free plan offers. A symbol with neither is absent."""
+    prices = {
+        symbol: _Price(price, printed_at, "trade")
+        for symbol, (price, printed_at) in _recent_trades(symbols, market_data, now).items()
+    }
+    for symbol in sorted(symbols - set(prices)):
         quote = market_data.latest_quote(symbol, at=now)
-        if quote is not None and quote.bid_price is not None and quote.ask_price is not None:
-            quotes[symbol] = quote
-    return quotes
+        mid = midpoint_price(quote)
+        if mid is not None:
+            prices[symbol] = _Price(mid, quote.timestamp, "quote")
+    return prices
+
+
+def current_prices(
+    symbols: set[str], market_data: AlpacaMarketDataClient, now: dt.datetime
+) -> dict[str, float]:
+    """`_prices` as plain floats: what every S4 job marks, sizes and checks stops
+    against. Public because the `intraday monitor` CLI command prices positions too."""
+    return {symbol: price.value for symbol, price in _prices(symbols, market_data, now).items()}
+
+
+def _spread_quotes(
+    symbols: list[str],
+    market_data: AlpacaMarketDataClient,
+    config: IntradayConfig,
+    ledger: IntradayLedger,
+) -> dict[str, Any] | None:
+    """`config.risk.spread_feed`'s latest quote per symbol, or `None` (with a warning
+    incident) if that feed can't be read, in which case spreads are checked on IEX."""
+    if not symbols:
+        return {}
+    feed = config.risk.spread_feed
+    try:
+        return market_data.latest_quotes(symbols, feed=feed)
+    except Exception as exc:  # noqa: BLE001 - fall back to the IEX quote, never crash
+        ledger.record_incident(
+            "warning", f"{feed} quotes unavailable ({exc}); spreads checked on the IEX quote"
+        )
+        return None
 
 
 def _apply_spread_gate(
@@ -106,32 +179,67 @@ def _apply_spread_gate(
     config: IntradayConfig,
     ledger: IntradayLedger,
     now: dt.datetime,
-) -> tuple[list[dict[str, Any]], dict[str, Any], list[tuple[str, str]]]:
+) -> tuple[list[dict[str, Any]], dict[str, float], list[tuple[str, str]]]:
     """Splits `rows` (each with a `"symbol"` key) into what's currently tradable and
-    what got dropped, logging a warning incident per drop. Shared by `run_preopen` and
-    `run_cycle` so both apply the identical gate -- `run_preopen`'s result is never
-    trusted by `run_cycle`, but the *logic* is the same either way."""
+    what got dropped, logging a warning incident per drop, and returns each tradable
+    symbol's price. Shared by `run_preopen` and `run_cycle` so both apply the identical
+    gate -- `run_preopen`'s result is never trusted by `run_cycle`, but the *logic* is the
+    same either way.
+
+    Two questions, answered from different data since 2026-10-01. Is the price fresh?
+    Judged on `_prices` (the latest IEX trade, else the IEX quote). Is the name liquid?
+    Judged on `config.risk.spread_feed`'s quote, by default the free plan's
+    15-minute-delayed consolidated quote: the IEX quote alone failed MU and AMD at
+    nearly every cycle on its own thin book, while Alpaca paper fills against the
+    consolidated quote. In the first ~15 minutes after the open that delayed quote is a
+    pre-market one, usually wider, so a name can still miss the open batch on it."""
     tradable: list[dict[str, Any]] = []
-    quotes: dict[str, Any] = {}
+    prices: dict[str, float] = {}
     dropped: list[tuple[str, str]] = []
+    symbols = [row["symbol"] for row in rows]
+    spread_quotes = _spread_quotes(symbols, market_data, config, ledger)
+    priced = _prices(set(symbols), market_data, now)
     for row in rows:
         symbol = row["symbol"]
-        quote = market_data.latest_quote(symbol, at=now)
-        if quote is None or quote.bid_price is None or quote.ask_price is None:
+        price = priced.get(symbol)
+        if price is None:
             reason = f"{symbol}: no quote available"
-            dropped.append((symbol, reason))
-            ledger.record_incident("warning", reason)
-            continue
-        reason = check_spread_gate(
-            symbol, quote.bid_price, quote.ask_price, quote.timestamp, now, config
-        )
+        else:
+            reason = check_price_age(symbol, price.observed_at, now, config, what=price.source)
+        if reason is None:
+            reason = _spread_reason(symbol, spread_quotes, market_data, config, ledger, now)
         if reason is not None:
             dropped.append((symbol, reason))
             ledger.record_incident("warning", reason)
             continue
-        quotes[symbol] = quote
+        prices[symbol] = price.value
         tradable.append(row)
-    return tradable, quotes, dropped
+    return tradable, prices, dropped
+
+
+def _spread_reason(
+    symbol: str,
+    spread_quotes: dict[str, Any] | None,
+    market_data: AlpacaMarketDataClient,
+    config: IntradayConfig,
+    ledger: IntradayLedger,
+    now: dt.datetime,
+) -> str | None:
+    """The spread half of `_apply_spread_gate`: `spread_feed`'s quote when there is one,
+    else the IEX quote (the pre-2026-10-01 check), noting which when it falls back."""
+    quote = spread_quotes.get(symbol) if spread_quotes is not None else None
+    if quote is None:
+        if spread_quotes is not None:
+            ledger.record_incident(
+                "warning",
+                f"{symbol}: no {config.risk.spread_feed} quote; spread checked on the IEX quote",
+            )
+        quote = market_data.latest_quote(symbol, at=now)
+    if quote is None or quote.bid_price is None or quote.ask_price is None:
+        return f"{symbol}: no quote available"
+    return check_spread_gate(
+        symbol, quote.bid_price, quote.ask_price, quote.timestamp, now, config, check_age=False
+    )
 
 
 def _original_proposal_payload(ledger: IntradayLedger, symbol: str) -> dict[str, Any] | None:
@@ -172,9 +280,9 @@ def mark_broker_to_market(
 ) -> None:
     """Sets a `FakeBroker`'s `.cash`/`.equity` fresh, every call, from `starting_equity`
     plus `shadow_ledger.total_realized_cash_flow()` (every fill this ledger has ever
-    recorded) plus a live mark of whatever's currently held. A missing quote for a held
-    symbol falls back to its own `avg_entry_price` -- never crashes on one bad quote, same
-    tolerance `quote_map` already uses.
+    recorded) plus a live mark of whatever's currently held. A held symbol with no price
+    (`current_prices`) falls back to its own `avg_entry_price` -- never crashes on one bad
+    quote.
 
     Deliberately recomputed from scratch rather than incrementally maintained: this is
     the one place equity/cash truth lives, so it can never drift out of sync with a
@@ -191,11 +299,10 @@ def mark_broker_to_market(
     """
     cash = starting_equity + shadow_ledger.total_realized_cash_flow()
     market_value = 0.0
-    for position in shadow_broker.list_positions():
-        quote = market_data.latest_quote(position.symbol, at=now)
-        price = midpoint_price(quote)
-        if price is None:
-            price = position.avg_entry_price
+    positions = shadow_broker.list_positions()
+    prices = current_prices({p.symbol for p in positions}, market_data, now)
+    for position in positions:
+        price = prices.get(position.symbol, position.avg_entry_price)
         market_value += position.qty * price
     shadow_broker.cash = cash
     shadow_broker.equity = cash + market_value
@@ -365,7 +472,7 @@ def premarket_moves(
     before `research` runs and today's session hasn't opened yet, so its most recent
     cached row already *is* the prior close -- no separate "yesterday" lookup needed. A
     ticker missing either side is simply absent, same "a single missing quote must not
-    crash a whole report" tolerance `quote_map` already uses.
+    crash a whole report" tolerance `current_prices` uses.
 
     Despite the name, the same call also gives a full day's return when `now` is near or
     after the close -- "prior cached close to whatever quote is live right now" doesn't
@@ -727,7 +834,9 @@ def run_preopen(
             ledger.record_incident("info", f"{symbol}: new headline -- {clean_headline}")
             new_headlines.append((symbol, clean_headline))
 
-    tradable, _quotes, dropped = _apply_spread_gate(watchlist, market_data, intraday, ledger, now)
+    tradable, _prices_now, dropped = _apply_spread_gate(
+        watchlist, market_data, intraday, ledger, now
+    )
     return PreopenResult(
         tradable=[row["symbol"] for row in tradable], dropped=dropped, new_headlines=new_headlines
     )
@@ -758,7 +867,7 @@ def _price_option_proposal(
     unentitled feed with nothing to fall back to) rather than raising --
     `validate_option_proposal`'s own "no options pricing available for this proposal"
     failure already covers that case cleanly, the same "a single missing quote must not
-    crash a whole cycle" tolerance `quote_map` already applies to equities."""
+    crash a whole cycle" tolerance `current_prices` already applies to equities."""
     market_quote = options_market_data.quote_contract(
         proposal.symbol, proposal.expiry, proposal.strike, proposal.right, as_of
     )
@@ -848,8 +957,7 @@ def run_cycle(
     equity_at_session_open = ledger.session_open_equity(as_of) or account.equity
 
     positions = broker.list_positions()
-    position_quotes = quote_map({p.symbol for p in positions}, market_data, now)
-    prices = {s: midpoint_price(q) for s, q in position_quotes.items()}
+    prices = current_prices({p.symbol for p in positions}, market_data, now)
 
     monitor_result = check_invalidation_and_time_stops(
         intraday, broker, ledger, prices, as_of, cycle, now
@@ -913,10 +1021,10 @@ def run_cycle(
     positions_notional = {p.symbol: p.market_value for p in positions}
 
     watchlist = ledger.watchlist_for(as_of)
-    tradable_watchlist, watchlist_quotes, _dropped = _apply_spread_gate(
+    tradable_watchlist, watchlist_prices, _dropped = _apply_spread_gate(
         watchlist, market_data, intraday, ledger, now
     )
-    prices.update({s: midpoint_price(q) for s, q in watchlist_quotes.items()})
+    prices.update(watchlist_prices)
 
     symbols_in_view = {row["symbol"] for row in tradable_watchlist} | set(positions_notional)
     headlines = ledger.recent_headlines_for(as_of, list(symbols_in_view)) if symbols_in_view else []
@@ -1207,7 +1315,7 @@ def run_carry(
             carried_candidates.append((position, payload or {}))
             continue
 
-        price = midpoint_price(market_data.latest_quote(position.symbol, at=now))
+        price = current_prices({position.symbol}, market_data, now).get(position.symbol)
         if price is None:
             ledger.record_incident(
                 "error", f"{position.symbol}: carry could not price a close -- left open"
@@ -1233,7 +1341,7 @@ def run_carry(
         if overnight_notional <= cap:
             result.carried.append(position.symbol)
             continue
-        price = midpoint_price(market_data.latest_quote(position.symbol, at=now))
+        price = current_prices({position.symbol}, market_data, now).get(position.symbol)
         if price is None:
             result.carried.append(position.symbol)
             continue
@@ -1314,7 +1422,7 @@ def run_eod_review(
         return EodReviewResult(skipped_reason=f"eod_review already ran for {as_of}")
 
     # Local imports: `review.py` and `placebo.py` both import *from* this module at their
-    # own top level (`turnover_so_far_usd`, `run_carry`/`quote_map`/...), so importing
+    # own top level (`turnover_so_far_usd`, `run_carry`/`current_prices`/...), so importing
     # them back at jobs.py's own top level would be a real circular import. Deferred to
     # call time, after both modules have already fully loaded, this is safe -- the same
     # reasoning `cli.py` already relies on for its own many function-local imports.

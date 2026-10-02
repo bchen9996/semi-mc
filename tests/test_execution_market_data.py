@@ -278,10 +278,28 @@ def test_latest_trades_returns_price_and_timestamp_per_symbol_from_iex():
     assert request.feed == DataFeed.IEX
 
 
+def test_latest_quotes_asks_the_named_feed_for_every_symbol_in_one_request():
+    """2026-10-01: the spread gate reads the free plan's 15-minute-delayed consolidated
+    quote, passed as config's plain string."""
+    from alpaca.data.enums import DataFeed
+
+    client = MagicMock()
+    nvda = _quote(AT, 190.0, 190.02)
+    client.get_stock_latest_quote.return_value = {"NVDA": nvda, "AMD": None}
+    quotes = AlpacaMarketDataClient(client).latest_quotes(["NVDA", "AMD"], feed="delayed_sip")
+
+    assert quotes == {"NVDA": nvda}
+    request = client.get_stock_latest_quote.call_args.args[0]
+    assert request.symbol_or_symbols == ["NVDA", "AMD"]
+    assert request.feed == DataFeed.DELAYED_SIP
+
+
 def test_latest_trades_and_bars_make_no_request_for_no_symbols():
     client = MagicMock()
     data = AlpacaMarketDataClient(client)
     assert data.latest_trades([]) == {}
+    assert data.latest_quotes([]) == {}
+    client.get_stock_latest_quote.assert_not_called()
     assert data.bars([], AT, AT) == {}
     client.get_stock_latest_trade.assert_not_called()
     client.get_stock_bars.assert_not_called()

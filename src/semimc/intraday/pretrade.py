@@ -92,10 +92,16 @@ def check_spread_gate(
     quote_time: dt.datetime,
     now: dt.datetime,
     config: IntradayConfig,
+    check_age: bool = True,
 ) -> str | None:
     """`None` if `symbol`'s quote is tradable, else a rejection reason string (S4, Phase
     5) -- the brief's own "skip or defer any name whose quoted spread exceeds the
     configured limit, or whose quote is stale."
+
+    `check_age=False` checks the spread alone, for a quote that is old on purpose: the
+    15-minute-delayed consolidated quote `jobs.py::_apply_spread_gate` reads by default
+    (`risk.spread_feed`), whose freshness question is answered by the price instead
+    (`check_price_age`).
 
     A per-candidate check, not a per-sleeve one like `check_intraday_pretrade` above, so
     it's a separate function rather than folded into that one. Called by `preopen` (to
@@ -120,14 +126,28 @@ def check_spread_gate(
             f"{config.risk.max_spread_bps}"
         )
 
-    if quote_time.tzinfo is None:
-        quote_time = quote_time.replace(tzinfo=dt.UTC)
+    if check_age:
+        return check_price_age(symbol, quote_time, now, config, what="quote")
+    return None
+
+
+def check_price_age(
+    symbol: str,
+    observed_at: dt.datetime,
+    now: dt.datetime,
+    config: IntradayConfig,
+    what: str = "price",
+) -> str | None:
+    """`None` if a price or quote observed at `observed_at` is recent enough to trade on
+    (`risk.max_quote_age_seconds`), else a rejection reason. Naive datetimes are UTC."""
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=dt.UTC)
     if now.tzinfo is None:
         now = now.replace(tzinfo=dt.UTC)
-    age_seconds = (now - quote_time).total_seconds()
+    age_seconds = (now - observed_at).total_seconds()
     if age_seconds > config.risk.max_quote_age_seconds:
         return (
-            f"{symbol}: quote is {age_seconds:.0f}s old, exceeds max_quote_age_seconds "
+            f"{symbol}: {what} is {age_seconds:.0f}s old, exceeds max_quote_age_seconds "
             f"{config.risk.max_quote_age_seconds}"
         )
 

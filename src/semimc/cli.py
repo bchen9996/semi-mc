@@ -2061,7 +2061,7 @@ def intraday_monitor(
     this first, so a position is never re-evaluated by the Trader after it should
     already be closed."""
     cfg = _setup(config, set_, verbose)
-    from .intraday.jobs import midpoint_price, quote_map
+    from .intraday.jobs import current_prices
     from .intraday.ledger import IntradayLedger
     from .intraday.monitor import check_invalidation_and_time_stops
 
@@ -2072,8 +2072,7 @@ def intraday_monitor(
     broker = _intraday_execution_broker(cfg, ledger, market_data, now)
     try:
         positions = broker.list_positions()
-        quotes = quote_map({p.symbol for p in positions}, market_data, now)
-        prices = {s: midpoint_price(q) for s, q in quotes.items()}
+        prices = current_prices({p.symbol for p in positions}, market_data, now)
         result = check_invalidation_and_time_stops(
             cfg.intraday, broker, ledger, prices, as_of_ts, cycle, now
         )

@@ -2441,6 +2441,23 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       (3) `run_decide` sees only closes before `as_of` (`MarketData.before`), so every run
       for a day computes the same decision and a late duplicate is a quiet no-op.
       `data_vintage` now records that last close, not the newest row in the cache.
+      **Spread gate fix 2026-10-01 (owner-approved, the free option).** The IEX quote is
+      one exchange's thin book, not the market's spread: it put MU/AMD 75-470 bps wide
+      while the consolidated spread is a few cents, and Alpaca paper fills against the
+      consolidated quote. So the gate blocked trades that would have executed fine, and
+      the IEX midpoint was a skewed price for sizing, stops and shadow fills. Now the
+      spread is judged on the free plan's 15-minute-delayed consolidated quote
+      (`intraday.risk.spread_feed: delayed_sip`), and every S4 price (candidates,
+      positions, stops, carry, the shadow and placebo marks) is the latest IEX trade
+      within 5 minutes, else the IEX quote midpoint (`jobs.py::current_prices`).
+      Freshness is judged on that price. Falls back to the old IEX check, with a warning,
+      if the delayed feed can't be read. Known limits: in the first ~15 minutes after the
+      open the delayed quote is a pre-market one, usually wider, so a name can still miss
+      the open batch; a sudden spread blowout inside those 15 minutes goes unseen. The
+      paid alternative, owner's call before Stage 2 or Stage 4: Algo Trader Plus
+      (real-time consolidated data, which would also settle Stage 4's options-data
+      question), then `spread_feed: sip`. The eod "do nothing" benchmark still marks at
+      the IEX quote midpoint (it runs after the close, when no trade is within 5 minutes).
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

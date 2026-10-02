@@ -22,6 +22,7 @@ from fixtures.injection_corpus import INJECTION_CORPUS
 from semimc.execution.fake_broker import FakeBroker
 from semimc.execution.market_data import OptionMarketQuote
 from semimc.intraday.jobs import (
+    current_prices,
     mark_broker_to_market,
     run_carry,
     run_cycle,
@@ -88,11 +89,24 @@ class _FakeMarketData:
     bars_by_symbol: dict[str, list] = field(default_factory=dict)
     bars_raise: bool = False
     bar_requests: list[dict] = field(default_factory=list)
+    # What `AlpacaMarketDataClient.latest_quotes` returns for the spread gate's feed
+    # (delayed SIP by default). `None` means "the same quotes as IEX", so a test that
+    # doesn't care about the two feeds differing sees one consistent market.
+    spread_quotes: dict[str, _FakeQuote] | None = None
+    spread_quotes_raise: bool = False
+    spread_feeds_requested: list[str] = field(default_factory=list)
 
     def latest_quote(self, symbol: str, at: dt.datetime):
         if self.raises:
             raise RuntimeError("data feed unreachable")
         return self.quotes.get(symbol)
+
+    def latest_quotes(self, symbols, feed="iex"):
+        self.spread_feeds_requested.append(str(feed))
+        if self.spread_quotes_raise:
+            raise RuntimeError("subscription does not permit querying recent SIP data")
+        source = self.quotes if self.spread_quotes is None else self.spread_quotes
+        return {s: source[s] for s in symbols if s in source}
 
     def latest_trades(self, symbols):
         return {s: self.trades[s] for s in symbols if s in self.trades}
@@ -516,6 +530,138 @@ def test_run_preopen_drops_a_wide_spread_candidate(config, tmp_path):
     assert result.tradable == []
     assert result.dropped[0][0] == "NVDA"
     assert any("spread" in i["message"] for i in ledger.incidents())
+    ledger.close()
+
+
+# 2026-10-01's case: IEX's own book in MU quoted ~160 bps wide while the consolidated
+# quote (15 minutes delayed on the free plan) was a few cents.
+_IEX_WIDE = _quote(1081.0, spread=17.0)
+_SIP_TIGHT = _quote(1081.0, spread=0.10, at=NOW - dt.timedelta(minutes=15))
+
+
+def _preopen(cfg, ledger, market_data):
+    ledger.record_watchlist_item(AS_OF, "MU", thesis="test")
+    return run_preopen(cfg, market_data, _FakeNewsClient(), ledger, AS_OF, NOW)
+
+
+def test_the_spread_gate_reads_the_delayed_consolidated_quote_not_iex(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    market_data = _FakeMarketData(quotes={"MU": _IEX_WIDE}, spread_quotes={"MU": _SIP_TIGHT})
+
+    result = _preopen(cfg, ledger, market_data)
+
+    assert result.tradable == ["MU"]  # the 15-minute-old quote is not "stale" here
+    assert market_data.spread_feeds_requested == ["delayed_sip"]
+    assert ledger.incidents() == []
+    ledger.close()
+
+
+def test_a_wide_consolidated_spread_still_drops_the_name(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    wide = _quote(1081.0, spread=17.0, at=NOW - dt.timedelta(minutes=15))
+    market_data = _FakeMarketData(quotes={"MU": _quote(1081.0)}, spread_quotes={"MU": wide})
+
+    result = _preopen(cfg, ledger, market_data)
+
+    assert result.tradable == []
+    assert "spread" in result.dropped[0][1]
+    ledger.close()
+
+
+def test_the_spread_gate_falls_back_to_iex_when_the_delayed_feed_fails(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    market_data = _FakeMarketData(quotes={"MU": _IEX_WIDE}, spread_quotes_raise=True)
+
+    result = _preopen(cfg, ledger, market_data)
+
+    assert result.tradable == []  # judged on the wide IEX quote, as before
+    messages = [i["message"] for i in ledger.incidents()]
+    assert any("delayed_sip quotes unavailable" in m for m in messages)
+    ledger.close()
+
+
+def test_a_symbol_missing_from_the_delayed_feed_is_checked_on_iex_and_noted(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    market_data = _FakeMarketData(quotes={"MU": _quote(1081.0)}, spread_quotes={})
+
+    result = _preopen(cfg, ledger, market_data)
+
+    assert result.tradable == ["MU"]
+    assert any("no delayed_sip quote" in i["message"] for i in ledger.incidents())
+    ledger.close()
+
+
+def test_a_recent_trade_keeps_a_name_whose_iex_quote_has_gone_stale(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    market_data = _FakeMarketData(
+        quotes={"MU": _quote(1081.0, at=NOW - dt.timedelta(minutes=2))},
+        spread_quotes={"MU": _SIP_TIGHT},
+        trades={"MU": (1080.9, NOW - dt.timedelta(seconds=5))},
+    )
+
+    assert _preopen(cfg, ledger, market_data).tradable == ["MU"]
+    ledger.close()
+
+
+def test_no_recent_trade_and_a_stale_quote_drops_the_name(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    market_data = _FakeMarketData(
+        quotes={"MU": _quote(1081.0, at=NOW - dt.timedelta(minutes=2))},
+        spread_quotes={"MU": _SIP_TIGHT},
+    )
+
+    result = _preopen(cfg, ledger, market_data)
+
+    assert result.tradable == []
+    assert "quote is 120s old" in result.dropped[0][1]
+    ledger.close()
+
+
+def test_current_prices_prefer_a_recent_iex_trade_over_the_quote_midpoint():
+    market_data = _FakeMarketData(
+        quotes={"MU": _IEX_WIDE, "AMD": _quote(600.0), "NVDA": _quote(190.0)},
+        trades={
+            "MU": (1079.0, NOW + dt.timedelta(seconds=20)),  # printed after the job's clock
+            "AMD": (590.0, NOW - dt.timedelta(minutes=6)),  # too old: use the quote
+        },
+    )
+
+    prices = current_prices({"MU", "AMD", "NVDA", "TSM"}, market_data, NOW)
+
+    assert prices == {"MU": 1079.0, "AMD": 600.0, "NVDA": 190.0}  # TSM: nothing at all
+
+
+def test_run_cycle_sizes_an_entry_at_the_trade_price_not_the_iex_midpoint(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=1)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "MU", thesis="test")
+    lopsided = _FakeQuote(bid_price=1000.0, ask_price=1100.0, timestamp=NOW)  # mid 1,050
+    market_data = _FakeMarketData(
+        quotes={"MU": lopsided},
+        spread_quotes={"MU": _quote(1000.0, spread=0.10, at=NOW - dt.timedelta(minutes=15))},
+        trades={"MU": (1000.0, NOW)},
+    )
+    proposal = {
+        "action": "open",
+        "symbol": "MU",
+        "side": "buy",
+        "size_pct": 0.03,  # $3,000: 3 shares at 1,000, only 2 at the 1,050 midpoint
+        "limit_price": 1000.0,
+        "thesis": "memory pricing",
+        "invalidation_price": 990.0,
+        "time_stop_minutes": 60,
+    }
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
+
+    result = run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, NOW)
+
+    assert ledger.get_order(result.orders_submitted[0])["qty"] == 3
     ledger.close()
 
 
