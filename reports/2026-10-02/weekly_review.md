@@ -5,13 +5,13 @@
 - P&L gross: -18.66
 - P&L net (of modeled cost): -20.93
 - Average rejection rate: 0.0%
-- Incidents: 74
+- Incidents: 76
 - Calibration (all-time):
   - [0.50, 0.75]: 0.0% win rate, n=1
 
 ## Monitor cadence
-- Checks this week: 67
-- Average gap between checks: 45.3m
+- Checks this week: 68
+- Average gap between checks: 47.2m
 - Longest gap between checks: 1085.3m
 
 ## Since inception
