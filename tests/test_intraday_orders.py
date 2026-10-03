@@ -20,7 +20,7 @@ from semimc.intraday.orders import (
     build_entry_order,
     build_replacement_stop_order,
     build_trim_order,
-    find_and_cancel_resting_stop,
+    cancel_resting_stops,
     intraday_client_order_id,
     submit_order_with_fault_isolation,
 )
@@ -260,17 +260,16 @@ def test_submit_of_an_oto_order_also_records_its_resting_stop_leg(tmp_path):
 
     submit_order_with_fault_isolation(order, broker, ledger, NOW, proposal_id=3)
 
-    leg = ledger.open_stop_leg_for("NVDA")
-    assert leg is not None
+    [leg] = ledger.open_stop_legs_for("NVDA")
     assert leg["client_order_id"] == "entry-with-stop::stop"
     assert leg["proposal_id"] == 3
     ledger.close()
 
 
-# -- find_and_cancel_resting_stop -----------------------------------------------------------
+# -- cancel_resting_stops -------------------------------------------------------------------
 
 
-def test_find_and_cancel_resting_stop_cancels_a_real_leg(tmp_path):
+def test_cancel_resting_stops_cancels_a_real_leg(tmp_path):
     ledger = _ledger(tmp_path)
     broker = FakeBroker()
     entry = broker.submit_order(_order(client_order_id="entry-1"))  # order_class="oto" by default
@@ -282,21 +281,42 @@ def test_find_and_cancel_resting_stop_cancels_a_real_leg(tmp_path):
         leg.client_order_id, "NVDA", "sell", status=leg.status, broker_order_id=leg.id, leg="stop"
     )
 
-    result = find_and_cancel_resting_stop("NVDA", broker, ledger)
+    result = cancel_resting_stops("NVDA", broker, ledger)
 
-    assert result == leg.client_order_id
+    assert result == [leg.client_order_id]
     assert broker.get_order_by_client_id(leg.client_order_id).status == "canceled"
+    assert ledger.get_order(leg.client_order_id)["status"] == "canceled"
     ledger.close()
 
 
-def test_find_and_cancel_resting_stop_returns_none_when_there_is_nothing_resting(tmp_path):
+def test_cancel_resting_stops_cancels_every_tranches_leg(tmp_path):
+    """2026-10-02: a two-tranche NVDA close canceled only the second tranche's stop,
+    leaving the first one's 3-share sell stop resting with no position behind it."""
     ledger = _ledger(tmp_path)
     broker = FakeBroker()
-    assert find_and_cancel_resting_stop("NVDA", broker, ledger) is None
+    legs = []
+    for client_order_id in ("entry-t1", "entry-t2"):
+        submit_order_with_fault_isolation(
+            _order(client_order_id=client_order_id), broker, ledger, NOW
+        )
+        legs.append(f"{client_order_id}::stop")
+
+    result = cancel_resting_stops("NVDA", broker, ledger)
+
+    assert result == legs
+    assert all(broker.get_order_by_client_id(leg).status == "canceled" for leg in legs)
+    assert ledger.open_stop_legs_for("NVDA") == []
     ledger.close()
 
 
-def test_find_and_cancel_resting_stop_tolerates_an_already_gone_order(tmp_path):
+def test_cancel_resting_stops_returns_nothing_when_there_is_nothing_resting(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    assert cancel_resting_stops("NVDA", broker, ledger) == []
+    ledger.close()
+
+
+def test_cancel_resting_stops_tolerates_an_already_gone_order(tmp_path):
     """The ledger thinks a stop is resting, but the broker no longer has it (already
     canceled/filled) -- the same forgiving read real Alpaca's own cancel_order gets."""
     ledger = _ledger(tmp_path)
@@ -304,8 +324,9 @@ def test_find_and_cancel_resting_stop_tolerates_an_already_gone_order(tmp_path):
     ledger.record_order(
         "stale-stop", "NVDA", "sell", status="new", broker_order_id="not-a-real-id", leg="stop"
     )
-    result = find_and_cancel_resting_stop("NVDA", broker, ledger)
-    assert result == "stale-stop"
+    result = cancel_resting_stops("NVDA", broker, ledger)
+    assert result == ["stale-stop"]
+    assert ledger.open_stop_legs_for("NVDA") == []  # no longer listed as resting
     ledger.close()
 
 

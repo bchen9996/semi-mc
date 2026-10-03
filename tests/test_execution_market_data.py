@@ -277,6 +277,9 @@ def test_latest_trades_returns_price_and_timestamp_per_symbol_from_iex():
     assert request.symbol_or_symbols == ["NVDA", "AMD"]
     assert request.feed == DataFeed.IEX
 
+    AlpacaMarketDataClient(client).latest_trades(["NVDA"], feed="delayed_sip")
+    assert client.get_stock_latest_trade.call_args.args[0].feed == DataFeed.DELAYED_SIP
+
 
 def test_latest_quotes_asks_the_named_feed_for_every_symbol_in_one_request():
     """2026-10-01: the spread gate reads the free plan's 15-minute-delayed consolidated

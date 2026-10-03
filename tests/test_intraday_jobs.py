@@ -34,7 +34,11 @@ from semimc.intraday.jobs import (
 )
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.llm import ClaudeCliClient
-from semimc.intraday.orders import build_entry_order, submit_order_with_fault_isolation
+from semimc.intraday.orders import (
+    build_close_order,
+    build_entry_order,
+    submit_order_with_fault_isolation,
+)
 from semimc.intraday.proposals import TradeProposal
 from semimc.live.ledger import Ledger as PaperLedger
 
@@ -83,8 +87,10 @@ class _FakeQuote:
 class _FakeMarketData:
     quotes: dict[str, _FakeQuote] = field(default_factory=dict)
     raises: bool = False
-    # symbol -> (price, timestamp), what `AlpacaMarketDataClient.latest_trades` returns.
+    # symbol -> (price, timestamp), what `AlpacaMarketDataClient.latest_trades` returns
+    # for IEX, and for the delayed consolidated tape.
     trades: dict[str, tuple[float, dt.datetime]] = field(default_factory=dict)
+    delayed_trades: dict[str, tuple[float, dt.datetime]] = field(default_factory=dict)
     # symbol -> bar objects, what `AlpacaMarketDataClient.bars` returns.
     bars_by_symbol: dict[str, list] = field(default_factory=dict)
     bars_raise: bool = False
@@ -108,8 +114,9 @@ class _FakeMarketData:
         source = self.quotes if self.spread_quotes is None else self.spread_quotes
         return {s: source[s] for s in symbols if s in source}
 
-    def latest_trades(self, symbols):
-        return {s: self.trades[s] for s in symbols if s in self.trades}
+    def latest_trades(self, symbols, feed="iex"):
+        source = self.delayed_trades if str(feed) == "delayed_sip" else self.trades
+        return {s: source[s] for s in symbols if s in source}
 
     def bars(self, symbols, start, end, minutes=5):
         self.bar_requests.append({"symbols": list(symbols), "start": start, "end": end})
@@ -1147,13 +1154,94 @@ def test_run_cycle_closes_an_invalidated_position_before_asking_the_trader(confi
 # -- run_cycle: trim and close proposals -------------------------------------------------------
 
 
+def test_closing_a_two_tranche_position_cancels_both_tranches_stops(config, tmp_path):
+    """2026-10-02's NVDA trade: two tranches, two stops, and the close canceled only one,
+    leaving a sell stop resting with no position behind it."""
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=2)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    broker = FakeBroker(now=NOW)
+    proposal = {
+        "action": "open",
+        "symbol": "NVDA",
+        "side": "buy",
+        "size_pct": 0.05,
+        "limit_price": 190.0,
+        "thesis": "AI capex",
+        "invalidation_price": 185.0,
+        "time_stop_minutes": 120,
+    }
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [proposal]}),
+        _result_json(structured_output={"proposals": []}),  # tranche 2 goes in here
+        _result_json(structured_output={"proposals": [{"action": "close", "symbol": "NVDA"}]}),
+    )
+    for minutes, cycle in ((0, "cycle_1"), (20, "cycle_2"), (40, "cycle_3")):
+        later = NOW + dt.timedelta(minutes=minutes)
+        if cycle == "cycle_3":
+            stops = ledger.open_stop_legs_for("NVDA")
+            assert len(stops) == 2  # one per tranche
+        run_cycle(cycle, cfg, broker, ledger, market_data, client, AS_OF, later)
+
+    assert broker.list_positions() == []
+    assert all(
+        broker.get_order_by_client_id(stop["client_order_id"]).status == "canceled"
+        for stop in stops
+    )
+    assert ledger.open_stop_legs_for("NVDA") == []
+    ledger.close()
+
+
+def _orphan_a_stop(broker, ledger, cfg) -> str:
+    """A filled entry with its OTO stop, then the position sold off without touching the
+    stop -- what the pre-2026-10-02 single-stop cancel left behind."""
+    _seed_open_position(broker, ledger, cfg)
+    [position] = broker.list_positions()
+    broker.submit_order(build_close_order(position, AS_OF, "elsewhere", 190.0, cfg.intraday))
+    [stop] = ledger.open_stop_legs_for("NVDA")
+    return stop["client_order_id"]
+
+
+def test_run_cycle_cancels_a_resting_stop_with_no_position_behind_it(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    stop_id = _orphan_a_stop(broker, ledger, cfg)
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": []}))
+
+    run_cycle("cycle_1", cfg, broker, ledger, _FakeMarketData(), client, AS_OF, NOW)
+
+    assert broker.get_order_by_client_id(stop_id).status == "canceled"
+    assert ledger.open_stop_legs_for("NVDA") == []
+    assert any(
+        "canceled 1 resting stop(s) with no position" in i["message"] for i in ledger.incidents()
+    )
+    ledger.close()
+
+
+def test_run_cycle_leaves_the_stop_of_an_entry_still_working(config, tmp_path):
+    # An OTO stop leg exists from submission, before its entry fills.
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW, partial_fill_fraction=0.0)  # the entry rests unfilled
+    _seed_open_position(broker, ledger, cfg)
+    [stop] = ledger.open_stop_legs_for("NVDA")
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": []}))
+
+    run_cycle("cycle_1", cfg, broker, ledger, _FakeMarketData(), client, AS_OF, NOW)
+
+    assert broker.get_order_by_client_id(stop["client_order_id"]).status != "canceled"
+    assert len(ledger.open_stop_legs_for("NVDA")) == 1
+    ledger.close()
+
+
 def test_run_cycle_close_proposal_cancels_the_resting_stop_and_exits(config, tmp_path):
     cfg = _tradeable_config(config, tmp_path)
     ledger = _ledger(tmp_path)
     broker = FakeBroker(now=NOW)
     _seed_open_position(broker, ledger, cfg, invalidation_price=185.0)
-    resting_stop = ledger.open_stop_leg_for("NVDA")
-    assert resting_stop is not None
+    [resting_stop] = ledger.open_stop_legs_for("NVDA")
     market_data = _FakeMarketData(quotes={"NVDA": _quote(192.0)})
     proposal = {"action": "close", "symbol": "NVDA"}
     client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
@@ -1162,6 +1250,7 @@ def test_run_cycle_close_proposal_cancels_the_resting_stop_and_exits(config, tmp
 
     assert broker.list_positions() == []
     assert broker.get_order_by_client_id(resting_stop["client_order_id"]).status == "canceled"
+    assert ledger.open_stop_legs_for("NVDA") == []  # the ledger agrees
     assert len(result.orders_submitted) == 1
     reflections = ledger.reflections_for(AS_OF)
     assert len(reflections) == 1
@@ -1186,8 +1275,8 @@ def test_run_cycle_trim_proposal_reprotects_the_remainder_at_the_original_invali
 
     [position] = broker.list_positions()
     assert 0 < position.qty < held_qty
-    new_stop = ledger.open_stop_leg_for("NVDA")
-    assert new_stop is not None
+    # The entry's stop is canceled; only the remainder's replacement is left resting.
+    [new_stop] = ledger.open_stop_legs_for("NVDA")
     assert new_stop["broker_order_id"] is not None
     stop_order = broker.get_order_by_client_id(new_stop["client_order_id"])
     assert stop_order.status in ("new", "accepted")
@@ -2018,7 +2107,44 @@ def test_premarket_moves_fall_back_to_a_trade_printed_today_only():
     )
 
     assert moves == {"NVDA": pytest.approx(0.01), "TSM": pytest.approx(0.01)}
-    assert notes == {"no_prior_close": ["INTC"], "from_trade": ["NVDA"], "no_price": ["AMD", "MU"]}
+    assert notes == {
+        "no_prior_close": ["INTC"],
+        "from_trade": ["NVDA"],
+        "from_delayed_trade": [],
+        "no_price": ["AMD", "MU"],
+    }
+
+
+def test_premarket_moves_use_the_delayed_consolidated_tape_and_the_latest_print():
+    """2026-10-01 and -02: IEX alone priced 3 and 2 of 14 tickers before the open. The
+    delayed consolidated tape carries every venue's pre-market prints."""
+    from types import SimpleNamespace
+
+    from semimc.intraday.jobs import premarket_moves
+
+    now = dt.datetime(2026, 10, 2, 12, 31)  # 08:31 New York, naive UTC
+
+    def at_et(hhmm: str) -> dt.datetime:
+        return dt.datetime(2026, 10, 2, int(hhmm[:2]) + 4, int(hhmm[3:]), tzinfo=dt.UTC)
+
+    pit = SimpleNamespace(spot=lambda tickers: {t: 100.0 for t in tickers})
+    market_data = _FakeMarketData(
+        trades={"NVDA": (101.0, at_et("08:25")), "AMD": (104.0, at_et("04:05"))},
+        delayed_trades={
+            "NVDA": (102.0, at_et("08:15")),  # older than IEX's 08:25 print
+            "AMD": (103.0, at_et("08:15")),  # newer than IEX's 04:05 print
+            "MU": (105.0, at_et("08:16")),  # nothing on IEX
+            "TSM": (99.0, dt.datetime(2026, 10, 1, 23, 0, tzinfo=dt.UTC)),  # yesterday
+        },
+    )
+    notes: dict[str, list[str]] = {}
+
+    moves = premarket_moves(["NVDA", "AMD", "MU", "TSM"], pit, market_data, now, notes)
+
+    assert moves == pytest.approx({"NVDA": 0.01, "AMD": 0.03, "MU": 0.05})
+    assert notes["from_trade"] == ["NVDA"]
+    assert notes["from_delayed_trade"] == ["AMD", "MU"]
+    assert notes["no_price"] == ["TSM"]
 
 
 def test_premarket_moves_survive_a_failed_trade_lookup():
@@ -2027,7 +2153,7 @@ def test_premarket_moves_survive_a_failed_trade_lookup():
     from semimc.intraday.jobs import premarket_moves
 
     class _Failing(_FakeMarketData):
-        def latest_trades(self, symbols):
+        def latest_trades(self, symbols, feed="iex"):
             raise RuntimeError("trades endpoint down")
 
     pit = SimpleNamespace(spot=lambda tickers: {"NVDA": 100.0})

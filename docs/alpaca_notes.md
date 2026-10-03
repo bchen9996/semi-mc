@@ -131,7 +131,16 @@ real account is flagged as such, not guessed at.
   `delayed_sip` is accepted on the latest-quote endpoint on the free plan. If it isn't,
   every cycle logs a `delayed_sip quotes unavailable (...); spreads checked on the IEX
   quote` warning and behaves as before. With a paid plan, `spread_feed: sip` makes the
-  check real-time.
+  check real-time. **Verified 2026-10-02**: the first session with it logged no such
+  warning and no spread failures for MU, AMD or NVDA (Oct 1, on IEX: about 30).
+
+- **Pre-market trades from the delayed consolidated tape, added 2026-10-03**
+  (`intraday/jobs.py::_todays_trade_prices`): `get_stock_latest_trade(
+  StockLatestTradeRequest(..., feed=DataFeed.DELAYED_SIP))` alongside the IEX call, the
+  more recent of the two prints winning. IEX alone priced 3 and 2 of 14 tickers in the
+  07:30 CT research runs of Oct 1 and Oct 2. **Not yet verified against the real
+  account**; the research `info` incident now says how many tickers came "from delayed
+  consolidated trade", and a failed delayed lookup just leaves those tickers to IEX.
 
 ## Options (S4, `BRIEF_INTRADAY.md`)
 

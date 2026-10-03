@@ -206,31 +206,40 @@ def test_record_order_defaults_to_the_entry_leg(tmp_path):
     ledger.close()
 
 
-def test_open_stop_leg_for_finds_the_most_recent_open_stop(tmp_path):
+def test_open_stop_legs_for_finds_an_open_stop(tmp_path):
     ledger = _ledger(tmp_path)
     ledger.record_order("s4-nvda-1", "NVDA", "buy", status="filled", leg="entry")
     ledger.record_order(
         "s4-nvda-1::stop", "NVDA", "sell", status="new", broker_order_id="stop-1", leg="stop"
     )
-    leg = ledger.open_stop_leg_for("NVDA")
-    assert leg is not None
+    [leg] = ledger.open_stop_legs_for("NVDA")
     assert leg["client_order_id"] == "s4-nvda-1::stop"
     assert leg["broker_order_id"] == "stop-1"
     ledger.close()
 
 
-def test_open_stop_leg_for_is_none_once_canceled(tmp_path):
+def test_open_stop_legs_for_lists_every_tranches_stop_oldest_first(tmp_path):
+    # A two-tranche entry carries two stops (2026-10-02's NVDA trade).
     ledger = _ledger(tmp_path)
     ledger.record_order("s4-nvda-1::stop", "NVDA", "sell", status="new", leg="stop")
-    ledger.record_order("s4-nvda-1::stop", "NVDA", "sell", status="canceled", leg="stop")
-    assert ledger.open_stop_leg_for("NVDA") is None
+    ledger.record_order("s4-nvda-1-t2::stop", "NVDA", "sell", status="new", leg="stop")
+    legs = ledger.open_stop_legs_for("NVDA")
+    assert [leg["client_order_id"] for leg in legs] == ["s4-nvda-1::stop", "s4-nvda-1-t2::stop"]
     ledger.close()
 
 
-def test_open_stop_leg_for_is_none_for_a_symbol_with_no_stop(tmp_path):
+def test_open_stop_legs_for_is_empty_once_canceled(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_order("s4-nvda-1::stop", "NVDA", "sell", status="new", leg="stop")
+    ledger.record_order("s4-nvda-1::stop", "NVDA", "sell", status="canceled", leg="stop")
+    assert ledger.open_stop_legs_for("NVDA") == []
+    ledger.close()
+
+
+def test_open_stop_legs_for_is_empty_for_a_symbol_with_no_stop(tmp_path):
     ledger = _ledger(tmp_path)
     ledger.record_order("s4-amd-1", "AMD", "buy", status="new", leg="entry")
-    assert ledger.open_stop_leg_for("AMD") is None
+    assert ledger.open_stop_legs_for("AMD") == []
     ledger.close()
 
 

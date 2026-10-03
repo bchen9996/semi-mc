@@ -72,7 +72,7 @@ class _FakeMarketData:
     def latest_quotes(self, symbols, feed="iex"):
         return {s: q for s in symbols if (q := self.latest_quote(s, at=None)) is not None}
 
-    def latest_trades(self, symbols):
+    def latest_trades(self, symbols, feed="iex"):
         return {}
 
     def bars(self, symbols, start, end, minutes=5):

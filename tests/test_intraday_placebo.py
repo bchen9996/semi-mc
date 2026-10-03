@@ -58,7 +58,7 @@ class _FakeMarketData:
     def latest_quote(self, symbol: str, at: dt.datetime):
         return self.quotes.get(symbol)
 
-    def latest_trades(self, symbols):
+    def latest_trades(self, symbols, feed="iex"):
         return {}
 
 

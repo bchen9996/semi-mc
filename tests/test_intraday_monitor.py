@@ -175,8 +175,7 @@ def test_cancels_a_resting_oto_stop_leg_before_closing(tmp_path):
     ledger = _ledger(tmp_path)
     broker = FakeBroker()
     _open_position(broker, ledger, invalidation_price=185.0, order_class="oto")
-    leg = ledger.open_stop_leg_for("NVDA")
-    assert leg is not None  # sanity check on the test's own setup
+    [leg] = ledger.open_stop_legs_for("NVDA")  # sanity check on the test's own setup
 
     check_invalidation_and_time_stops(
         IntradayConfig(), broker, ledger, {"NVDA": 180.0}, AS_OF, CYCLE, NOW
