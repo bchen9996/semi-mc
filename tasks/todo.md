@@ -2458,6 +2458,25 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       (real-time consolidated data, which would also settle Stage 4's options-data
       question), then `spread_feed: sip`. The eod "do nothing" benchmark still marks at
       the IEX quote midpoint (it runs after the close, when no trade is within 5 minutes).
+- [x] **Paper execute and mark fixes, 2026-10-02 (owner-approved).** GitHub's late copy
+      of decide-and-execute ran at 13:56 CT. Decide skipped correctly (the 10-01 fix), but
+      execute bought 2.84 QCOM (~$528) against the 10-01 decision: execute re-targeted every
+      holding on every run, and QCOM had dipped past the 0.5% `minimum_trade_pct` line
+      since the on-time 10:05 ET run. The module docstring assumed later runs would be
+      no-ops "since positions already sit at target", which stops being true once prices
+      move: in practice s3 was rebalancing its drift daily, unlike the monthly backtests
+      behind it. Four minutes later mark(s0) failed on a QCOM reconciliation mismatch: it
+      compares the whole shared account against every sleeve's fills, but only polled s0's
+      own orders, so s3's not-yet-recorded fill looked like phantom shares (mark(s3)
+      recorded it 20 seconds later and reconciled clean). Fixed: (1) `run_mark` records
+      fills for every sleeve's open orders before reconciling (fills only; reprice cancels
+      stay with the owning sleeve); (2) `run_execute` does the full rebalance once per
+      decision, recorded in a new `executions` ledger table even when no orders were
+      needed. Every later attempt, a later day or a late duplicate, only retries what that
+      rebalance left unfinished (`unfinished_symbols`: an order that ended unfilled, or
+      one that couldn't be placed or priced). Drift waits for the next decision. An order
+      already placed toward a decision counts as an attempt, which covers the 10-01
+      decision (QCOM filled, no executions row): its next execute skips.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

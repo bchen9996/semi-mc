@@ -98,6 +98,17 @@ CREATE TABLE IF NOT EXISTS incidents (
     message TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sleeve TEXT NOT NULL,
+    decision_snapshot_hash TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    orders_submitted INTEGER NOT NULL,
+    failed_symbols_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 _OPEN_ORDER_STATUSES = ("new", "accepted", "partially_filled")
@@ -292,6 +303,71 @@ class Ledger:
             (sleeve, *_OPEN_ORDER_STATUSES),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def open_orders_all_sleeves(self) -> list[dict[str, Any]]:
+        """Every sleeve's open orders -- what `live/mark.py` polls for fills before
+        reconciling the shared account (see `net_filled_qty_all_sleeves`)."""
+        placeholders = ",".join("?" * len(_OPEN_ORDER_STATUSES))
+        rows = self._conn.execute(
+            f"SELECT * FROM orders WHERE status IN ({placeholders})", _OPEN_ORDER_STATUSES
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def orders_for_decision(self, sleeve: str, decision_snapshot_hash: str) -> list[dict[str, Any]]:
+        """Every order this sleeve has placed toward one decision, oldest first."""
+        rows = self._conn.execute(
+            "SELECT * FROM orders WHERE sleeve = ? AND decision_snapshot_hash = ? ORDER BY id",
+            (sleeve, decision_snapshot_hash),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- execute attempts -------------------------------------------------------------
+
+    def record_execution(
+        self,
+        sleeve: str,
+        decision_snapshot_hash: str,
+        as_of: pd.Timestamp,
+        mode: str,
+        orders_submitted: int,
+        failed_symbols: list[str],
+    ) -> int:
+        """One `live/execute.py` attempt at a decision that got past the pretrade gate,
+        even one that needed no orders: that is how a rebalance day where every holding
+        was already within `minimum_trade_pct` of target still counts as done. A plain
+        append, one row per attempt."""
+        cursor = self._conn.execute(
+            """
+            INSERT INTO executions
+                (sleeve, decision_snapshot_hash, as_of, mode, orders_submitted,
+                 failed_symbols_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                sleeve,
+                decision_snapshot_hash,
+                str(pd.Timestamp(as_of)),
+                mode,
+                orders_submitted,
+                _dumps(sorted(failed_symbols)),
+                _now(),
+            ),
+        )
+        self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def executions_for(self, sleeve: str, decision_snapshot_hash: str) -> list[dict[str, Any]]:
+        """Every recorded execute attempt at one decision, oldest first."""
+        rows = self._conn.execute(
+            "SELECT * FROM executions WHERE sleeve = ? AND decision_snapshot_hash = ? ORDER BY id",
+            (sleeve, decision_snapshot_hash),
+        ).fetchall()
+        attempts = []
+        for row in rows:
+            data = dict(row)
+            data["failed_symbols"] = json.loads(data.pop("failed_symbols_json"))
+            attempts.append(data)
+        return attempts
 
     # -- fills ----------------------------------------------------------------------
 

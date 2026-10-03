@@ -4,9 +4,16 @@ recorded by ``live/decide.py``) into real broker orders.
 Never invents a decision -- ``execute`` refuses if ``decide`` has never run for this
 sleeve at all, per the brief's own "freeze before trading" ordering. It acts on the
 sleeve's *most recently frozen* decision, not one dated exactly ``as_of``: a
-longer-than-daily rebalance cadence means most days have no decision dated "today," and
-``execute`` running daily against last month's still-current decision (most days a no-op,
-since positions already sit at target) is the intended steady state, not a gap. Everything
+longer-than-daily rebalance cadence means most days have no decision dated "today."
+
+The full rebalance toward a decision happens once, on its first execute attempt (recorded
+in the ledger's ``executions`` table even when it needed no orders). Every later attempt,
+on a later day or a late duplicate the same day, only retries what that rebalance left
+unfinished: an order that ended unfilled, or one that couldn't be placed. Price drift is
+not traded; it waits for the next decision. Found 2026-10-02: this used to re-target
+every holding on every run, assuming positions "already sit at target" -- so a monthly
+sleeve rebalanced its drift daily, unlike the monthly backtests behind it, and GitHub's
+late copy of the job bought QCOM at 13:56 Central after it dipped past the 0.5% line. Everything
 about *how big an order* stays in ``execution/orders.py``; this module only supplies what
 that function needs (positions, prices, equity, fractionability) and records what the
 broker did.
@@ -14,6 +21,7 @@ broker did.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -25,6 +33,7 @@ from ..execution.broker import (
     MarketClosedError,
     Order,
     OrderRequest,
+    Position,
     RateLimitError,
     WashTradeError,
 )
@@ -51,6 +60,47 @@ def _decision_from_row(row: dict) -> Decision:
         weights=pd.Series(row["weights"], dtype=float),
         diagnostics=row["diagnostics"],
     )
+
+
+# Order statuses that end an order without filling it. Anything else that isn't
+# "filled" is still working at the broker, and gets left alone rather than duplicated.
+_ENDED_UNFILLED = frozenset(
+    {"canceled", "expired", "rejected", "done_for_day", "replaced", "stopped", "suspended"}
+)
+
+
+def unfinished_symbols(decision_orders: list[dict], attempts: list[dict]) -> set[str]:
+    """Symbols a decision's rebalance still owes a trade: every order placed toward it for
+    that symbol ended unfilled (canceled at the close, pruned by `live/mark.py` for a
+    reprice, rejected), or an attempt couldn't place one at all (an order failure, or no
+    price). A symbol with a filled order is done, and one with an order still working is
+    left alone. A partly filled order that was then canceled counts as unfinished: the
+    retry trades whatever gap remains."""
+    statuses: dict[str, list[str]] = {}
+    for row in decision_orders:
+        statuses.setdefault(row["symbol"], []).append(row["status"])
+    failed = {symbol for attempt in attempts for symbol in attempt["failed_symbols"]}
+    unfinished: set[str] = set()
+    for symbol in set(statuses) | failed:
+        seen = statuses.get(symbol, [])
+        if "filled" in seen or any(status not in _ENDED_UNFILLED for status in seen):
+            continue
+        unfinished.add(symbol)
+    return unfinished
+
+
+def _unpriced_symbols(
+    decision: Decision, positions: dict[str, Position], prices: pd.Series
+) -> list[str]:
+    """Symbols `build_orders` skips for want of a usable price that it might otherwise
+    have traded (a target weight, or a holding) -- recorded so the retry picks them up."""
+    candidates = {s for s, w in decision.weights.items() if w > 0} | set(positions)
+    unpriced = []
+    for symbol in sorted(candidates):
+        price = prices.get(symbol)
+        if price is None or not math.isfinite(price) or price <= 0:
+            unpriced.append(symbol)
+    return unpriced
 
 
 def run_execute(
@@ -81,6 +131,24 @@ def run_execute(
         return ExecutionResult(pretrade_failures=failures)
 
     decision = _decision_from_row(decision_row)
+    # The full rebalance happens once per decision; every later attempt only retries what
+    # that rebalance left unfinished. Any order already placed toward the decision counts
+    # as an attempt too: the 2026-10-01 decision traded before the executions table
+    # existed. See the module docstring for why drift isn't traded.
+    attempts = ledger.executions_for(sleeve, decision.snapshot_hash)
+    decision_orders = ledger.orders_for_decision(sleeve, decision.snapshot_hash)
+    retry_symbols: set[str] | None = None
+    if attempts or decision_orders:
+        retry_symbols = unfinished_symbols(decision_orders, attempts)
+        if not retry_symbols:
+            return ExecutionResult(
+                skipped_reason=(
+                    f"the {decision.as_of.date()} decision for {sleeve!r} is already "
+                    "executed and nothing it ordered is left unfilled; drift waits for the "
+                    "next rebalance"
+                )
+            )
+
     account = broker.get_account()
     positions = {p.symbol: p for p in broker.list_positions()}
     prices = market.spot(tickers, as_of=pd.Timestamp(now))
@@ -94,8 +162,16 @@ def run_execute(
     orders = build_orders(
         decision, positions, prices, account.equity, config, fractionable, as_of=as_of
     )
+    unpriced = _unpriced_symbols(decision, positions, prices)
+    if retry_symbols is not None:
+        orders = [order for order in orders if order.symbol in retry_symbols]
+        unpriced = [symbol for symbol in unpriced if symbol in retry_symbols]
     if dry_run:
         return ExecutionResult(orders=orders)
+    for symbol in unpriced:
+        ledger.record_incident(
+            "warning", f"{symbol}: no price to size an order; retried next execute", sleeve
+        )
 
     result = ExecutionResult(orders=orders)
     for request in orders:
@@ -134,6 +210,14 @@ def run_execute(
             )
         result.submitted.append(submitted)
 
+    ledger.record_execution(
+        sleeve,
+        decision.snapshot_hash,
+        as_of,
+        mode="rebalance" if retry_symbols is None else "retry",
+        orders_submitted=len(result.submitted),
+        failed_symbols=[request.symbol for request, _ in result.order_failures] + unpriced,
+    )
     account = broker.get_account()
     positions = {p.symbol: p for p in broker.list_positions()}
     ledger.record_snapshot(sleeve, as_of, account.equity, account.cash, positions)
