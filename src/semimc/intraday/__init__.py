@@ -56,7 +56,7 @@ from .orders import (
     build_entry_order,
     build_replacement_stop_order,
     build_trim_order,
-    find_and_cancel_resting_stop,
+    cancel_resting_stops,
     intraday_client_order_id,
     submit_order_with_fault_isolation,
 )
@@ -101,7 +101,7 @@ __all__ = [
     "check_spread_gate",
     "context_hash",
     "current_prices",
-    "find_and_cancel_resting_stop",
+    "cancel_resting_stops",
     "intraday_client_order_id",
     "invoke_role",
     "midpoint_price",

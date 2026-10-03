@@ -307,7 +307,7 @@ def test_to_state_from_state_round_trips_orders_positions_and_open_sides():
     assert restored.list_positions() == broker.list_positions()
 
     # The resting stop leg's own side is still tracked as open on the restored broker --
-    # confirms find_and_cancel_resting_stop-style wash-trade checks survive the round trip.
+    # confirms cancel_resting_stops-style wash-trade checks survive the round trip.
     assert restored._open_sides == broker._open_sides
 
 

@@ -30,7 +30,7 @@ from ..execution.broker import Broker
 from .ledger import IntradayLedger
 from .orders import (
     build_close_order,
-    find_and_cancel_resting_stop,
+    cancel_resting_stops,
     submit_order_with_fault_isolation,
 )
 from .reflect import record_mechanical_reflection
@@ -58,7 +58,7 @@ def check_invalidation_and_time_stops(
     """For every held `Position`, recovers the proposal that opened it (the most recent
     filled entry order for that symbol, via `ledger.latest_filled_entry_for`, then that
     order's own `proposal_id` via `ledger.get_proposal`) and closes it
-    (`find_and_cancel_resting_stop` -> `build_close_order` ->
+    (`cancel_resting_stops` -> `build_close_order` ->
     `submit_order_with_fault_isolation`) if the current price has crossed the recorded
     `invalidation_price`, or `time_stop_minutes` has elapsed since the entry's first
     fill (`ledger.fills_for_order`).
@@ -134,7 +134,7 @@ def check_invalidation_and_time_stops(
             still_open.append(symbol)
             continue
 
-        find_and_cancel_resting_stop(symbol, broker, ledger)
+        cancel_resting_stops(symbol, broker, ledger)
         close_request = build_close_order(position, as_of, cycle, price, config)
         submitted = submit_order_with_fault_isolation(
             close_request, broker, ledger, now, proposal_id=entry["proposal_id"], leg="exit"

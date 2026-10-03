@@ -155,7 +155,7 @@ class AlpacaMarketDataClient:
         return {symbol: quote for symbol, quote in response.items() if quote is not None}
 
     def latest_trades(
-        self, symbols: list[str], feed: DataFeed = DataFeed.IEX
+        self, symbols: list[str], feed: DataFeed | str = DataFeed.IEX
     ) -> dict[str, tuple[float, dt.datetime]]:
         """Each symbol's most recent trade on ``feed``: ``(price, aware-UTC timestamp)``.
         Added 2026-09-30 for `intraday/jobs.py::premarket_moves`, whose 07:30 CT quote
@@ -166,7 +166,7 @@ class AlpacaMarketDataClient:
         if not symbols:
             return {}
         response = self._client.get_stock_latest_trade(
-            StockLatestTradeRequest(symbol_or_symbols=list(symbols), feed=feed)
+            StockLatestTradeRequest(symbol_or_symbols=list(symbols), feed=DataFeed(feed))
         )
         return {
             symbol: (float(trade.price), trade.timestamp)

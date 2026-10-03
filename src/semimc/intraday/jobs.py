@@ -61,7 +61,7 @@ from .orders import (
     build_entry_order,
     build_replacement_stop_order,
     build_trim_order,
-    find_and_cancel_resting_stop,
+    cancel_resting_stops,
     submit_order_with_fault_isolation,
 )
 from .pretrade import (
@@ -240,6 +240,29 @@ def _spread_reason(
     return check_spread_gate(
         symbol, quote.bid_price, quote.ask_price, quote.timestamp, now, config, check_age=False
     )
+
+
+def _cancel_orphaned_stops(
+    broker: Broker, ledger: IntradayLedger, positions: list[Position]
+) -> list[str]:
+    """Cancels any resting stop with no position behind it, logging a warning per symbol,
+    and returns the symbols. Such a stop sells shares that aren't there: a short on a real
+    account. A safety net behind `cancel_resting_stops`, added 2026-10-02 after a
+    two-tranche NVDA close left one tranche's stop resting (this is also what clears that
+    leg). A symbol with an entry order still working keeps its stop: an OTO stop leg
+    exists from the moment its entry is submitted, before the entry fills."""
+    held = {position.symbol for position in positions}
+    open_orders = ledger.open_orders()
+    working_entries = {row["symbol"] for row in open_orders if row["leg"] == "entry"}
+    stopped = {row["symbol"] for row in open_orders if row["leg"] == "stop"}
+    orphaned = sorted(stopped - held - working_entries)
+    for symbol in orphaned:
+        legs = cancel_resting_stops(symbol, broker, ledger)
+        ledger.record_incident(
+            "warning",
+            f"{symbol}: canceled {len(legs)} resting stop(s) with no position behind them",
+        )
+    return orphaned
 
 
 def _original_proposal_payload(ledger: IntradayLedger, symbol: str) -> dict[str, Any] | None:
@@ -485,13 +508,20 @@ def premarket_moves(
     research run got no pre-market move for any ticker, since a +/-5 minute window
     rarely holds an IEX pre-market quote. Only a trade printed on `now`'s New York date
     and not after `now` is used, so yesterday's after-hours print never stands in for
-    this morning. `diagnostics`, when passed, collects which tickers had no prior close,
-    were priced from a trade, or got no price at all -- what `run_research` logs so the
-    next empty result says why."""
+    this morning; since 2026-10-03 that trade can come from the delayed consolidated
+    tape as well as IEX (`_todays_trade_prices`). `diagnostics`, when passed, collects
+    which tickers had no prior close, were priced from an IEX or a delayed consolidated
+    trade, or got no price at all -- what `run_research` logs so the next empty result
+    says why."""
     prior_close = market_data_pit.spot(tickers)
     moves: dict[str, float] = {}
-    trades: dict[str, float] | None = None  # fetched once, only if some quote is missing
-    notes: dict[str, list[str]] = {"no_prior_close": [], "from_trade": [], "no_price": []}
+    trades: dict[str, tuple[float, str]] | None = None  # fetched once, if a quote is missing
+    notes: dict[str, list[str]] = {
+        "no_prior_close": [],
+        "from_trade": [],
+        "from_delayed_trade": [],
+        "no_price": [],
+    }
     for ticker in tickers:
         prior = prior_close.get(ticker)
         if prior is None or pd.isna(prior) or prior <= 0:
@@ -501,9 +531,9 @@ def premarket_moves(
         if current is None:
             if trades is None:
                 trades = _todays_trade_prices(tickers, market_data, now)
-            current = trades.get(ticker)
-            if current is not None:
-                notes["from_trade"].append(ticker)
+            if ticker in trades:
+                current, key = trades[ticker]
+                notes[key].append(ticker)
         if current is None:
             notes["no_price"].append(ticker)
             continue
@@ -513,25 +543,36 @@ def premarket_moves(
     return moves
 
 
+# Where `_todays_trade_prices` looks, and the `premarket_moves` diagnostics key for each.
+_TRADE_FEEDS = (("iex", "from_trade"), ("delayed_sip", "from_delayed_trade"))
+
+
 def _todays_trade_prices(
     tickers: list[str], market_data: AlpacaMarketDataClient, now: dt.datetime
-) -> dict[str, float]:
-    """Latest trade per ticker, kept only if it printed on `now`'s New York date, at or
-    before `now`. A failed lookup is an empty result, never a crash -- the same tolerance
-    as a single missing quote."""
-    try:
-        latest = market_data.latest_trades(tickers)
-    except Exception:  # noqa: BLE001 - a fallback must never take research down with it
-        return {}
+) -> dict[str, tuple[float, str]]:
+    """Latest trade per ticker as `(price, diagnostics key)`, kept only if it printed on
+    `now`'s New York date, at or before `now`. Asks both IEX (real time) and the free
+    plan's 15-minute-delayed consolidated tape and keeps the more recent print: before the
+    open IEX barely trades these names (research on 2026-10-01 and -02 priced 3 and 2 of
+    14 tickers), while the consolidated tape carries every venue's pre-market prints. A
+    failed lookup on either feed is an empty result for that feed, never a crash -- the
+    same tolerance as a single missing quote."""
     now_utc = pd.Timestamp(now if now.tzinfo else now.replace(tzinfo=dt.UTC))
     today = now_utc.tz_convert("America/New_York").date()
-    prices: dict[str, float] = {}
-    for ticker, (price, printed_at) in latest.items():
-        stamp = pd.Timestamp(printed_at)
-        stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp
-        if stamp <= now_utc and stamp.tz_convert("America/New_York").date() == today:
-            prices[ticker] = price
-    return prices
+    best: dict[str, tuple[pd.Timestamp, float, str]] = {}
+    for feed, key in _TRADE_FEEDS:
+        try:
+            latest = market_data.latest_trades(tickers, feed=feed)
+        except Exception:  # noqa: BLE001 - a fallback must never take research down with it
+            continue
+        for ticker, (price, printed_at) in latest.items():
+            stamp = pd.Timestamp(printed_at)
+            stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp
+            if stamp > now_utc or stamp.tz_convert("America/New_York").date() != today:
+                continue
+            if ticker not in best or stamp > best[ticker][0]:
+                best[ticker] = (stamp, price, key)
+    return {ticker: (price, key) for ticker, (_, price, key) in best.items()}
 
 
 def _upcoming_earnings(
@@ -685,7 +726,8 @@ def run_research(
     # to tell which input had failed.
     summary = f"premarket moves: {len(premarket_moves_today)}/{len(tickers)} tickers priced"
     for label, key in (
-        ("from latest trade", "from_trade"),
+        ("from latest IEX trade", "from_trade"),
+        ("from delayed consolidated trade", "from_delayed_trade"),
         ("no prior close", "no_prior_close"),
         ("no price", "no_price"),
     ):
@@ -1018,6 +1060,7 @@ def run_cycle(
             )
 
     positions = broker.list_positions()
+    _cancel_orphaned_stops(broker, ledger, positions)
     positions_notional = {p.symbol: p.market_value for p in positions}
 
     watchlist = ledger.watchlist_for(as_of)
@@ -1206,7 +1249,7 @@ def run_cycle(
                     f"{proposal.symbol}: cannot trim -- no position or price"
                 )
                 continue
-            find_and_cancel_resting_stop(proposal.symbol, broker, ledger)
+            cancel_resting_stops(proposal.symbol, broker, ledger)
             try:
                 trim_request = build_trim_order(
                     proposal, position, as_of, cycle, price, account.equity, intraday
@@ -1251,7 +1294,7 @@ def run_cycle(
                     f"{proposal.symbol}: cannot close -- no position or price"
                 )
                 continue
-            find_and_cancel_resting_stop(proposal.symbol, broker, ledger)
+            cancel_resting_stops(proposal.symbol, broker, ledger)
             close_request = build_close_order(position, as_of, cycle, price, intraday)
             submitted = submit_order_with_fault_isolation(
                 close_request, broker, ledger, now, proposal_id=proposal_id, leg="exit"
@@ -1322,7 +1365,7 @@ def run_carry(
             )
             result.carried.append(position.symbol)
             continue
-        find_and_cancel_resting_stop(position.symbol, broker, ledger)
+        cancel_resting_stops(position.symbol, broker, ledger)
         close_request = build_close_order(position, as_of, "carry", price, intraday)
         submitted = submit_order_with_fault_isolation(
             close_request, broker, ledger, now, leg="exit"
@@ -1345,7 +1388,7 @@ def run_carry(
         if price is None:
             result.carried.append(position.symbol)
             continue
-        find_and_cancel_resting_stop(position.symbol, broker, ledger)
+        cancel_resting_stops(position.symbol, broker, ledger)
         close_request = build_close_order(position, as_of, "carry", price, intraday)
         submitted = submit_order_with_fault_isolation(
             close_request, broker, ledger, now, leg="exit"

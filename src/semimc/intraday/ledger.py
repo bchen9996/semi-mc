@@ -489,23 +489,28 @@ class IntradayLedger:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def open_stop_leg_for(self, symbol: str) -> dict[str, Any] | None:
-        """The most recently recorded still-open stop-loss leg for ``symbol``, or
-        ``None`` (S4, Phase 4) -- what `intraday/orders.py::find_and_cancel_resting_stop`
-        looks up before a close/trim. Singular, not a list: nothing before Phase 5's
-        tranche-splitting can produce more than one open entry (and therefore more than
-        one resting stop) for the same symbol at once -- revisit this once that changes.
+    def open_stop_legs_for(self, symbol: str) -> list[dict[str, Any]]:
+        """Every still-open stop-loss leg recorded for ``symbol``, oldest first -- what
+        `intraday/orders.py::cancel_resting_stops` cancels before a close/trim.
+
+        A list since 2026-10-02. This used to return only the most recent leg, on the
+        Phase 4 assumption that a symbol never has more than one resting stop. Phase 5's
+        tranche-splitting broke that: each tranche's entry carries its own stop. The first
+        two-tranche trade (NVDA, 3 + 3 shares) closed with only the second tranche's stop
+        canceled, leaving a 3-share sell stop resting with nothing behind it -- harmless
+        on the shadow broker, which never triggers stops, but on a real account it would
+        have opened a short had NVDA traded down to it.
         """
         placeholders = ",".join("?" * len(_OPEN_ORDER_STATUSES))
-        row = self._conn.execute(
+        rows = self._conn.execute(
             f"""
             SELECT * FROM orders
             WHERE symbol = ? AND leg = 'stop' AND status IN ({placeholders})
-            ORDER BY id DESC LIMIT 1
+            ORDER BY id
             """,
             (symbol, *_OPEN_ORDER_STATUSES),
-        ).fetchone()
-        return dict(row) if row is not None else None
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def pending_tranche_for(self, symbol: str) -> dict[str, Any] | None:
         """The most recently filled entry order for ``symbol`` (whichever tranche that
@@ -520,9 +525,9 @@ class IntradayLedger:
         later tranche has already been submitted and itself reached `tranche_index ==
         tranche_total`.
 
-        Generalizes :meth:`open_stop_leg_for`'s own disclosed "singular, not a list"
-        limitation now that tranche-splitting exists: still singular, on the same
-        assumption that only one entry can be mid-tranche for a symbol at once.
+        Singular, on the assumption that only one entry can be mid-tranche for a symbol
+        at once (a symbol's resting stops, by contrast, are a list:
+        :meth:`open_stop_legs_for`).
         """
         row = self._conn.execute(
             """
@@ -541,7 +546,7 @@ class IntradayLedger:
         """The most recently filled entry order for `symbol` (S4, Phase 5) -- what
         `intraday/monitor.py` starts from to find the proposal (and therefore the
         invalidation/time-stop) a currently-held position was opened under. Singular,
-        same "most recent" convention as `open_stop_leg_for`/`pending_tranche_for`: a
+        same "most recent" convention as `pending_tranche_for`: a
         symbol closed and reopened same-day is a new, more recent row, so this always
         finds the entry that's actually still held."""
         row = self._conn.execute(

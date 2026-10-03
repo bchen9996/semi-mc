@@ -2477,6 +2477,26 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       one that couldn't be placed or priced). Drift waits for the next decision. An order
       already placed toward a decision counts as an attempt, which covers the 10-01
       decision (QCOM filled, no executions row): its next execute skips.
+- [x] **2026-10-02: clean day (streak 1), and the agent's first trade.** The spread fix
+      worked (no spread failures, no fallback to IEX). At 09:01 CT the Trader bought
+      NVDA ("gap held through 30-minute opening range on 1.76x volume", the session data
+      at work): 1.5% of $100k, 6 shares in two tranches of 3. A 60-minute time stop closed
+      it at $234.56, one cent above its invalidation price: -$20.93 net, graded a timing
+      miss (process 3, invalidation respected). The week's placebo: 10 closed trades,
+      -$1,487 net. **Bug the trade exposed, fixed 2026-10-03 (owner-approved):** each
+      tranche carries its own OTO stop, but a close or trim cancelled only the most recent
+      one (`open_stop_leg_for`, singular by a Phase 4 assumption its own docstring said to
+      revisit once tranches existed), and never marked even that one cancelled in the
+      ledger. So the NVDA close left the first tranche's 3-share sell stop resting with no
+      position behind it. Harmless on the shadow broker, which never triggers stops; on a
+      real account it would have opened a short had NVDA traded down to $234.55, and a
+      trim could leave more stop shares than shares held. Now `cancel_resting_stops`
+      cancels every open stop leg for the symbol and records each one's new status
+      (`open_stop_legs_for`), and each cycle cancels any resting stop with no position
+      and no working entry behind it, with a warning (`_cancel_orphaned_stops`; it clears
+      the leftover NVDA leg on the next cycle). Also 2026-10-03: pre-market moves now take
+      the more recent of an IEX trade and a delayed consolidated trade
+      (`_todays_trade_prices`), since IEX alone priced 3 and 2 of 14 tickers on Oct 1-2.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

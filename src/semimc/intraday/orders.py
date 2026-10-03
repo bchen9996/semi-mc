@@ -124,28 +124,44 @@ def build_entry_order(
     )
 
 
-def find_and_cancel_resting_stop(symbol: str, broker: Broker, ledger: IntradayLedger) -> str | None:
-    """Cancels `symbol`'s resting protective stop leg, if any, and returns its
-    `client_order_id` (or `None` if there was none to cancel).
+def cancel_resting_stops(symbol: str, broker: Broker, ledger: IntradayLedger) -> list[str]:
+    """Cancels every resting protective stop leg `symbol` has -- one per tranche of a
+    split entry -- and returns their `client_order_id`s (empty if there were none).
 
     This is a correctness requirement for closing or trimming a position, not cleanup:
     only bracket/OCO/trailing-stop orders are confirmed wash-trade-exempt at Alpaca
     (Phase 3's direct quote, `docs/alpaca_notes.md`), so a plain "simple" close/trim order
     left to collide with a still-resting stop-loss leg in the same symbol would likely be
     rejected -- the brief's own "never leave an opposite-side order open in the same
-    symbol; cancel before reversing."
+    symbol; cancel before reversing." And a stop left behind a closed position is worse
+    than a rejection: it sells shares that are no longer there, opening a short. Found
+    2026-10-02, when this cancelled only the most recent leg and a two-tranche NVDA close
+    left the first tranche's 3-share stop resting (`IntradayLedger.open_stop_legs_for`).
 
-    Tolerates the leg already being canceled or otherwise gone at the broker (`KeyError`/
+    Each leg's ledger row is updated to whatever the broker now reports, or "canceled" if
+    the broker no longer has it -- the ledger used to keep showing a cancelled leg as
+    open. Tolerates a leg already canceled or otherwise gone at the broker (`KeyError`/
     `ValueError` from `cancel_order`) the same forgiving way real Alpaca's own
     `cancel_order` already is (`docs/alpaca_notes.md`: canceling an already-canceled
     order succeeds silently) -- nothing left to cancel is not a failure.
     """
-    leg = ledger.open_stop_leg_for(symbol)
-    if leg is None:
-        return None
-    with contextlib.suppress(KeyError, ValueError):
-        broker.cancel_order(leg["broker_order_id"])
-    return leg["client_order_id"]
+    canceled: list[str] = []
+    for leg in ledger.open_stop_legs_for(symbol):
+        with contextlib.suppress(KeyError, ValueError):
+            broker.cancel_order(leg["broker_order_id"])
+        refreshed = None
+        with contextlib.suppress(Exception):  # a failed lookup must never block the close
+            refreshed = broker.get_order_by_client_id(leg["client_order_id"])
+        ledger.record_order(
+            leg["client_order_id"],
+            leg["symbol"],
+            leg["side"],
+            status=refreshed.status if refreshed is not None else "canceled",
+            broker_order_id=leg["broker_order_id"],
+            leg="stop",
+        )
+        canceled.append(leg["client_order_id"])
+    return canceled
 
 
 def build_close_order(
@@ -161,7 +177,7 @@ def build_close_order(
     close (the schema doesn't require either for `action="close"`).
 
     `order_class="simple"` -- exiting needs no new stop leg. The resting stop-loss leg
-    from the original entry must be canceled first via `find_and_cancel_resting_stop`
+    from the original entry must be canceled first via `cancel_resting_stops`
     (not done here -- see the module docstring on sequencing being a job's job).
     """
     side: OrderSide = "sell" if position.side == "long" else "buy"
@@ -193,7 +209,7 @@ def build_trim_order(
     `execution/orders.py::build_orders` already uses for its own sell-down case.
 
     Like `build_close_order`, the resting stop-loss leg must be canceled first
-    (`find_and_cancel_resting_stop`), and -- unlike a close -- the remainder needs a
+    (`cancel_resting_stops`), and -- unlike a close -- the remainder needs a
     fresh, smaller replacement stop afterward (`build_replacement_stop_order`) so it is
     never left resting unprotected. Neither is sequenced here; see the module docstring.
     """
