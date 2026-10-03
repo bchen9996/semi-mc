@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from semimc.config import IntradayConfig
-from semimc.execution.broker import Asset, OrderRequest, Position
+from semimc.execution.broker import Asset, BrokerError, OrderRequest, Position
 from semimc.execution.fake_broker import FakeBroker
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.orders import (
@@ -22,6 +22,7 @@ from semimc.intraday.orders import (
     build_trim_order,
     cancel_resting_stops,
     intraday_client_order_id,
+    submit_exit,
     submit_order_with_fault_isolation,
 )
 from semimc.intraday.proposals import TradeProposal
@@ -415,3 +416,250 @@ def test_build_replacement_stop_order_is_a_plain_standalone_stop():
     assert order.stop_price == pytest.approx(185.0)
     assert order.qty == pytest.approx(16.0)
     assert order.client_order_id.endswith("::stop")
+
+
+# -- the real broker's asynchronous cancel (2026-10-03) ------------------------------------
+
+
+class _Sleeps:
+    """Records `cancel_resting_stops`'s waits instead of sleeping."""
+
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
+
+
+def _held(broker, ledger, client_order_id="entry-1", qty=6.0):
+    """A filled OTO entry and its resting stop leg, recorded the way run_cycle does."""
+    return submit_order_with_fault_isolation(
+        _order(client_order_id=client_order_id, qty=qty), broker, ledger, NOW
+    )
+
+
+def _close(position):
+    return build_close_order(position, AS_OF, CYCLE, price=190.0, config=IntradayConfig())
+
+
+def _exit(broker, ledger, build=_close, stop_price=185.0):
+    return submit_exit(
+        "NVDA",
+        build,
+        broker,
+        ledger,
+        NOW,
+        as_of=AS_OF,
+        cycle=CYCLE,
+        stop_price=stop_price,
+        sleep=_Sleeps(),
+    )
+
+
+def _incidents(ledger, severity):
+    return [i["message"] for i in ledger.incidents() if i["severity"] == severity]
+
+
+def test_cancel_resting_stops_waits_for_a_pending_cancel_to_complete(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(cancel_delay_lookups=3)
+    _held(broker, ledger)
+    sleeps = _Sleeps()
+
+    cancel_resting_stops("NVDA", broker, ledger, NOW, sleep=sleeps)
+
+    assert ledger.get_order("entry-1::stop")["status"] == "canceled"
+    assert sleeps.calls == [0.25, 0.25]  # three lookups, two waits between them
+    ledger.close()
+
+
+def test_cancel_resting_stops_leaves_a_cancel_that_never_completes_open(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(cancel_delay_lookups=10**6)
+    _held(broker, ledger)
+    sleeps = _Sleeps()
+
+    cancel_resting_stops("NVDA", broker, ledger, NOW, sleep=sleeps)
+
+    assert ledger.get_order("entry-1::stop")["status"] == "accepted"  # pending_cancel
+    assert len(sleeps.calls) == 19  # 20 lookups, 5 s in all
+    ledger.close()
+
+
+def test_cancel_resting_stops_records_a_stop_that_fired_before_the_cancel(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    _held(broker, ledger)
+    broker.trigger_stop("entry-1::stop", 184.9)
+
+    cancel_resting_stops("NVDA", broker, ledger, NOW, sleep=_Sleeps())
+
+    assert ledger.get_order("entry-1::stop")["status"] == "filled"
+    [fill] = ledger.fills_for_order("entry-1::stop")
+    assert (fill["qty"], fill["price"]) == (6.0, 184.9)
+    cancel_resting_stops("NVDA", broker, ledger, NOW, sleep=_Sleeps())  # nothing open now
+    assert len(ledger.fills_for_order("entry-1::stop")) == 1
+    ledger.close()
+
+
+def test_submit_turns_any_broker_rejection_into_an_incident(tmp_path):
+    """Alpaca's "insufficient qty available" is a plain BrokerError; it used to escape
+    and end the whole cycle."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(enforce_held_qty=True)
+    _held(broker, ledger)  # its stop holds all 6 shares
+    sell = _order(client_order_id="sell-1", side="sell", qty=6.0, order_class="simple")
+
+    assert submit_order_with_fault_isolation(sell, broker, ledger, NOW) is None
+    [message] = _incidents(ledger, "error")
+    assert message.startswith("NVDA: sell order rejected by the broker: insufficient qty")
+    ledger.close()
+
+
+# -- submit_exit ------------------------------------------------------------------------------
+
+
+def test_submit_exit_waits_out_the_cancel_before_closing(tmp_path):
+    """The race the shadow broker hides: a close sent while the stop is still canceling
+    is rejected, because the stop holds every share."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(enforce_held_qty=True, cancel_delay_lookups=2)
+    _held(broker, ledger)
+
+    attempt = _exit(broker, ledger)
+
+    assert attempt.failure is None
+    assert attempt.order.status == "filled"
+    assert attempt.order.qty == 6.0
+    assert broker.list_positions() == []
+    assert ledger.get_order("entry-1::stop")["status"] == "canceled"
+    assert _incidents(ledger, "error") == []
+    ledger.close()
+
+
+def test_submit_exit_holds_back_while_a_stop_is_still_canceling(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(enforce_held_qty=True, cancel_delay_lookups=10**6)
+    _held(broker, ledger)
+
+    attempt = _exit(broker, ledger)
+
+    assert attempt.order is None
+    assert attempt.failure == (
+        "NVDA: 1 resting stop(s) still canceling after 5s; exit held back to the next cycle"
+    )
+    assert _incidents(ledger, "error") == [attempt.failure]
+    assert broker.list_positions()[0].qty == 6.0
+    assert len(broker.list_open_orders()) == 1  # just the old stop, still canceling
+    ledger.close()
+
+
+def test_submit_exit_closes_only_what_a_fired_stop_left(tmp_path):
+    """One tranche's stop fired before the close: closing the old 6 shares would sell 3
+    that are gone, opening a short."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(enforce_held_qty=True)
+    _held(broker, ledger, "entry-t1", qty=3.0)
+    _held(broker, ledger, "entry-t2", qty=3.0)
+    broker.trigger_stop("entry-t1::stop", 184.9)
+
+    attempt = _exit(broker, ledger)
+
+    assert attempt.order.qty == 3.0
+    assert broker.list_positions() == []
+    assert ledger.get_order("entry-t1::stop")["status"] == "filled"
+    assert ledger.get_order("entry-t2::stop")["status"] == "canceled"
+    ledger.close()
+
+
+def test_submit_exit_sends_nothing_when_the_stop_already_closed_it(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    _held(broker, ledger)
+    broker.trigger_stop("entry-1::stop", 184.9)
+
+    attempt = _exit(broker, ledger)
+
+    assert (attempt.order, attempt.failure) == (None, None)
+    assert _incidents(ledger, "warning") == [
+        "NVDA: nothing left to exit once its stops were canceled"
+    ]
+    assert broker.list_positions() == []
+    ledger.close()
+
+
+class _RejectsExits(FakeBroker):
+    """Accepts entries and stops; rejects every limit sell."""
+
+    def submit_order(self, request: OrderRequest):
+        if request.side == "sell" and request.type == "limit":
+            raise BrokerError("simulated rejection")
+        return super().submit_order(request)
+
+
+def test_submit_exit_re_places_the_stop_when_the_exit_is_rejected(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = _RejectsExits()
+    _held(broker, ledger)
+
+    attempt = _exit(broker, ledger, stop_price=185.0)
+
+    assert attempt.order is None
+    assert attempt.failure == "NVDA: exit order failed"
+    [restored] = ledger.open_stop_legs_for("NVDA")
+    expected_id = intraday_client_order_id(AS_OF, CYCLE, "NVDA") + "::stop"
+    assert restored["client_order_id"] == expected_id
+    assert broker.get_order_by_client_id(expected_id).qty == 6.0
+    assert _incidents(ledger, "warning") == [
+        "NVDA: no exit went out after its stops were canceled; re-placed a stop for 6 "
+        "shares at 185.00"
+    ]
+    ledger.close()
+
+
+def test_submit_exit_re_places_the_stop_when_a_trim_is_too_small(tmp_path):
+    """A trim too small for a whole share used to leave the position's stops canceled."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    _held(broker, ledger)
+    tiny = TradeProposal(action="trim", symbol="NVDA", size_pct=0.0001)
+
+    def trim(position):
+        return build_trim_order(tiny, position, AS_OF, CYCLE, 190.0, 100_000.0, IntradayConfig())
+
+    attempt = _exit(broker, ledger, build=trim)
+
+    assert attempt.order is None
+    assert "too small to trim a whole share" in attempt.failure
+    assert len(ledger.open_stop_legs_for("NVDA")) == 1
+    ledger.close()
+
+
+def test_submit_exit_says_so_when_no_stop_can_be_re_placed(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = _RejectsExits()
+    _held(broker, ledger)
+
+    _exit(broker, ledger, stop_price=None)
+
+    assert ledger.open_stop_legs_for("NVDA") == []
+    assert _incidents(ledger, "error")[-1] == (
+        "NVDA: no exit went out after its stops were canceled, and no invalidation price is "
+        "on file to re-place one; position unprotected"
+    )
+    ledger.close()
+
+
+def test_submit_exit_adds_no_stop_a_position_never_had(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = _RejectsExits()
+    submit_order_with_fault_isolation(
+        _order(client_order_id="plain", qty=6.0, order_class="simple"), broker, ledger, NOW
+    )
+
+    attempt = _exit(broker, ledger)
+
+    assert attempt.failure == "NVDA: exit order failed"
+    assert ledger.open_stop_legs_for("NVDA") == []
+    assert broker.list_open_orders() == []
+    ledger.close()

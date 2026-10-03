@@ -2497,6 +2497,38 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       the leftover NVDA leg on the next cycle). Also 2026-10-03: pre-market moves now take
       the more recent of an IEX trade and a delayed consolidated trade
       (`_todays_trade_prices`), since IEX alone priced 3 and 2 of 14 tickers on Oct 1-2.
+- [x] **2026-10-03: exits made safe for the real broker before Stage 2 (owner-approved).**
+      Every close and trim cancelled the position's stops and sent the exit straight
+      after. The shadow broker cancels instantly; Alpaca cancels asynchronously (the stop
+      sits in `pending_cancel`, still holding its shares), so on the real account the
+      exit could be rejected "insufficient qty available". That rejection is a plain
+      `BrokerError`, which `submit_order_with_fault_isolation` didn't catch, so it would
+      have ended the whole cycle with the stops already cancelled: a position with no
+      stop until the next cycle, and the rest of the batch skipped. Now every exit (Trader
+      close and trim, monitor invalidation/time stop, both carry closes) goes through
+      `orders.py::submit_exit`, which: waits up to 5 s for each cancel to complete
+      (`cancel_resting_stops`; an unmeasured guess) and holds the exit back with an error
+      incident if one hasn't; re-reads the position, so a stop that fired first is never
+      sold twice (closing the old quantity would open a short), and records that stop's
+      fill; and, if the exit doesn't go out, re-places a stop at the entry's invalidation
+      price (or logs "position unprotected" when there is none). Any `BrokerError` on
+      submit is now an incident, not a crash. The monitor reports a failed exit as
+      `exits_failed` instead of "closed", and the cycle adds no tranche to it. Also fixed
+      on the way: a trim too small for a whole share left the stops cancelled. `FakeBroker`
+      gained `cancel_delay_lookups`, `enforce_held_qty` and `trigger_stop` to test this;
+      all three are off or unused by default, so Stage 1 runs exactly as before.
+- [ ] **Stage 2 blocker, found 2026-10-03, not yet fixed: S4 never records a fill that
+      arrives after submission.** It records fills only from the submit response
+      (`submit_order_with_fault_isolation`). The shadow broker fills instantly, but on this
+      account all 15 paper-sleeve orders came back from `submit_order` still open, filled
+      1-4 s later, and were recorded only by the next `mark` (`docs/alpaca_notes.md`).
+      Nothing in `intraday/` polls order status afterward. On the real account every
+      entry would stay "accepted" in the ledger, so: the monitor finds no filled entry and
+      never enforces a time stop or invalidation; the next tranche never goes out
+      (`pending_tranche_for`); reflections and the eod report show no P&L; a stop that
+      fires between cycles is never recorded; and the orphan sweep treats every symbol as
+      having a working entry. Needs an S4 fill sync (poll the ledger's open orders each
+      cycle and record fills and statuses, as `live/mark.py` does) before Stage 2.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

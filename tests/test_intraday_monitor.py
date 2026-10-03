@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from semimc.config import IntradayConfig
-from semimc.execution.broker import OrderRequest
+from semimc.execution.broker import BrokerError, OrderRequest
 from semimc.execution.fake_broker import FakeBroker
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.monitor import check_invalidation_and_time_stops
@@ -275,4 +275,32 @@ def test_records_the_gap_since_the_previous_call_this_same_day(tmp_path):
     )
 
     assert result.gap_seconds == pytest.approx(1200.0)
+    ledger.close()
+
+
+class _RejectsExits(FakeBroker):
+    """Accepts entries and stops; rejects every limit sell."""
+
+    def submit_order(self, request: OrderRequest):
+        if request.side == "sell" and request.type == "limit":
+            raise BrokerError("simulated rejection")
+        return super().submit_order(request)
+
+
+def test_a_rejected_close_is_reported_as_failed_and_its_stop_put_back(tmp_path):
+    """2026-10-03: a close that didn't go out was still reported as closed, with the
+    position's stop already canceled."""
+    ledger = _ledger(tmp_path)
+    broker = _RejectsExits()
+    _open_position(broker, ledger, invalidation_price=185.0, order_class="oto")
+
+    result = check_invalidation_and_time_stops(
+        IntradayConfig(), broker, ledger, {"NVDA": 184.0}, AS_OF, CYCLE, NOW
+    )
+
+    assert result.closed == []
+    assert result.exits_failed == result.still_open == ["NVDA"]
+    assert broker.list_positions()[0].qty == 10.0
+    [restored] = ledger.open_stop_legs_for("NVDA")
+    assert restored["client_order_id"] != "entry-NVDA::stop"
     ledger.close()

@@ -17,6 +17,7 @@ from semimc.execution.broker import (
     AccountBlockedError,
     Asset,
     AssetNotTradableError,
+    BrokerError,
     MarketClosedError,
     Order,
     OrderRequest,
@@ -181,6 +182,60 @@ def test_cancel_a_filled_order_raises():
 def test_cancel_unknown_order_raises_key_error():
     with pytest.raises(KeyError):
         FakeBroker().cancel_order("no-such-id")
+
+
+def sell(qty=10.0, client_order_id="co-sell") -> OrderRequest:
+    return OrderRequest(
+        symbol="NVDA",
+        side="sell",
+        type="limit",
+        time_in_force="day",
+        client_order_id=client_order_id,
+        qty=qty,
+        limit_price=100.0,
+    )
+
+
+def test_a_delayed_cancel_stays_open_until_enough_lookups():
+    """Alpaca's pending_cancel: still open (and still holding shares) until it completes."""
+    broker = FakeBroker(cancel_delay_lookups=2)
+    leg = broker.submit_order(buy(order_class="oto", stop_loss_price=95.0)).legs[0]
+    broker.cancel_order(leg.id)
+    broker.cancel_order(leg.id)  # a second cancel while pending changes nothing
+    assert leg in broker.list_open_orders()
+    assert broker.get_order_by_client_id(leg.client_order_id).status == "accepted"
+    assert broker.get_order_by_client_id(leg.client_order_id).status == "canceled"
+    assert broker.list_open_orders() == []
+
+
+def test_enforce_held_qty_rejects_a_sell_the_resting_stop_still_holds():
+    broker = FakeBroker(enforce_held_qty=True, cancel_delay_lookups=1)
+    leg = broker.submit_order(buy(order_class="oto", stop_loss_price=95.0)).legs[0]
+    with pytest.raises(BrokerError, match=r"insufficient qty available .*available: 0"):
+        broker.submit_order(sell())
+    broker.cancel_order(leg.id)
+    with pytest.raises(BrokerError, match="insufficient qty"):  # pending cancel still holds
+        broker.submit_order(sell())
+    broker.get_order_by_client_id(leg.client_order_id)  # the cancel completes
+    assert broker.submit_order(sell()).status == "filled"
+    assert broker.list_positions() == []
+
+
+def test_enforce_held_qty_is_off_by_default():
+    broker = FakeBroker()
+    broker.submit_order(buy(order_class="oto", stop_loss_price=95.0))
+    assert broker.submit_order(sell()).status == "filled"
+
+
+def test_trigger_stop_fills_a_resting_stop_and_reduces_the_position():
+    broker = FakeBroker()
+    leg = broker.submit_order(buy(order_class="oto", stop_loss_price=95.0)).legs[0]
+    filled = broker.trigger_stop(leg.client_order_id, 94.9)
+    assert (filled.status, filled.filled_qty, filled.filled_avg_price) == ("filled", 10.0, 94.9)
+    assert broker.list_positions() == []
+    assert broker.list_open_orders() == []
+    with pytest.raises(ValueError, match="not a resting stop"):
+        broker.trigger_stop(leg.client_order_id, 94.9)
 
 
 # -- idempotency ---------------------------------------------------------------------
