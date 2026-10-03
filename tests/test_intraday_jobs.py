@@ -19,6 +19,7 @@ import pandas as pd
 import pytest
 from fixtures.injection_corpus import INJECTION_CORPUS
 
+from semimc.execution.broker import BrokerError, OrderRequest
 from semimc.execution.fake_broker import FakeBroker
 from semimc.execution.market_data import OptionMarketQuote
 from semimc.intraday.jobs import (
@@ -2242,4 +2243,64 @@ def test_run_cycle_still_runs_when_session_bars_are_unavailable(config, tmp_path
         i["severity"] == "warning" and i["message"].startswith("session bars unavailable")
         for i in ledger.incidents()
     )
+    ledger.close()
+
+
+class _RejectsExits(FakeBroker):
+    """Accepts entries and stops; rejects every limit sell."""
+
+    def submit_order(self, request: OrderRequest):
+        if request.side == "sell" and request.type == "limit":
+            raise BrokerError("simulated rejection")
+        return super().submit_order(request)
+
+
+def test_run_cycle_adds_no_tranche_to_a_position_whose_stop_out_failed(config, tmp_path):
+    """The monitor tried to close it; buying the next tranche would add to a position
+    the cycle meant to leave."""
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=2)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    proposal = {
+        "action": "open",
+        "symbol": "NVDA",
+        "side": "buy",
+        "size_pct": 0.05,
+        "limit_price": 190.0,
+        "thesis": "AI capex",
+        "invalidation_price": 185.0,
+        "time_stop_minutes": 60,
+    }
+    broker = _RejectsExits(now=NOW)
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [proposal]}),
+        _result_json(structured_output={"proposals": []}),
+    )
+    run_cycle(
+        "cycle_1",
+        cfg,
+        broker,
+        ledger,
+        _FakeMarketData(quotes={"NVDA": _quote(190.0)}),
+        client,
+        AS_OF,
+        NOW,
+    )
+    [held] = broker.list_positions()
+
+    result = run_cycle(
+        "cycle_2",
+        cfg,
+        broker,
+        ledger,
+        _FakeMarketData(quotes={"NVDA": _quote(184.0)}),  # through the invalidation
+        client,
+        AS_OF,
+        NOW + dt.timedelta(minutes=20),
+    )
+
+    assert result.orders_submitted == []
+    assert broker.list_positions()[0].qty == held.qty
+    assert ledger.pending_tranche_for("NVDA") is not None  # tranche 2 never went out
+    assert len(ledger.open_stop_legs_for("NVDA")) == 1  # the re-placed stop
     ledger.close()

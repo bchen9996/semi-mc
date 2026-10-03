@@ -255,6 +255,14 @@ just documentation.
   same case. `AlpacaPaperBroker.cancel_order` doesn't special-case this; see its module
   docstring. Whether canceling a *filled* or *expired* order still returns 422 remains
   unconfirmed -- only the already-canceled case has been observed directly.
+- **A submit response carries no fill.** Every one of the 15 paper-sleeve orders on this
+  account (`ledger/paper.sqlite3`, 2026-09-24 and 2026-10-02) came back from
+  `submit_order` still open: each filled 1-4 s after submission, and the ledger learned it
+  only at the next `mark`, 4-12 minutes later. `live/mark.py` exists for exactly this.
+  **S4 has no equivalent yet**: `intraday/orders.py::submit_order_with_fault_isolation`
+  records a fill only from the submit response, which the shadow broker fills instantly,
+  so on the real account S4 would record no fills at all (open item in `tasks/todo.md`,
+  2026-10-03).
 - **Market-closed order submission is queued, not rejected.** Verified via WebSearch:
   Alpaca used to reject day-order submission while the market was closed; it now accepts
   the order and routes it at the next open. `execution/pretrade.py`'s market-open check
@@ -288,6 +296,14 @@ canceling an already-canceled order does not 422, see above), `get_account`/`get
   the same way bracket/OCO/trailing-stop are** -- the direct quote above names those three
   specifically, not OTO. Untested until a real wash-trade collision is provoked against a
   live OTO order.
+- **How long a cancel takes to complete, and Alpaca's exact rejection while it hasn't**
+  (S4, 2026-10-03). A canceled order passes through `pending_cancel` and holds its shares
+  meanwhile, so a sell sent during that window is expected to come back "insufficient qty
+  available for order". `intraday/orders.py::cancel_resting_stops` waits up to 5 s
+  (an unmeasured guess) for each stop's cancel to complete before `submit_exit` sends the
+  close, and any `BrokerError` from the submit is logged rather than raised, so the exact
+  wording doesn't change behavior. Stage 2's first close is the first real test; the
+  incidents table will show a "still canceling" error if 5 s is too short.
 - Actual paper-account creation limit.
 - Trade-updates websocket stream: reconnect behavior, whether missed events during a
   disconnect are backfilled or lost (matters for `live/mark.py`'s fill tracking, which the

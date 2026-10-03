@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import asdict, dataclass, field
+from functools import partial
 from typing import Any, Literal
 
 import pandas as pd
@@ -62,6 +63,7 @@ from .orders import (
     build_replacement_stop_order,
     build_trim_order,
     cancel_resting_stops,
+    submit_exit,
     submit_order_with_fault_isolation,
 )
 from .pretrade import (
@@ -243,7 +245,7 @@ def _spread_reason(
 
 
 def _cancel_orphaned_stops(
-    broker: Broker, ledger: IntradayLedger, positions: list[Position]
+    broker: Broker, ledger: IntradayLedger, positions: list[Position], now: dt.datetime
 ) -> list[str]:
     """Cancels any resting stop with no position behind it, logging a warning per symbol,
     and returns the symbols. Such a stop sells shares that aren't there: a short on a real
@@ -257,7 +259,7 @@ def _cancel_orphaned_stops(
     stopped = {row["symbol"] for row in open_orders if row["leg"] == "stop"}
     orphaned = sorted(stopped - held - working_entries)
     for symbol in orphaned:
-        legs = cancel_resting_stops(symbol, broker, ledger)
+        legs = cancel_resting_stops(symbol, broker, ledger, now)
         ledger.record_incident(
             "warning",
             f"{symbol}: canceled {len(legs)} resting stop(s) with no position behind them",
@@ -1011,6 +1013,8 @@ def run_cycle(
     # (no new model call -- the original accepted proposal already justified the full
     # size; splitting is an execution technique, not a re-decision).
     for position in list(positions):
+        if position.symbol in monitor_result.exits_failed:
+            continue  # meant to be closed; never add to it
         pending = ledger.pending_tranche_for(position.symbol)
         if pending is None:
             continue
@@ -1060,7 +1064,7 @@ def run_cycle(
             )
 
     positions = broker.list_positions()
-    _cancel_orphaned_stops(broker, ledger, positions)
+    _cancel_orphaned_stops(broker, ledger, positions, now)
     positions_notional = {p.symbol: p.market_value for p in positions}
 
     watchlist = ledger.watchlist_for(as_of)
@@ -1249,28 +1253,38 @@ def run_cycle(
                     f"{proposal.symbol}: cannot trim -- no position or price"
                 )
                 continue
-            cancel_resting_stops(proposal.symbol, broker, ledger)
-            try:
-                trim_request = build_trim_order(
-                    proposal, position, as_of, cycle, price, account.equity, intraday
-                )
-            except ValueError as exc:
-                result.order_failures.append(str(exc))
-                continue
-            submitted = submit_order_with_fault_isolation(
-                trim_request, broker, ledger, now, proposal_id=proposal_id, leg="exit"
+            original_payload = _original_proposal_payload(ledger, proposal.symbol) or {}
+            original_invalidation = original_payload.get("invalidation_price")
+            trim = submit_exit(
+                proposal.symbol,
+                partial(
+                    build_trim_order,
+                    proposal,
+                    as_of=as_of,
+                    cycle=cycle,
+                    price=price,
+                    equity=account.equity,
+                    config=intraday,
+                ),
+                broker,
+                ledger,
+                now,
+                as_of=as_of,
+                cycle=cycle,
+                stop_price=original_invalidation,
+                proposal_id=proposal_id,
             )
-            if submitted is None:
-                result.order_failures.append(f"{proposal.symbol}: trim order failed")
+            if trim.order is None or trim.position is None:
+                if trim.failure is not None:
+                    result.order_failures.append(trim.failure)
                 continue
+            submitted = trim.order
             result.orders_submitted.append(submitted.client_order_id)
             record_mechanical_reflection(
                 proposal.symbol, submitted.client_order_id, "trader_trim", ledger, intraday, as_of
             )
 
-            remaining_qty = abs(position.qty) - abs(trim_request.qty)
-            original_payload = _original_proposal_payload(ledger, proposal.symbol) or {}
-            original_invalidation = original_payload.get("invalidation_price")
+            remaining_qty = abs(trim.position.qty) - abs(submitted.qty or 0.0)
             if remaining_qty > 0 and original_invalidation is not None:
                 stop_side: OrderSide = "sell" if position.side == "long" else "buy"
                 replacement = build_replacement_stop_order(
@@ -1294,23 +1308,30 @@ def run_cycle(
                     f"{proposal.symbol}: cannot close -- no position or price"
                 )
                 continue
-            cancel_resting_stops(proposal.symbol, broker, ledger)
-            close_request = build_close_order(position, as_of, cycle, price, intraday)
-            submitted = submit_order_with_fault_isolation(
-                close_request, broker, ledger, now, proposal_id=proposal_id, leg="exit"
+            original_payload = _original_proposal_payload(ledger, proposal.symbol) or {}
+            close = submit_exit(
+                proposal.symbol,
+                partial(build_close_order, as_of=as_of, cycle=cycle, price=price, config=intraday),
+                broker,
+                ledger,
+                now,
+                as_of=as_of,
+                cycle=cycle,
+                stop_price=original_payload.get("invalidation_price"),
+                proposal_id=proposal_id,
             )
-            if submitted is not None:
-                result.orders_submitted.append(submitted.client_order_id)
+            if close.order is not None:
+                result.orders_submitted.append(close.order.client_order_id)
                 record_mechanical_reflection(
                     proposal.symbol,
-                    submitted.client_order_id,
+                    close.order.client_order_id,
                     "trader_close",
                     ledger,
                     intraday,
                     as_of,
                 )
-            else:
-                result.order_failures.append(f"{proposal.symbol}: close order failed")
+            elif close.failure is not None:
+                result.order_failures.append(close.failure)
 
         # hold/no_trade: nothing to do.
 
@@ -1365,22 +1386,14 @@ def run_carry(
             )
             result.carried.append(position.symbol)
             continue
-        cancel_resting_stops(position.symbol, broker, ledger)
-        close_request = build_close_order(position, as_of, "carry", price, intraday)
-        submitted = submit_order_with_fault_isolation(
-            close_request, broker, ledger, now, leg="exit"
-        )
-        if submitted is not None:
-            record_mechanical_reflection(
-                position.symbol, submitted.client_order_id, "carry", ledger, intraday, as_of
-            )
+        _carry_close(position.symbol, payload, price, config, broker, ledger, as_of, now)
         result.closed.append(position.symbol)
 
     carried_candidates.sort(key=lambda item: item[1].get("confidence") or 0.0)
     overnight_notional = sum(abs(p.market_value) for p, _ in carried_candidates)
     cap = intraday.risk.overnight_gross_cap_pct * account.equity
 
-    for position, _payload in carried_candidates:
+    for position, payload in carried_candidates:
         if overnight_notional <= cap:
             result.carried.append(position.symbol)
             continue
@@ -1388,19 +1401,39 @@ def run_carry(
         if price is None:
             result.carried.append(position.symbol)
             continue
-        cancel_resting_stops(position.symbol, broker, ledger)
-        close_request = build_close_order(position, as_of, "carry", price, intraday)
-        submitted = submit_order_with_fault_isolation(
-            close_request, broker, ledger, now, leg="exit"
-        )
-        if submitted is not None:
-            record_mechanical_reflection(
-                position.symbol, submitted.client_order_id, "carry", ledger, intraday, as_of
-            )
+        _carry_close(position.symbol, payload, price, config, broker, ledger, as_of, now)
         overnight_notional -= abs(position.market_value)
         result.closed_for_cap.append(position.symbol)
 
     return result
+
+
+def _carry_close(
+    symbol: str,
+    payload: dict[str, Any] | None,
+    price: float,
+    config: Config,
+    broker: Broker,
+    ledger: IntradayLedger,
+    as_of: pd.Timestamp,
+    now: dt.datetime,
+) -> None:
+    """One carry close through `submit_exit`, with its mechanical reflection."""
+    intraday = config.intraday
+    attempt = submit_exit(
+        symbol,
+        partial(build_close_order, as_of=as_of, cycle="carry", price=price, config=intraday),
+        broker,
+        ledger,
+        now,
+        as_of=as_of,
+        cycle="carry",
+        stop_price=(payload or {}).get("invalidation_price"),
+    )
+    if attempt.order is not None:
+        record_mechanical_reflection(
+            symbol, attempt.order.client_order_id, "carry", ledger, intraday, as_of
+        )
 
 
 # -- eod_review (Phase 9b) ----------------------------------------------------------------

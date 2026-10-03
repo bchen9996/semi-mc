@@ -16,6 +16,7 @@ from .broker import (
     AccountBlockedError,
     Asset,
     AssetNotTradableError,
+    BrokerError,
     CalendarDay,
     Clock,
     MarketClosedError,
@@ -54,6 +55,18 @@ class FakeBroker:
         Fraction of ``qty``/``notional`` filled per call, when less than 1.0. The real
         paper account fills partially "a random size 10% of the time"; a test picks the
         fraction deterministically instead of leaving it to chance.
+    cancel_delay_lookups
+        How many :meth:`get_order_by_client_id` lookups a canceled order still reports as
+        open before it reads ``"canceled"``. Alpaca cancels asynchronously: the order sits
+        in ``pending_cancel`` (which ``AlpacaPaperBroker`` maps to ``"accepted"``) and
+        keeps holding its shares until the cancel completes. ``0`` (the default) cancels
+        at once.
+    enforce_held_qty
+        When ``True``, an order that reduces a position (a sell against a long, a buy
+        against a short) for more shares than the position less what other open orders on
+        the same side already hold is rejected with :class:`BrokerError`, the way Alpaca
+        answers "insufficient qty available for order". A stop still pending cancel holds
+        its shares too. Off by default, so every existing test keeps its behavior.
 
     An ``OrderRequest`` with ``order_class="oto"`` (S4's protective stop, Phase 3) fills
     its entry leg exactly like a simple order -- ``submit_order`` never reads
@@ -62,7 +75,8 @@ class FakeBroker:
     (S4's replacement stop after a trim, Phase 5) -- rests at ``status="new"`` and is
     never simulated as filling or triggering: real stop-triggering is Alpaca's own
     server-side job, and ``AlpacaPaperBroker`` itself is already exercised only by opt-in
-    network-marked integration tests, not mirrored here.
+    network-marked integration tests, not mirrored here. A test that needs a stop to fire
+    calls :meth:`trigger_stop` explicitly.
     """
 
     equity: float = 100_000.0
@@ -75,11 +89,16 @@ class FakeBroker:
     rate_limit_calls_remaining: int = 0
     timeout_after_success_ids: set[str] = field(default_factory=set)
     partial_fill_fraction: float = 1.0
+    cancel_delay_lookups: int = 0
+    enforce_held_qty: bool = False
     now: dt.datetime = field(default_factory=lambda: dt.datetime(2026, 1, 2, 15, 0))
 
     _orders: dict[str, Order] = field(default_factory=dict, repr=False, compare=False)
     _positions: dict[str, Position] = field(default_factory=dict, repr=False, compare=False)
     _open_sides: dict[str, set[str]] = field(default_factory=dict, repr=False, compare=False)
+    # Order id -> lookups left before a cancel completes (`cancel_delay_lookups`). Not
+    # persisted by `to_state`: the shadow broker never delays a cancel.
+    _pending_cancels: dict[str, int] = field(default_factory=dict, repr=False, compare=False)
 
     # -- account / positions / assets / clock ------------------------------------------
 
@@ -135,6 +154,8 @@ class FakeBroker:
                 raise WashTradeError(
                     f"a {request.symbol} order could interact with one already open"
                 )
+        if self.enforce_held_qty:
+            self._check_held_qty(request)
 
         if request.type in ("stop", "stop_limit"):
             # A stop (standalone -- S4's own replacement stop, Phase 5 -- or an OTO
@@ -216,23 +237,77 @@ class FakeBroker:
         return order
 
     def get_order_by_client_id(self, client_order_id: str) -> Order | None:
-        return self._orders.get(client_order_id)
+        order = self._orders.get(client_order_id)
+        if order is not None and order.id in self._pending_cancels:
+            self._pending_cancels[order.id] -= 1
+            if self._pending_cancels[order.id] <= 0:
+                del self._pending_cancels[order.id]
+                self._finish_cancel(order)
+        return order
 
     def cancel_order(self, order_id: str) -> None:
         for order in self._orders.values():
             if order.id == order_id:
                 if order.status in ("filled", "canceled", "expired"):
                     raise ValueError(f"order {order_id} is already {order.status}")
-                order.status = "canceled"
-                self._open_sides.get(order.symbol, set()).discard(order.side)
+                if order.id in self._pending_cancels:
+                    return  # already canceling
+                if self.cancel_delay_lookups > 0:
+                    order.status = "accepted"  # pending_cancel, as AlpacaPaperBroker maps it
+                    self._pending_cancels[order.id] = self.cancel_delay_lookups
+                    return
+                self._finish_cancel(order)
                 return
         raise KeyError(f"no order with id {order_id}")
+
+    def trigger_stop(self, client_order_id: str, price: float) -> Order:
+        """Fills a resting stop at ``price`` as if the market had traded through it, and
+        applies the fill to the position. Nothing calls this on its own (see the class
+        docstring); a test does, to put a stop that fired before a cancel reached it."""
+        order = self._orders[client_order_id]
+        if order.type not in ("stop", "stop_limit") or order.status not in ("new", "accepted"):
+            raise ValueError(f"{client_order_id} is not a resting stop")
+        self._pending_cancels.pop(order.id, None)
+        order.status = "filled"
+        order.filled_qty = order.qty or 0.0
+        order.filled_avg_price = price
+        order.filled_at = self.now
+        self._open_sides.get(order.symbol, set()).discard(order.side)
+        self._apply_fill_to_position(order)
+        return order
 
     def list_open_orders(self) -> list[Order]:
         open_states = ("new", "accepted", "partially_filled")
         return [o for o in self._orders.values() if o.status in open_states]
 
     # -- internal --------------------------------------------------------------------
+
+    def _finish_cancel(self, order: Order) -> None:
+        order.status = "canceled"
+        self._open_sides.get(order.symbol, set()).discard(order.side)
+
+    def _check_held_qty(self, request: OrderRequest) -> None:
+        """`enforce_held_qty`: reject an order that reduces a position by more shares than
+        are free, counting every open order on the same side as holding its shares."""
+        position = self._positions.get(request.symbol)
+        if position is None or position.qty == 0 or request.qty is None:
+            return
+        reducing = (position.qty > 0 and request.side == "sell") or (
+            position.qty < 0 and request.side == "buy"
+        )
+        if not reducing:
+            return
+        held = sum(
+            (order.qty or 0.0) - order.filled_qty
+            for order in self.list_open_orders()
+            if order.symbol == request.symbol and order.side == request.side
+        )
+        available = abs(position.qty) - held
+        if request.qty > available + 1e-9:
+            raise BrokerError(
+                f"insufficient qty available for order (requested: {request.qty:g}, "
+                f"available: {max(available, 0.0):g})"
+            )
 
     def _apply_fill_to_position(self, order: Order) -> None:
         if order.filled_qty <= 0:

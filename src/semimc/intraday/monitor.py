@@ -22,17 +22,14 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
+from functools import partial
 
 import pandas as pd
 
 from ..config import IntradayConfig
 from ..execution.broker import Broker
 from .ledger import IntradayLedger
-from .orders import (
-    build_close_order,
-    cancel_resting_stops,
-    submit_order_with_fault_isolation,
-)
+from .orders import build_close_order, submit_exit
 from .reflect import record_mechanical_reflection
 
 
@@ -40,6 +37,9 @@ from .reflect import record_mechanical_reflection
 class MonitorResult:
     closed: list[str] = field(default_factory=list)
     still_open: list[str] = field(default_factory=list)
+    # Breached its invalidation or time stop, but no exit went out (`submit_exit`'s
+    # failure; also listed in `still_open`). `run_cycle` adds no tranche to these.
+    exits_failed: list[str] = field(default_factory=list)
     # Seconds since this same trading day's previous recorded check, `None` for the day's
     # first (`ledger.record_monitor_check`) -- surfaced here so the CLI can print it
     # immediately, not just eod-review/weekly-review after the fact.
@@ -58,8 +58,8 @@ def check_invalidation_and_time_stops(
     """For every held `Position`, recovers the proposal that opened it (the most recent
     filled entry order for that symbol, via `ledger.latest_filled_entry_for`, then that
     order's own `proposal_id` via `ledger.get_proposal`) and closes it
-    (`cancel_resting_stops` -> `build_close_order` ->
-    `submit_order_with_fault_isolation`) if the current price has crossed the recorded
+    (`orders.py::submit_exit`, which cancels the stops, waits for the cancels, and
+    re-places a stop if the close doesn't go out) if the current price has crossed the recorded
     `invalidation_price`, or `time_stop_minutes` has elapsed since the entry's first
     fill (`ledger.fills_for_order`).
 
@@ -83,6 +83,7 @@ def check_invalidation_and_time_stops(
 
     closed: list[str] = []
     still_open: list[str] = []
+    exits_failed: list[str] = []
 
     for position in broker.list_positions():
         symbol = position.symbol
@@ -134,22 +135,34 @@ def check_invalidation_and_time_stops(
             still_open.append(symbol)
             continue
 
-        cancel_resting_stops(symbol, broker, ledger)
-        close_request = build_close_order(position, as_of, cycle, price, config)
-        submitted = submit_order_with_fault_isolation(
-            close_request, broker, ledger, now, proposal_id=entry["proposal_id"], leg="exit"
+        attempt = submit_exit(
+            symbol,
+            partial(build_close_order, as_of=as_of, cycle=cycle, price=price, config=config),
+            broker,
+            ledger,
+            now,
+            as_of=as_of,
+            cycle=cycle,
+            stop_price=invalidation_price,
+            proposal_id=entry["proposal_id"],
         )
         if stopped_out:
             ledger.record_incident("warning", f"stopout:{symbol}")
-        if submitted is not None:
+        if attempt.order is not None:
             record_mechanical_reflection(
                 symbol,
-                submitted.client_order_id,
+                attempt.order.client_order_id,
                 "invalidation" if stopped_out else "time_stop",
                 ledger,
                 config,
                 as_of,
             )
-        closed.append(symbol)
+        if attempt.failure is not None:
+            exits_failed.append(symbol)
+            still_open.append(symbol)
+        else:
+            closed.append(symbol)
 
-    return MonitorResult(closed=closed, still_open=still_open, gap_seconds=gap_seconds)
+    return MonitorResult(
+        closed=closed, still_open=still_open, exits_failed=exits_failed, gap_seconds=gap_seconds
+    )

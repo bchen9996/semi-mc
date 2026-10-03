@@ -17,6 +17,9 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import math
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -24,6 +27,7 @@ from ..config import IntradayConfig
 from ..execution.broker import (
     AccountBlockedError,
     Broker,
+    BrokerError,
     MarketClosedError,
     Order,
     OrderRequest,
@@ -36,6 +40,15 @@ from ..execution.orders import collared_limit_price, round_to_tick
 from ..execution.pretrade import check_order_tradable
 from .ledger import IntradayLedger
 from .proposals import OPEN_OR_ADD_ACTIONS, TradeProposal, whole_shares
+
+_OPEN_STATUSES = frozenset({"new", "accepted", "partially_filled"})
+
+# How long `cancel_resting_stops` waits for a cancel to complete before an exit is held
+# back: 20 polls 0.25 s apart, 5 s in all. A starting guess, not a measured figure: no
+# cancel has been timed on this account yet. Paper fills on it land 1-4 s after
+# submission (`ledger/paper.sqlite3`, 2026-09-24 and 2026-10-02).
+_CANCEL_SETTLE_POLLS = 20
+_CANCEL_POLL_SECONDS = 0.25
 
 
 def intraday_client_order_id(
@@ -124,9 +137,45 @@ def build_entry_order(
     )
 
 
-def cancel_resting_stops(symbol: str, broker: Broker, ledger: IntradayLedger) -> list[str]:
+def record_new_fill(order: Order, ledger: IntradayLedger, now: dt.datetime) -> bool:
+    """Records whatever ``order`` has filled beyond what the ledger already holds for it;
+    ``True`` if there was anything new. Same increment rule, and the same cumulative
+    average price standing in for the increment's own price, as `live/mark.py`'s
+    ``_record_new_fill``."""
+    already = sum(fill["qty"] for fill in ledger.fills_for_order(order.client_order_id))
+    if order.filled_qty <= already + 1e-9 or order.filled_avg_price is None:
+        return False
+    ledger.record_fill(
+        order.client_order_id,
+        qty=order.filled_qty - already,
+        price=order.filled_avg_price,
+        filled_at=order.filled_at or now,
+    )
+    return True
+
+
+def cancel_resting_stops(
+    symbol: str,
+    broker: Broker,
+    ledger: IntradayLedger,
+    now: dt.datetime | None = None,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+) -> list[str]:
     """Cancels every resting protective stop leg `symbol` has -- one per tranche of a
-    split entry -- and returns their `client_order_id`s (empty if there were none).
+    split entry -- waits for the broker to confirm each one is done, and returns their
+    `client_order_id`s (empty if there were none).
+
+    **Waits, because Alpaca cancels asynchronously** (added 2026-10-03, before Stage 2
+    first sends real orders). A canceled order sits in ``pending_cancel`` (open, to this
+    project: ``AlpacaPaperBroker`` maps it to ``"accepted"``) and keeps holding its
+    shares until the cancel completes, so a close sent straight after the cancel request
+    can be rejected for "insufficient qty available". Each leg is polled up to
+    `_CANCEL_SETTLE_POLLS` times, `_CANCEL_POLL_SECONDS` apart, until it reports a final
+    status; a leg still open after that stays open in the ledger, which is how
+    :func:`submit_exit` knows to hold the exit back. A leg that turns out to have *filled*
+    (the stop fired before the cancel reached it) has its fill recorded. The shadow
+    broker cancels at once, so Stage 1 never waits.
 
     This is a correctness requirement for closing or trimming a position, not cleanup:
     only bracket/OCO/trailing-stop orders are confirmed wash-trade-exempt at Alpaca
@@ -143,25 +192,42 @@ def cancel_resting_stops(symbol: str, broker: Broker, ledger: IntradayLedger) ->
     open. Tolerates a leg already canceled or otherwise gone at the broker (`KeyError`/
     `ValueError` from `cancel_order`) the same forgiving way real Alpaca's own
     `cancel_order` already is (`docs/alpaca_notes.md`: canceling an already-canceled
-    order succeeds silently) -- nothing left to cancel is not a failure.
+    order succeeds silently) -- nothing left to cancel is not a failure. A lookup that
+    raises counts as not yet confirmed and is retried.
     """
-    canceled: list[str] = []
-    for leg in ledger.open_stop_legs_for(symbol):
+    legs = ledger.open_stop_legs_for(symbol)
+    for leg in legs:
         with contextlib.suppress(KeyError, ValueError):
             broker.cancel_order(leg["broker_order_id"])
-        refreshed = None
-        with contextlib.suppress(Exception):  # a failed lookup must never block the close
-            refreshed = broker.get_order_by_client_id(leg["client_order_id"])
-        ledger.record_order(
-            leg["client_order_id"],
-            leg["symbol"],
-            leg["side"],
-            status=refreshed.status if refreshed is not None else "canceled",
-            broker_order_id=leg["broker_order_id"],
-            leg="stop",
-        )
-        canceled.append(leg["client_order_id"])
-    return canceled
+
+    waiting = list(legs)
+    for poll in range(_CANCEL_SETTLE_POLLS):
+        if poll:
+            sleep(_CANCEL_POLL_SECONDS)
+        still_open = []
+        for leg in waiting:
+            try:
+                refreshed = broker.get_order_by_client_id(leg["client_order_id"])
+            except Exception:  # noqa: BLE001 - unconfirmed, ask again on the next poll
+                still_open.append(leg)
+                continue
+            status = refreshed.status if refreshed is not None else "canceled"
+            ledger.record_order(
+                leg["client_order_id"],
+                leg["symbol"],
+                leg["side"],
+                status=status,
+                broker_order_id=leg["broker_order_id"],
+                leg="stop",
+            )
+            if refreshed is not None:
+                record_new_fill(refreshed, ledger, now or dt.datetime.now(dt.UTC))
+            if status in _OPEN_STATUSES:
+                still_open.append(leg)
+        waiting = still_open
+        if not waiting:
+            break
+    return [leg["client_order_id"] for leg in legs]
 
 
 def build_close_order(
@@ -176,9 +242,9 @@ def build_close_order(
     `Position` -- never from a proposal, which needs neither `side` nor `size_pct` to
     close (the schema doesn't require either for `action="close"`).
 
-    `order_class="simple"` -- exiting needs no new stop leg. The resting stop-loss leg
-    from the original entry must be canceled first via `cancel_resting_stops`
-    (not done here -- see the module docstring on sequencing being a job's job).
+    `order_class="simple"` -- exiting needs no new stop leg. The resting stop-loss legs
+    from the original entry must be canceled first; :func:`submit_exit` does that and
+    calls this with the position as re-read once they're gone.
     """
     side: OrderSide = "sell" if position.side == "long" else "buy"
     return OrderRequest(
@@ -208,10 +274,10 @@ def build_trim_order(
     what's actually held, so a trim can never exceed the position, the same defensive cap
     `execution/orders.py::build_orders` already uses for its own sell-down case.
 
-    Like `build_close_order`, the resting stop-loss leg must be canceled first
-    (`cancel_resting_stops`), and -- unlike a close -- the remainder needs a
+    Like `build_close_order`, the resting stop-loss legs must be canceled first
+    (:func:`submit_exit`), and -- unlike a close -- the remainder needs a
     fresh, smaller replacement stop afterward (`build_replacement_stop_order`) so it is
-    never left resting unprotected. Neither is sequenced here; see the module docstring.
+    never left resting unprotected. `jobs.py::run_cycle` places that one.
     """
     if proposal.action != "trim":
         raise ValueError(f"build_trim_order only builds trim orders, got {proposal.action!r}")
@@ -288,9 +354,11 @@ def submit_order_with_fault_isolation(
     response didn't arrive -- never blind-resubmit). `RateLimitError`/`WashTradeError`/
     `AccountBlockedError`/`MarketClosedError` are caught, logged as an incident, and
     turned into a `None` return rather than raised, so one bad order never takes down the
-    rest of a cycle's batch. On success, records the order -- and, for an `"oto"` entry,
-    its resting stop-loss leg as its own `leg="stop"` row (Phase 4) -- and any immediate
-    fill, then returns the submitted `Order`.
+    rest of a cycle's batch. Since 2026-10-03 so is any other `BrokerError`: Alpaca's
+    "insufficient qty available" arrives as a plain one, and uncaught it would end the
+    whole cycle with a position's stops already canceled. On success, records the order
+    -- and, for an `"oto"` entry, its resting stop-loss leg as its own `leg="stop"` row
+    (Phase 4) -- and any immediate fill, then returns the submitted `Order`.
 
     `tranche_index`/`tranche_total` (Phase 5) are recorded on the entry row only -- a
     resting stop leg is never itself split, so its own row always stays the ledger's
@@ -318,6 +386,11 @@ def submit_order_with_fault_isolation(
             return None
     except (RateLimitError, WashTradeError, AccountBlockedError, MarketClosedError) as exc:
         ledger.record_incident("error", str(exc))
+        return None
+    except BrokerError as exc:  # any other rejection, e.g. "insufficient qty available"
+        ledger.record_incident(
+            "error", f"{request.symbol}: {request.side} order rejected by the broker: {exc}"
+        )
         return None
 
     ledger.record_order(
@@ -357,3 +430,121 @@ def submit_order_with_fault_isolation(
             filled_at=submitted.filled_at or now,
         )
     return submitted
+
+
+@dataclass(frozen=True)
+class ExitAttempt:
+    """What :func:`submit_exit` did. ``order`` is the exit that went out. Without one,
+    ``failure`` says why, and a ``None`` failure means the position was already gone.
+    ``position`` is what was held when the exit was built."""
+
+    order: Order | None = None
+    position: Position | None = None
+    failure: str | None = None
+
+
+def submit_exit(
+    symbol: str,
+    build_request: Callable[[Position], OrderRequest],
+    broker: Broker,
+    ledger: IntradayLedger,
+    now: dt.datetime,
+    *,
+    as_of: pd.Timestamp,
+    cycle: str,
+    stop_price: float | None,
+    proposal_id: int | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> ExitAttempt:
+    """Closes or trims `symbol` without leaving it unprotected: cancel its stops, wait for
+    the cancels to complete, re-read the position, send the exit, and put a stop back if
+    the exit doesn't go out. Every close and trim goes through here (added 2026-10-03,
+    before Stage 2 first sends real orders; the shadow broker hides all of this by
+    canceling and filling instantly).
+
+    1. :func:`cancel_resting_stops`, which waits for each cancel to complete. A stop still
+       canceling after the wait holds the exit back to the next cycle with an error
+       incident: sent now it would be rejected for "insufficient qty available", and if
+       the stop then fired the exit would sell shares no longer held. No stop is
+       re-placed here, since the old one is still working (it either cancels or fills).
+    2. The position is re-read from the broker. A stop that fired before its cancel
+       landed has already sold some or all of the shares, so the exit is built from what
+       is still held, never from the caller's earlier read (closing the old quantity
+       would open a short). Nothing held: a warning, and no exit.
+    3. `build_request(position)` builds the exit; a `ValueError` (a trim too small for a
+       whole share) counts as no exit. Then :func:`submit_order_with_fault_isolation`.
+    4. If no exit went out and stops were canceled in step 1, a standalone stop for the
+       whole position is re-placed at `stop_price` (the entry's invalidation price), so a
+       rejected exit doesn't leave the position unguarded until the next cycle. A
+       missing `stop_price`, or a stop the broker rejects too, is an error incident.
+    """
+    canceled = cancel_resting_stops(symbol, broker, ledger, now, sleep=sleep)
+    still_canceling = ledger.open_stop_legs_for(symbol)
+    if still_canceling:
+        failure = (
+            f"{symbol}: {len(still_canceling)} resting stop(s) still canceling after "
+            f"{_CANCEL_SETTLE_POLLS * _CANCEL_POLL_SECONDS:g}s; exit held back to the next cycle"
+        )
+        ledger.record_incident("error", failure)
+        return ExitAttempt(failure=failure)
+
+    position = next((p for p in broker.list_positions() if p.symbol == symbol), None)
+    if position is None:
+        ledger.record_incident(
+            "warning", f"{symbol}: nothing left to exit once its stops were canceled"
+        )
+        return ExitAttempt()
+
+    try:
+        request = build_request(position)
+    except ValueError as exc:
+        failure = str(exc)
+    else:
+        submitted = submit_order_with_fault_isolation(
+            request, broker, ledger, now, proposal_id=proposal_id, leg="exit"
+        )
+        if submitted is not None:
+            return ExitAttempt(order=submitted, position=position)
+        failure = f"{symbol}: exit order failed"
+
+    if canceled:
+        _restore_stop(position, stop_price, broker, ledger, now, as_of, cycle, proposal_id)
+    return ExitAttempt(position=position, failure=failure)
+
+
+def _restore_stop(
+    position: Position,
+    stop_price: float | None,
+    broker: Broker,
+    ledger: IntradayLedger,
+    now: dt.datetime,
+    as_of: pd.Timestamp,
+    cycle: str,
+    proposal_id: int | None,
+) -> None:
+    """Step 4 of :func:`submit_exit`."""
+    symbol, qty = position.symbol, abs(position.qty)
+    if stop_price is None:
+        ledger.record_incident(
+            "error",
+            f"{symbol}: no exit went out after its stops were canceled, and no invalidation "
+            "price is on file to re-place one; position unprotected",
+        )
+        return
+    side: OrderSide = "sell" if position.side == "long" else "buy"
+    request = build_replacement_stop_order(symbol, side, qty, stop_price, as_of, cycle)
+    restored = submit_order_with_fault_isolation(
+        request, broker, ledger, now, proposal_id=proposal_id, leg="stop"
+    )
+    if restored is None:
+        ledger.record_incident(
+            "error",
+            f"{symbol}: no exit went out after its stops were canceled, and the broker "
+            "refused a replacement stop; position unprotected",
+        )
+    else:
+        ledger.record_incident(
+            "warning",
+            f"{symbol}: no exit went out after its stops were canceled; re-placed a stop "
+            f"for {qty:g} shares at {request.stop_price:.2f}",
+        )

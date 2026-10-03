@@ -52,12 +52,14 @@ from .llm import (
 )
 from .monitor import MonitorResult, check_invalidation_and_time_stops
 from .orders import (
+    ExitAttempt,
     build_close_order,
     build_entry_order,
     build_replacement_stop_order,
     build_trim_order,
     cancel_resting_stops,
     intraday_client_order_id,
+    submit_exit,
     submit_order_with_fault_isolation,
 )
 from .placebo import PlaceboCycleResult, run_placebo_carry, run_placebo_cycle
@@ -76,6 +78,7 @@ __all__ = [
     "ContextBundle",
     "CycleResult",
     "DailyBudgetExhausted",
+    "ExitAttempt",
     "IntradayLedger",
     "IntradayPretradeContext",
     "ModelCallCost",
@@ -115,6 +118,7 @@ __all__ = [
     "run_preopen",
     "run_research",
     "spent_today",
+    "submit_exit",
     "submit_order_with_fault_isolation",
     "trader_output_json_schema",
     "turnover_so_far_usd",
