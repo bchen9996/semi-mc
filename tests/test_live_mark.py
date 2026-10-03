@@ -195,6 +195,41 @@ def test_mark_reconciles_against_every_sleeves_fills_not_just_this_ones(config, 
     assert result.discrepancies == []
 
 
+def test_mark_records_another_sleeves_new_fill_before_reconciling(config, ledger):
+    """Found 2026-10-02: an s3 QCOM order filled at the broker, then mark(s0) ran before
+    mark(s3) had recorded the fill, saw shares the ledger didn't know about, and failed."""
+    cfg = _tradeable_config(config)
+    broker = FakeBroker(now=SUBMITTED_AT)
+    request = _request(symbol="QCOM", client_order_id="s3-qcom-1")
+    filled = broker.submit_order(request)  # fills at the broker straight away
+    # The ledger still has it as execute recorded it: working, no fill yet.
+    working = dataclasses.replace(
+        filled, status="accepted", filled_qty=0.0, filled_avg_price=None, filled_at=None
+    )
+    ledger.record_order("s3", "hash-1", request, working)
+
+    now = SUBMITTED_AT + dt.timedelta(minutes=4)
+    result = run_mark("s0", cfg, broker, ledger, pd.Timestamp("2026-01-05"), now)
+
+    assert result.reconciliation_status == "ok"
+    assert result.fills_recorded == 1
+    assert ledger.get_order(request.client_order_id)["status"] == "filled"
+
+
+def test_mark_never_cancels_another_sleeves_stale_order(config, ledger):
+    # Reprice pruning stays with the owning sleeve's own mark.
+    cfg = _tradeable_config(config)
+    broker = FakeBroker(partial_fill_fraction=0.0, now=SUBMITTED_AT)  # stays "accepted"
+    request = _request(client_order_id="s3-nvda-1")
+    ledger.record_order("s3", "hash-1", request, broker.submit_order(request))
+
+    now = SUBMITTED_AT + dt.timedelta(minutes=30)  # past the 15-minute reprice interval
+    result = run_mark("s0", cfg, broker, ledger, pd.Timestamp("2026-01-05"), now)
+
+    assert result.orders_canceled_for_reprice == []
+    assert broker.get_order_by_client_id(request.client_order_id).status == "accepted"
+
+
 def test_mark_carries_forward_a_disabled_sleeves_own_snapshot_not_the_accounts(config, ledger):
     """Found 2026-09-26: once the reconciliation fix above stopped crashing mark(s0) before
     it ever reached this function's own final snapshot step, that step would otherwise still

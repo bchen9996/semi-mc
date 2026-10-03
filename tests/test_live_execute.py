@@ -12,7 +12,7 @@ import pytest
 
 from semimc.config import PaperSleeveConfig
 from semimc.execution.fake_broker import FakeBroker
-from semimc.live.execute import run_execute
+from semimc.live.execute import run_execute, unfinished_symbols
 from semimc.live.ledger import Ledger
 from semimc.strategy.decide import decide_s0
 
@@ -145,6 +145,102 @@ def test_a_later_execute_against_the_same_decision_is_a_no_op(config, tmp_path, 
     )
     assert len(first.orders) == 2
     assert second.orders == []
+
+
+def _execute(cfg, broker, ledger, prices, day, now):
+    return run_execute(
+        "s0", cfg, broker, ledger, _market_with_spot(prices), ["NVDA", "AMD"], day, now
+    )
+
+
+DAY1, DAY2 = pd.Timestamp("2026-01-05"), pd.Timestamp("2026-01-06")
+PRICES = {"NVDA": 100.0, "AMD": 50.0}
+
+
+def test_a_later_execute_does_not_trade_price_drift(config, tmp_path, ledger):
+    """Found 2026-10-02: execute re-targeted every holding on every run, so a monthly
+    sleeve rebalanced its drift daily, and GitHub's late copy of the job bought QCOM."""
+    cfg = _tradeable_config(config, tmp_path)
+    broker = FakeBroker()
+    ledger.record_decision(decide_s0(["NVDA", "AMD"], DAY1))
+    _execute(cfg, broker, ledger, PRICES, DAY1, NOW)
+
+    moved = {"NVDA": 130.0, "AMD": 50.0}  # NVDA now well past minimum_trade_pct off target
+    second = _execute(cfg, broker, ledger, moved, DAY2, NOW.replace(day=6))
+
+    assert second.orders == []
+    assert "drift waits for the next rebalance" in second.skipped_reason
+    assert len(ledger.recent_orders("s0")) == 2  # only day 1's
+
+
+def test_a_rebalance_that_needed_no_orders_still_counts_as_done(config, tmp_path, ledger):
+    cfg = _tradeable_config(config, tmp_path)
+    everything_within_band = cfg.model_copy(
+        update={"paper": cfg.paper.model_copy(update={"minimum_trade_pct": 0.9})}
+    )
+    broker = FakeBroker()
+    ledger.record_decision(decide_s0(["NVDA", "AMD"], DAY1))
+    first = _execute(everything_within_band, broker, ledger, PRICES, DAY1, NOW)
+    assert first.orders == []
+
+    # A late duplicate the same afternoon, by which time it would have had trades to make.
+    late = _execute(cfg, broker, ledger, PRICES, DAY1, NOW.replace(hour=14))
+
+    assert late.orders == []
+    assert late.skipped_reason is not None
+
+
+def test_a_later_execute_retries_only_the_orders_that_ended_unfilled(config, tmp_path, ledger):
+    cfg = _tradeable_config(config, tmp_path)
+    broker = FakeBroker(partial_fill_fraction=0.0)  # both orders rest unfilled
+    ledger.record_decision(decide_s0(["NVDA", "AMD"], DAY1))
+    first = _execute(cfg, broker, ledger, PRICES, DAY1, NOW)
+    nvda = next(o for o in first.submitted if o.symbol == "NVDA")
+    broker.cancel_order(nvda.id)  # what live/mark.py's reprice pruning does
+    ledger.update_order_status(
+        nvda.client_order_id, broker.get_order_by_client_id(nvda.client_order_id)
+    )
+
+    broker.partial_fill_fraction = 1.0
+    second = _execute(cfg, broker, ledger, PRICES, DAY2, NOW.replace(day=6))
+
+    assert [o.symbol for o in second.orders] == ["NVDA"]  # AMD's order is still working
+    assert second.submitted[0].client_order_id != nvda.client_order_id
+
+
+def test_a_later_execute_retries_an_order_that_could_not_be_placed(config, tmp_path, ledger):
+    from semimc.execution.broker import Asset
+
+    cfg = _tradeable_config(config, tmp_path)
+    broker = FakeBroker(assets={"NVDA": Asset(symbol="NVDA", tradable=False)})
+    ledger.record_decision(decide_s0(["NVDA", "AMD"], DAY1))
+    _execute(cfg, broker, ledger, PRICES, DAY1, NOW)
+
+    broker.assets["NVDA"] = Asset(symbol="NVDA", tradable=True)
+    second = _execute(cfg, broker, ledger, PRICES, DAY2, NOW.replace(day=6))
+
+    assert [o.symbol for o in second.orders] == ["NVDA"]
+    assert len(second.submitted) == 1
+
+
+@pytest.mark.parametrize(
+    ("statuses", "failed", "expected"),
+    [
+        ({"NVDA": ["filled"]}, [], set()),
+        ({"NVDA": ["accepted"]}, [], set()),  # still working: leave it alone
+        ({"NVDA": ["canceled"]}, [], {"NVDA"}),
+        ({"NVDA": ["canceled", "filled"]}, [], set()),  # the retry filled
+        ({"NVDA": ["expired"], "AMD": ["filled"]}, [], {"NVDA"}),
+        ({}, ["NVDA"], {"NVDA"}),  # never placed
+        ({"NVDA": ["filled"]}, ["NVDA"], set()),  # failed once, filled later
+        # The 2026-10-01 decision: an order but no executions row, all filled.
+        ({"QCOM": ["filled"]}, [], set()),
+    ],
+)
+def test_unfinished_symbols(statuses, failed, expected):
+    orders = [{"symbol": s, "status": st} for s, seen in statuses.items() for st in seen]
+    attempts = [{"failed_symbols": failed}] if failed else []
+    assert unfinished_symbols(orders, attempts) == expected
 
 
 def test_a_tradability_failure_is_skipped_without_aborting_other_orders(config, tmp_path, ledger):

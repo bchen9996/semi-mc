@@ -56,6 +56,31 @@ class MarkResult:
     discrepancies: list[dict] = field(default_factory=list)
 
 
+def _record_new_fill(
+    client_order_id: str,
+    order,  # noqa: ANN001 -- execution.broker.Order
+    ledger: Ledger,
+    config,  # noqa: ANN001
+    now: dt.datetime,
+) -> bool:
+    """Record whatever `order` has filled beyond what the ledger already holds for it;
+    `True` if there was anything new."""
+    already = sum(f["qty"] for f in ledger.fills_for_order(client_order_id))
+    if order.filled_qty <= already + 1e-9:
+        return False
+    # order.filled_avg_price is the order's cumulative average fill price, not this
+    # specific incremental fill's own price -- alpaca-py (and FakeBroker, to match) don't
+    # expose per-fill prices via a polled Order, only via a trade-updates stream this
+    # project doesn't yet consume. Documented approximation, not an oversight.
+    ledger.record_fill(
+        client_order_id,
+        qty=order.filled_qty - already,
+        price=order.filled_avg_price or 0.0,
+        filled_at=order.filled_at or as_paper_local(now, config),
+    )
+    return True
+
+
 def run_mark(
     sleeve: str,
     config,  # noqa: ANN001
@@ -78,19 +103,7 @@ def run_mark(
             result.orders_not_found.append(client_order_id)
             continue
 
-        already = sum(f["qty"] for f in ledger.fills_for_order(client_order_id))
-        if order.filled_qty > already + 1e-9:
-            # order.filled_avg_price is the order's cumulative average fill price, not this
-            # specific incremental fill's own price -- alpaca-py (and FakeBroker, to match)
-            # don't expose per-fill prices via a polled Order, only via a trade-updates
-            # stream this project doesn't yet consume. Documented approximation, not an
-            # oversight.
-            ledger.record_fill(
-                client_order_id,
-                qty=order.filled_qty - already,
-                price=order.filled_avg_price or 0.0,
-                filled_at=order.filled_at or as_paper_local(now, config),
-            )
+        if _record_new_fill(client_order_id, order, ledger, config, now):
             result.fills_recorded += 1
         ledger.update_order_status(client_order_id, order)
 
@@ -115,6 +128,23 @@ def run_mark(
             if refreshed is not None:
                 ledger.update_order_status(client_order_id, refreshed)
             result.orders_canceled_for_reprice.append(client_order_id)
+
+    # The reconciliation below compares the whole shared account against every sleeve's
+    # fills, so every sleeve's fills must be current first, not just this one's. Found
+    # 2026-10-02: an s3 order filled at 18:56 UTC, mark(s0) ran at 19:00 before mark(s3)
+    # had recorded it, saw 2.84 QCOM shares the ledger didn't know about, and failed the
+    # job. Fills only -- a reprice cancel stays with the owning sleeve's own mark, and a
+    # missing order is that sleeve's incident to raise.
+    for row in ledger.open_orders_all_sleeves():
+        if row["sleeve"] == sleeve:
+            continue
+        client_order_id = row["client_order_id"]
+        order = broker.get_order_by_client_id(client_order_id)
+        if order is None:
+            continue
+        if _record_new_fill(client_order_id, order, ledger, config, now):
+            result.fills_recorded += 1
+        ledger.update_order_status(client_order_id, order)
 
     # Every sleeve reconciled here shares one real Alpaca paper account (s0 and s3, per
     # `docs/go_live_checklist.md` item 6), so `broker.list_positions()` is the whole
