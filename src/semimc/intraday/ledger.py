@@ -626,6 +626,19 @@ class IntradayLedger:
         self._conn.commit()
         return int(cursor.lastrowid)
 
+    def fills_with_orders(self) -> list[dict[str, Any]]:
+        """Every fill with its order's ``symbol``, ``side``, ``leg`` and ``proposal_id``,
+        in the order recorded: what `intraday/readiness.py` rebuilds positions from."""
+        rows = self._conn.execute(
+            """
+            SELECT f.client_order_id, f.qty, f.price, f.filled_at,
+                   o.symbol, o.side, o.leg, o.proposal_id
+            FROM fills AS f JOIN orders AS o ON o.client_order_id = f.client_order_id
+            ORDER BY f.id
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def fills_for_order(self, client_order_id: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT * FROM fills WHERE client_order_id = ? ORDER BY id", (client_order_id,)

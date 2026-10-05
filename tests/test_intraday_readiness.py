@@ -405,3 +405,83 @@ def test_holds_are_not_accepted_trade_proposals(two_ledgers, pinned_clock):
     assert report.clean_streak_accepted == 0
     assert not _check(report, "Stage 2 clean-day streak").passed
     assert not _check(report, "The agent proposed trades").passed
+
+
+# -- carry, checked by its effect (2026-10-05) ----------------------------------------------
+
+
+def _filled(ledger, day, client_order_id, side, hhmm, *, leg="entry", proposal_id=None):
+    import datetime as dt
+
+    ledger.record_order(
+        client_order_id, "NVDA", side, status="filled", qty=5.0, leg=leg, proposal_id=proposal_id
+    )
+    ledger.record_fill(
+        client_order_id, qty=5.0, price=190.0, filled_at=dt.datetime.fromisoformat(_at(day, hhmm))
+    )
+
+
+def _entry(ledger, day, horizon):
+    proposal_id = ledger.record_proposal(
+        day, "cycle", "NVDA", "open", "accepted", {"horizon": horizon}
+    )
+    _filled(ledger, day, "entry-1", "buy", "11:00", proposal_id=proposal_id)
+
+
+@pytest.mark.parametrize("horizon", ["intraday", None])
+def test_an_intraday_position_still_held_at_the_close_fails_the_day(
+    two_ledgers, pinned_clock, horizon
+):
+    """2026-10-05: a GitHub runner outage skipped carry, and a TSM intraday trade stayed
+    open overnight with nothing in the clean-day check to show it."""
+    ledger, placebo, reports = two_ledgers
+    _clean_day(ledger, placebo, MON, reports, pinned_clock, accepted=1)
+    _entry(ledger, MON, horizon)
+
+    [day] = stage_readiness(ledger, placebo, IntradayConfig(), reports, MON, MON).days
+
+    assert day.clean_failures == (
+        "NVDA still held at the close on an intraday thesis; carry should have closed it",
+    )
+
+
+@pytest.mark.parametrize("horizon", ["multi-day", "multi-week"])
+def test_a_position_carried_on_a_multi_day_thesis_does_not_fail_the_day(
+    two_ledgers, pinned_clock, horizon
+):
+    ledger, placebo, reports = two_ledgers
+    _clean_day(ledger, placebo, MON, reports, pinned_clock, accepted=1)
+    _entry(ledger, MON, horizon)
+
+    [day] = stage_readiness(ledger, placebo, IntradayConfig(), reports, MON, MON).days
+
+    assert day.clean, day.clean_failures
+
+
+def test_an_intraday_position_closed_before_the_close_is_clean_and_so_is_the_next_day(
+    two_ledgers, pinned_clock
+):
+    """Closed by a stop at 15:30 Monday; a position closed Tuesday morning fails only
+    Monday, the day it was carried."""
+    ledger, placebo, reports = two_ledgers
+    _clean_day(ledger, placebo, MON, reports, pinned_clock, accepted=1)
+    _clean_day(ledger, placebo, TUE, reports, pinned_clock)
+    _entry(ledger, MON, "intraday")
+    _filled(ledger, MON, "stop-1", "sell", "15:30", leg="stop")
+
+    days = stage_readiness(ledger, placebo, IntradayConfig(), reports, MON, TUE).days
+
+    assert [day.clean for day in days] == [True, True]
+
+
+def test_a_carried_intraday_position_fails_only_the_day_it_was_carried(two_ledgers, pinned_clock):
+    ledger, placebo, reports = two_ledgers
+    _clean_day(ledger, placebo, MON, reports, pinned_clock, accepted=1)
+    _clean_day(ledger, placebo, TUE, reports, pinned_clock)
+    _entry(ledger, MON, "intraday")
+    _filled(ledger, TUE, "exit-1", "sell", "09:33", leg="exit")
+
+    monday, tuesday = stage_readiness(ledger, placebo, IntradayConfig(), reports, MON, TUE).days
+
+    assert not monday.clean
+    assert tuesday.clean, tuesday.clean_failures
