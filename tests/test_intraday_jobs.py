@@ -23,6 +23,7 @@ from semimc.execution.broker import BrokerError, OrderRequest
 from semimc.execution.fake_broker import FakeBroker
 from semimc.execution.market_data import OptionMarketQuote
 from semimc.intraday.jobs import (
+    _protect_unguarded_positions,
     current_prices,
     mark_broker_to_market,
     run_carry,
@@ -38,7 +39,9 @@ from semimc.intraday.llm import ClaudeCliClient
 from semimc.intraday.orders import (
     build_close_order,
     build_entry_order,
+    place_protective_stop,
     submit_order_with_fault_isolation,
+    sync_open_orders,
 )
 from semimc.intraday.proposals import TradeProposal
 from semimc.live.ledger import Ledger as PaperLedger
@@ -2383,4 +2386,130 @@ def test_run_eod_review_records_a_carry_close_that_filled_after_carry(config, tm
     assert reflection["content"]["close_reason"] == "carry"
     assert reflection["content"]["avg_exit_price"] == pytest.approx(189.0)
     paper_ledger.close()
+    ledger.close()
+
+
+# -- the unguarded-position sweep (2026-10-05) ------------------------------------------------
+
+
+def _no_proposals():
+    return _sequenced_llm_client(_result_json(structured_output={"proposals": []}))
+
+
+def _placed_incidents(ledger) -> list[str]:
+    return [i["message"] for i in ledger.incidents() if "placed one at" in i["message"]]
+
+
+def test_run_cycle_re_places_a_stop_that_expired_at_the_close(config, tmp_path):
+    """Every S4 stop is a day order: Alpaca expires it at the close, so a carried
+    position used to go through the next day with no stop at the broker."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="multi-day", invalidation_price=185.0)
+    [held] = broker.list_positions()
+    broker.expire_day_orders()
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+
+    run_cycle("cycle_2", cfg, broker, ledger, market_data, _no_proposals(), AS_OF, NOW)
+
+    [stop] = ledger.open_stop_legs_for("NVDA")
+    order = broker.get_order_by_client_id(stop["client_order_id"])
+    assert (order.type, order.side, order.qty) == ("stop", "sell", held.qty)
+    assert _placed_incidents(ledger) == [
+        f"NVDA: {held.qty:g} share(s) held with no resting stop; placed one at 185.00"
+    ]
+    ledger.close()
+
+
+def test_run_cycle_places_no_stop_for_a_position_already_covered(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg)
+    [leg] = ledger.open_stop_legs_for("NVDA")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+
+    run_cycle("cycle_2", cfg, broker, ledger, market_data, _no_proposals(), AS_OF, NOW)
+
+    assert [row["client_order_id"] for row in ledger.open_stop_legs_for("NVDA")] == [
+        leg["client_order_id"]
+    ]
+    assert _placed_incidents(ledger) == []
+    ledger.close()
+
+
+def test_run_cycle_covers_only_the_shares_no_stop_covers(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, invalidation_price=185.0)
+    [held] = broker.list_positions()
+    [leg] = ledger.open_stop_legs_for("NVDA")
+    broker.cancel_order(leg["broker_order_id"])  # gone at the broker; the sync notices
+    place_protective_stop(held, 10, 185.0, broker, ledger, NOW, as_of=AS_OF, cycle="cycle_1")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+
+    run_cycle("cycle_2", cfg, broker, ledger, market_data, _no_proposals(), AS_OF, NOW)
+
+    quantities = sorted(row["qty"] for row in ledger.open_stop_legs_for("NVDA"))
+    assert quantities == [10.0, held.qty - 10]
+    ledger.close()
+
+
+def _stop_gone(broker, ledger, cfg) -> None:
+    _seed_open_position(broker, ledger, cfg, invalidation_price=185.0)
+    broker.expire_day_orders()
+    sync_open_orders(broker, ledger, cfg.intraday, AS_OF, NOW)
+
+
+@pytest.mark.parametrize(
+    ("price", "working"),
+    [
+        (184.0, None),  # through its invalidation price: the monitor closes it
+        (190.0, ("exit-1", "sell", "exit")),  # an exit holds the shares
+        (190.0, ("entry-2", "buy", "entry")),  # an entry still working, as the orphan sweep
+    ],
+)
+def test_protect_unguarded_positions_leaves_these_alone(config, tmp_path, price, working):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _stop_gone(broker, ledger, cfg)
+    if working is not None:
+        client_order_id, side, leg = working
+        ledger.record_order(client_order_id, "NVDA", side, status="accepted", leg=leg)
+
+    protected = _protect_unguarded_positions(
+        broker, ledger, broker.list_positions(), {"NVDA": price}, AS_OF, "cycle_2", NOW
+    )
+
+    assert protected == []
+    assert ledger.open_stop_legs_for("NVDA") == []
+    ledger.close()
+
+
+def test_protect_unguarded_positions_warns_when_there_is_no_price_to_stop_at(config, tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    broker.submit_order(
+        OrderRequest(
+            symbol="NVDA",
+            side="buy",
+            type="limit",
+            time_in_force="day",
+            client_order_id="untraced",
+            qty=5.0,
+            limit_price=190.0,
+        )
+    )
+
+    protected = _protect_unguarded_positions(
+        broker, ledger, broker.list_positions(), {}, AS_OF, "cycle_2", NOW
+    )
+
+    assert protected == []
+    assert [i["message"] for i in ledger.incidents()] == [
+        "NVDA: 5 share(s) held with no resting stop, and no invalidation price on file to place one"
+    ]
     ledger.close()

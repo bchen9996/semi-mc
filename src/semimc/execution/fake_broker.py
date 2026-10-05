@@ -269,6 +269,17 @@ class FakeBroker:
             raise ValueError(f"{client_order_id} is not a resting stop")
         return self.fill_order(client_order_id, price)
 
+    def expire_day_orders(self) -> list[Order]:
+        """Expires every working `day` order, as Alpaca does at the close, and returns
+        them. Nothing calls this on its own; a test does, to carry a position overnight
+        (every S4 stop is a `day` order, so this takes them all)."""
+        expired = [order for order in self.list_open_orders() if order.time_in_force == "day"]
+        for order in expired:
+            self._pending_cancels.pop(order.id, None)
+            order.status = "expired"
+            self._open_sides.get(order.symbol, set()).discard(order.side)
+        return expired
+
     def fill_order(self, client_order_id: str, price: float, qty: float | None = None) -> Order:
         """Fills ``qty`` (default: all that's left) of a working order at ``price`` and
         applies it to the position: the real paper account fills an order a second or more

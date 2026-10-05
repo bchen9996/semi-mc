@@ -2544,14 +2544,24 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       later, for tests. Expected Monday in shadow mode: the first cycle's sync marks the
       second leftover NVDA stop cancelled (it already is on the shadow broker), so the
       orphan sweep's warning reads "canceled 1 resting stop(s)", not 2.
-- [ ] **Open, found 2026-10-03: a carried position has no resting stop overnight or the
-      next day.** Every S4 stop is a `day` order (the OTO leg, the trim replacement, the
-      re-placed stop), so Alpaca expires it at the close and nothing re-places it; the
-      monitor still checks the invalidation price every cycle, but between cycles and
-      overnight nothing rests at the broker. Shadow mode can't show this (the shadow
-      broker never expires anything). Candidate fix: each cycle, place a stop at the
-      invalidation price for any held position with none resting (the mirror image of
-      the orphan sweep). Owner decision whether to build before Stage 2.
+- [x] **A carried position had no resting stop the next day: found 2026-10-03, fixed
+      2026-10-05 (owner chose option A of three: re-place each cycle; the others were a
+      good-till-cancelled stop at carry, or leaving it).** Every S4 stop is a `day` order
+      (the OTO leg, the trim replacement, the re-placed stop), so Alpaca expires it at the
+      close and nothing put it back: all next day only the cycle's 20-minute check
+      guarded the position. Shadow mode couldn't show this (the shadow broker never
+      expires anything). Now every cycle, the 08:32 open batch first, runs
+      `jobs.py::_protect_unguarded_positions`, the mirror image of the orphan sweep: any
+      held shares no open stop leg covers get a `day` stop at the entry's invalidation
+      price (info incident "placed one at ..."). Skipped: a symbol with an entry or an
+      exit still working, and a position already through its invalidation (the
+      monitor's to close). No invalidation price on file: a warning each cycle. Also
+      covers an exit held back while a cancel completed and a replacement stop the broker
+      refused. Limits: a stop only works in regular hours, so nothing guards an overnight
+      gap, and the first ~2 minutes after the open are uncovered; coverage is read from
+      the ledger, so it depends on the sync seeing expired stop legs (the leg-lookup
+      question in `docs/alpaca_notes.md`). `FakeBroker.expire_day_orders` models the
+      close in tests.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).
