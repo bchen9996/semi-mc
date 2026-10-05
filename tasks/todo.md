@@ -2562,6 +2562,22 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       the ledger, so it depends on the sync seeing expired stop legs (the leg-lookup
       question in `docs/alpaca_notes.md`). `FakeBroker.expire_day_orders` models the
       close in tests.
+- [x] **2026-10-05: GitHub runner outage skipped carry; the clean-day check now catches a
+      missed carry (owner-approved).** GitHub's Actions incident (opened 14:11 CT, "delays
+      in assigning GitHub-hosted runners") failed run #197, almost certainly the 14:45
+      carry ("The job was not acquired by Runner of type hosted even after multiple
+      attempts"), and pushed the 14:40 cycle to 14:50. The agent's first shadow trade of
+      the day, TSM (opened 10:20 CT, added 12:01 CT, `horizon: intraday`, 5 shares), was
+      left open overnight; tomorrow's 08:32 open batch closes it on its expired time stop.
+      Not re-run after the close: carry would have filled at an after-hours price. The
+      clean-day check couldn't see this, since carry records nothing on a day it has
+      nothing to close. Now `readiness.py` checks carry by its effect: a position still
+      held at 16:00 New York, rebuilt from the ledger's fills, whose latest entry has no
+      multi-day or multi-week horizon (carry's own rule) fails the day ("TSM still held at
+      the close on an intraday thesis; carry should have closed it"). Applied to the real
+      ledger it flags only 2026-10-05, so the streak restarts from 2026-10-06; the
+      earliest the Stage 2 rule can pass is after 2026-10-08's close (3 clean days with
+      trades), unless the owner lists 2026-10-05 in `readiness.excluded_days`.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

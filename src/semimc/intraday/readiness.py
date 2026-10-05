@@ -26,10 +26,14 @@ The evidence checks map onto the brief's own success criteria:
 day pass/fail on what the ledger can show: research finished before the open, the
 open-batch Trader call ran within a grace period of the open, cycle checks covered the
 whole session with no gap over the threshold, no error incidents, an eod report filed
-under that date, spend within the cap, and the placebo ran. A trade is not required on a
-given day -- `no_trade` after looking is a legitimate outcome; proposals count across the
-streak instead. `carry` is not checked separately: on a day with no positions it records
-nothing, so the eod report stands in for "the end of day completed". Session edges are
+under that date, spend within the cap, the placebo ran, and no intraday position was
+still held at the close. A trade is not required on a given day -- `no_trade` after
+looking is a legitimate outcome; proposals count across the streak instead. `carry` is
+checked by its effect, since it records nothing on a day it has nothing to close: a
+position still open at 16:00 New York whose latest entry was an intraday trade (or can't
+be traced) is one carry should have closed, rebuilt from the ledger's fills (added
+2026-10-05, after a GitHub runner outage skipped carry and left a TSM intraday trade open
+overnight with nothing in the clean-day check to show it). Session edges are
 the regular 09:30-16:00 New York hours; a half-day session will fail the coverage check,
 which the owner judges by eye (no market calendar here, same as below).
 
@@ -244,7 +248,39 @@ def _clean_failures(
         failures.append(f"spend ${evidence.spend_usd:.2f} over the ${cap:.2f} cap")
     if not evidence.placebo_ran:
         failures.append("the placebo did not run")
+    held = _intraday_positions_at(ledger, close_at)
+    if held:
+        failures.append(
+            f"{', '.join(held)} still held at the close on an intraday thesis; carry should "
+            "have closed it"
+        )
     return tuple(failures)
+
+
+def _intraday_positions_at(ledger: IntradayLedger, moment: pd.Timestamp) -> list[str]:
+    """Symbols the ledger's fills show still held at ``moment`` whose latest entry's
+    proposal has no multi-day or multi-week horizon: what `jobs.py::run_carry` closes at
+    14:45 Central, by the same rule (an untraceable horizon is closed too)."""
+    net: dict[str, float] = {}
+    latest_entry: dict[str, int | None] = {}
+    for fill in ledger.fills_with_orders():
+        if _utc(fill["filled_at"]) > moment:
+            continue
+        symbol = fill["symbol"]
+        signed = fill["qty"] if fill["side"] == "buy" else -fill["qty"]
+        net[symbol] = net.get(symbol, 0.0) + signed
+        if fill["leg"] == "entry":
+            latest_entry[symbol] = fill["proposal_id"]
+    held: list[str] = []
+    for symbol, qty in sorted(net.items()):
+        if abs(qty) < 1e-9:
+            continue
+        proposal_id = latest_entry.get(symbol)
+        proposal = ledger.get_proposal(proposal_id) if proposal_id is not None else None
+        horizon = proposal["payload"].get("horizon") if proposal is not None else None
+        if horizon not in ("multi-day", "multi-week"):
+            held.append(symbol)
+    return held
 
 
 def _day_evidence(
