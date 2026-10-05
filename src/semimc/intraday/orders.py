@@ -570,12 +570,16 @@ def _restore_stop(
             "price is on file to re-place one; position unprotected",
         )
         return
-    side: OrderSide = "sell" if position.side == "long" else "buy"
-    request = _unused_client_order_id(
-        build_replacement_stop_order(symbol, side, qty, stop_price, as_of, cycle), ledger
-    )
-    restored = submit_order_with_fault_isolation(
-        request, broker, ledger, now, proposal_id=proposal_id, leg="stop"
+    restored = place_protective_stop(
+        position,
+        qty,
+        stop_price,
+        broker,
+        ledger,
+        now,
+        as_of=as_of,
+        cycle=cycle,
+        proposal_id=proposal_id,
     )
     if restored is None:
         ledger.record_incident(
@@ -587,8 +591,33 @@ def _restore_stop(
         ledger.record_incident(
             "warning",
             f"{symbol}: no exit went out after its stops were canceled; re-placed a stop "
-            f"for {qty:g} shares at {request.stop_price:.2f}",
+            f"for {qty:g} shares at {round_to_tick(stop_price):.2f}",
         )
+
+
+def place_protective_stop(
+    position: Position,
+    qty: float,
+    stop_price: float,
+    broker: Broker,
+    ledger: IntradayLedger,
+    now: dt.datetime,
+    *,
+    as_of: pd.Timestamp,
+    cycle: str,
+    proposal_id: int | None = None,
+) -> Order | None:
+    """A standalone `day` stop for `qty` shares of `position` at `stop_price`, on the
+    closing side, under a client order id the ledger hasn't used, recorded as a
+    `leg="stop"` row. `None` if the broker refused it (already an incident)."""
+    side: OrderSide = "sell" if position.side == "long" else "buy"
+    request = _unused_client_order_id(
+        build_replacement_stop_order(position.symbol, side, qty, stop_price, as_of, cycle),
+        ledger,
+    )
+    return submit_order_with_fault_isolation(
+        request, broker, ledger, now, proposal_id=proposal_id, leg="stop"
+    )
 
 
 @dataclass(frozen=True)

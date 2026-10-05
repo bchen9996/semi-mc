@@ -32,6 +32,7 @@ names explicitly.
 from __future__ import annotations
 
 import datetime as dt
+import math
 from dataclasses import asdict, dataclass, field
 from functools import partial
 from typing import Any, Literal
@@ -46,6 +47,7 @@ from ..execution.broker import Broker, OrderSide, Position
 from ..execution.fake_broker import FakeBroker
 from ..execution.market_data import AlpacaMarketDataClient, AlpacaOptionsMarketDataClient
 from ..execution.news import AlpacaNewsClient
+from ..execution.orders import round_to_tick
 from .context import (
     ReflectionUpdate,
     WatchlistCandidate,
@@ -63,6 +65,7 @@ from .orders import (
     build_replacement_stop_order,
     build_trim_order,
     cancel_resting_stops,
+    place_protective_stop,
     submit_exit,
     submit_order_with_fault_isolation,
     sync_open_orders,
@@ -266,6 +269,86 @@ def _cancel_orphaned_stops(
             f"{symbol}: canceled {len(legs)} resting stop(s) with no position behind them",
         )
     return orphaned
+
+
+def _protect_unguarded_positions(
+    broker: Broker,
+    ledger: IntradayLedger,
+    positions: list[Position],
+    prices: dict[str, float],
+    as_of: pd.Timestamp,
+    cycle: str,
+    now: dt.datetime,
+) -> list[str]:
+    """Places a stop at the invalidation price for the shares of any held position that no
+    resting stop covers, and returns the symbols. The mirror image of
+    `_cancel_orphaned_stops`, added 2026-10-05 (owner's choice of the options offered).
+
+    Every S4 stop is a `day` order, so Alpaca expires it at the close: a position carried
+    overnight would otherwise go through the next day with no stop at the broker, guarded
+    only by the cycle's check every 20 minutes. This runs in every cycle, the 08:32 open
+    batch first, so a carried position is covered within minutes of the open (a stop
+    only works in regular hours, so nothing guards an overnight gap). It also catches
+    any other way shares end up without a stop: an exit held back while a cancel
+    completed, or a replacement stop the broker refused. Logged as info, since carrying
+    makes it routine.
+
+    Coverage is read from the ledger, which `sync_open_orders` keeps current (the real
+    broker's `list_open_orders` leaves out orders with an attached stop): each open stop
+    leg's quantity less what it has filled. Left alone: a symbol with an entry still
+    working, as in the orphan sweep (its stop leg exists before its shares do); a symbol
+    with an exit working (the exit holds the shares, so the broker would refuse a stop);
+    and a position already through its invalidation price, which the monitor closes
+    (such a stop would fire at once or be refused). A position whose invalidation price
+    can't be traced gets a warning each cycle instead.
+    """
+    protected: list[str] = []
+    for position in positions:
+        symbol = position.symbol
+        if ledger.open_orders_for(symbol, leg="entry") or ledger.open_orders_for(
+            symbol, leg="exit"
+        ):
+            continue
+        covered = sum(
+            (row["qty"] or 0.0)
+            - sum(fill["qty"] for fill in ledger.fills_for_order(row["client_order_id"]))
+            for row in ledger.open_stop_legs_for(symbol)
+        )
+        shortfall = math.floor(abs(position.qty) - covered + 1e-9)
+        if shortfall < 1:
+            continue
+        found = _entry_and_proposal(ledger, symbol)
+        stop_price = found[1]["payload"].get("invalidation_price") if found else None
+        if stop_price is None:
+            ledger.record_incident(
+                "warning",
+                f"{symbol}: {shortfall} share(s) held with no resting stop, and no "
+                "invalidation price on file to place one",
+            )
+            continue
+        price = prices.get(symbol)
+        long = position.side == "long"
+        if price is not None and (price <= stop_price if long else price >= stop_price):
+            continue
+        placed = place_protective_stop(
+            position,
+            shortfall,
+            stop_price,
+            broker,
+            ledger,
+            now,
+            as_of=as_of,
+            cycle=cycle,
+            proposal_id=found[0]["proposal_id"],
+        )
+        if placed is not None:
+            ledger.record_incident(
+                "info",
+                f"{symbol}: {shortfall} share(s) held with no resting stop; placed one at "
+                f"{round_to_tick(stop_price):.2f}",
+            )
+            protected.append(symbol)
+    return protected
 
 
 def _original_proposal_payload(ledger: IntradayLedger, symbol: str) -> dict[str, Any] | None:
@@ -1072,6 +1155,7 @@ def run_cycle(
 
     positions = broker.list_positions()
     _cancel_orphaned_stops(broker, ledger, positions, now)
+    _protect_unguarded_positions(broker, ledger, positions, prices, as_of, cycle, now)
     positions_notional = {p.symbol: p.market_value for p in positions}
 
     watchlist = ledger.watchlist_for(as_of)
