@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS orders (
     updated_at TEXT NOT NULL,
     leg TEXT NOT NULL DEFAULT 'entry',
     tranche_index INTEGER NOT NULL DEFAULT 1,
-    tranche_total INTEGER NOT NULL DEFAULT 1
+    tranche_total INTEGER NOT NULL DEFAULT 1,
+    exit_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS fills (
@@ -205,6 +206,7 @@ _OPEN_ORDER_STATUSES = ("new", "accepted", "partially_filled")
 # already shipped needs an entry here, not just in `_SCHEMA`.
 _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "proposals": [("playbook_version", "INTEGER"), ("options_pricing_json", "TEXT")],
+    "orders": [("exit_reason", "TEXT")],
 }
 
 
@@ -426,6 +428,7 @@ class IntradayLedger:
         leg: str = "entry",
         tranche_index: int = 1,
         tranche_total: int = 1,
+        exit_reason: str | None = None,
     ) -> int:
         """Insert or update one order by its ``client_order_id`` -- a resubmission of the
         same id (idempotent at the broker) updates status in place, same reasoning as
@@ -440,14 +443,19 @@ class IntradayLedger:
         order is (S4, Phase 5) -- ``1``/``1`` (the default, every order before Phase 5,
         and every non-``open``/``add`` order) means "not split." See
         :meth:`pending_tranche_for`.
+
+        ``exit_reason`` (2026-10-03) is why an exit was sent (``"invalidation"``,
+        ``"time_stop"``, ``"trader_close"``, ``"trader_trim"``, ``"carry"``), kept so the
+        reflection can still be written when the fill arrives after submission
+        (`intraday/orders.py::sync_open_orders`). Set on insert only.
         """
         self._conn.execute(
             """
             INSERT INTO orders
                 (client_order_id, proposal_id, symbol, side, qty, notional, limit_price,
                  status, broker_order_id, submitted_at, updated_at, leg, tranche_index,
-                 tranche_total)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 tranche_total, exit_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(client_order_id) DO UPDATE SET
                 status = excluded.status,
                 broker_order_id = excluded.broker_order_id,
@@ -468,6 +476,7 @@ class IntradayLedger:
                 leg,
                 tranche_index,
                 tranche_total,
+                exit_reason,
             ),
         )
         self._conn.commit()
@@ -489,6 +498,44 @@ class IntradayLedger:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def open_orders_for(self, symbol: str, leg: str | None = None) -> list[dict[str, Any]]:
+        """Every still-open order recorded for ``symbol``, optionally only one ``leg``,
+        oldest first."""
+        placeholders = ",".join("?" * len(_OPEN_ORDER_STATUSES))
+        leg_clause = "" if leg is None else "AND leg = ?"
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM orders
+            WHERE symbol = ? {leg_clause} AND status IN ({placeholders})
+            ORDER BY id
+            """,
+            (symbol, *([] if leg is None else [leg]), *_OPEN_ORDER_STATUSES),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def unreflected_exits(self) -> list[dict[str, Any]]:
+        """Exits and stop legs that are done, filled at least partly, and have no
+        reflection yet, oldest first: what `intraday/orders.py::sync_open_orders` writes
+        reflections for once a fill arrives after submission. Only exits that carry an
+        ``exit_reason`` count, so exits recorded before that column existed (2026-10-03)
+        are never reflected a second time. A stop leg needs none: it only ever fires at
+        the invalidation price."""
+        placeholders = ",".join("?" * len(_OPEN_ORDER_STATUSES))
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM orders AS o
+            WHERE (o.leg = 'stop' OR (o.leg = 'exit' AND o.exit_reason IS NOT NULL))
+              AND o.status NOT IN ({placeholders})
+              AND EXISTS (SELECT 1 FROM fills AS f WHERE f.client_order_id = o.client_order_id)
+              AND NOT EXISTS (
+                  SELECT 1 FROM reflections AS r WHERE r.client_order_id = o.client_order_id
+              )
+            ORDER BY o.id
+            """,
+            _OPEN_ORDER_STATUSES,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def open_stop_legs_for(self, symbol: str) -> list[dict[str, Any]]:
         """Every still-open stop-loss leg recorded for ``symbol``, oldest first -- what
         `intraday/orders.py::cancel_resting_stops` cancels before a close/trim.
@@ -501,16 +548,7 @@ class IntradayLedger:
         on the shadow broker, which never triggers stops, but on a real account it would
         have opened a short had NVDA traded down to it.
         """
-        placeholders = ",".join("?" * len(_OPEN_ORDER_STATUSES))
-        rows = self._conn.execute(
-            f"""
-            SELECT * FROM orders
-            WHERE symbol = ? AND leg = 'stop' AND status IN ({placeholders})
-            ORDER BY id
-            """,
-            (symbol, *_OPEN_ORDER_STATUSES),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        return self.open_orders_for(symbol, leg="stop")
 
     def pending_tranche_for(self, symbol: str) -> dict[str, Any] | None:
         """The most recently filled entry order for ``symbol`` (whichever tranche that

@@ -2517,18 +2517,41 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       on the way: a trim too small for a whole share left the stops cancelled. `FakeBroker`
       gained `cancel_delay_lookups`, `enforce_held_qty` and `trigger_stop` to test this;
       all three are off or unused by default, so Stage 1 runs exactly as before.
-- [ ] **Stage 2 blocker, found 2026-10-03, not yet fixed: S4 never records a fill that
-      arrives after submission.** It records fills only from the submit response
-      (`submit_order_with_fault_isolation`). The shadow broker fills instantly, but on this
-      account all 15 paper-sleeve orders came back from `submit_order` still open, filled
-      1-4 s later, and were recorded only by the next `mark` (`docs/alpaca_notes.md`).
-      Nothing in `intraday/` polls order status afterward. On the real account every
-      entry would stay "accepted" in the ledger, so: the monitor finds no filled entry and
-      never enforces a time stop or invalidation; the next tranche never goes out
-      (`pending_tranche_for`); reflections and the eod report show no P&L; a stop that
-      fires between cycles is never recorded; and the orphan sweep treats every symbol as
-      having a working entry. Needs an S4 fill sync (poll the ledger's open orders each
-      cycle and record fills and statuses, as `live/mark.py` does) before Stage 2.
+- [x] **Stage 2 blocker, found and fixed 2026-10-03 (owner-approved): S4 never recorded a
+      fill that arrived after submission.** It recorded fills only from the submit
+      response (`submit_order_with_fault_isolation`). The shadow broker fills instantly,
+      but on this account all 15 paper-sleeve orders came back from `submit_order` still
+      open, filled 1-4 s later, and were recorded only by the next `mark`
+      (`docs/alpaca_notes.md`). On the real account every entry would have stayed
+      "accepted" in the ledger: the monitor would find no filled entry and never enforce
+      a time stop; the next tranche would never go out; closes would get no reflection
+      (`record_mechanical_reflection` runs right after the submit and records nothing
+      without an exit fill); a stop firing between cycles would go unrecorded and skip the
+      stop-out cooldown. Now `orders.py::sync_open_orders` asks the broker about every
+      order the ledger shows open, records status changes and new fills (each increment
+      once), and writes the reflection for any exit or stop leg that has filled since,
+      using the exit's new `orders.exit_reason` column (migrated onto the real ledger;
+      stop legs count as `"invalidation"` and also log `stopout:SYMBOL`). It runs first in
+      `run_cycle`, the `monitor` command and `run_carry`, and in `eod-review` (which now
+      builds the broker), since carry's 14:45 closes fill after the day's last cycle.
+      Found while building it, also fixed: `submit_exit` now cancels every order still
+      working in the symbol, not just the stops (an exit whose limit missed holds the
+      shares, so a retry would be rejected; a working entry tranche is an opposite-side
+      order); a second exit in the same cycle gets a fresh id (`-r1`), since the broker
+      answers a reused id with the old cancelled order; and the cycle adds no tranche to
+      a position the monitor just closed, which on the real account is still listed for a
+      few seconds after the close goes out. `FakeBroker.fill_order` fills a working order
+      later, for tests. Expected Monday in shadow mode: the first cycle's sync marks the
+      second leftover NVDA stop cancelled (it already is on the shadow broker), so the
+      orphan sweep's warning reads "canceled 1 resting stop(s)", not 2.
+- [ ] **Open, found 2026-10-03: a carried position has no resting stop overnight or the
+      next day.** Every S4 stop is a `day` order (the OTO leg, the trim replacement, the
+      re-placed stop), so Alpaca expires it at the close and nothing re-places it; the
+      monitor still checks the invalidation price every cycle, but between cycles and
+      overnight nothing rests at the broker. Shadow mode can't show this (the shadow
+      broker never expires anything). Candidate fix: each cycle, place a stop at the
+      invalidation price for any held position with none resting (the mirror image of
+      the orphan sweep). Owner decision whether to build before Stage 2.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

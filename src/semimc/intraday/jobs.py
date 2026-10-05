@@ -65,6 +65,7 @@ from .orders import (
     cancel_resting_stops,
     submit_exit,
     submit_order_with_fault_isolation,
+    sync_open_orders,
 )
 from .pretrade import (
     IntradayPretradeContext,
@@ -996,6 +997,9 @@ def run_cycle(
         result.skipped_reason = "; ".join(pretrade_failures)
         return result
 
+    # Fills that arrived since the last job, before anything reads the ledger's orders.
+    sync_open_orders(broker, ledger, intraday, as_of, now)
+
     account = broker.get_account()
     ledger.record_session_open_equity(as_of, account.equity)
     equity_at_session_open = ledger.session_open_equity(as_of) or account.equity
@@ -1012,9 +1016,12 @@ def run_cycle(
     # Tranche continuation: submit the next piece of any partially-tranched-in entry
     # (no new model call -- the original accepted proposal already justified the full
     # size; splitting is an execution technique, not a re-decision).
+    exiting = set(monitor_result.closed) | set(monitor_result.exits_failed)
     for position in list(positions):
-        if position.symbol in monitor_result.exits_failed:
-            continue  # meant to be closed; never add to it
+        if position.symbol in exiting:
+            # Meant to be closed; never add to it. On the real account a close's fill lands
+            # a few seconds after submission, so the position can still be listed here.
+            continue
         pending = ledger.pending_tranche_for(position.symbol)
         if pending is None:
             continue
@@ -1269,6 +1276,7 @@ def run_cycle(
                 broker,
                 ledger,
                 now,
+                reason="trader_trim",
                 as_of=as_of,
                 cycle=cycle,
                 stop_price=original_invalidation,
@@ -1315,6 +1323,7 @@ def run_cycle(
                 broker,
                 ledger,
                 now,
+                reason="trader_close",
                 as_of=as_of,
                 cycle=cycle,
                 stop_price=original_payload.get("invalidation_price"),
@@ -1368,6 +1377,7 @@ def run_carry(
     """
     result = CarryResult()
     intraday = config.intraday
+    sync_open_orders(broker, ledger, intraday, as_of, now)
     positions = broker.list_positions()
     account = broker.get_account()
 
@@ -1426,6 +1436,7 @@ def _carry_close(
         broker,
         ledger,
         now,
+        reason="carry",
         as_of=as_of,
         cycle="carry",
         stop_price=(payload or {}).get("invalidation_price"),
@@ -1461,6 +1472,7 @@ def run_eod_review(
     as_of: pd.Timestamp,
     cycle: str,
     now: dt.datetime,
+    broker: Broker | None = None,
 ) -> EodReviewResult:
     """15:15: the Reviewer grades the day and writes `reports/YYYY-MM-DD/eod.md`
     (`BRIEF_INTRADAY.md`'s `eod_review` row). Everything computable without judgment --
@@ -1485,7 +1497,14 @@ def run_eod_review(
     `shadow_ledger` is optional -- `None` skips the placebo benchmark gracefully (Phase 7
     might not be enabled in every deployment) rather than requiring a second ledger no
     caller has to open.
+
+    `broker` (2026-10-03), when given, is synced first (`sync_open_orders`): carry's
+    closes go out at 14:45 and fill seconds later, after the last cycle, so on the real
+    account nothing else would record those fills or their reflections before this
+    report reads them.
     """
+    if broker is not None:
+        sync_open_orders(broker, ledger, config.intraday, as_of, now)
     proposals_today = ledger.proposals_for(as_of)
     reflections_today = ledger.reflections_for(as_of)
     nothing_to_grade = not proposals_today and not reflections_today

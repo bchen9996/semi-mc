@@ -258,11 +258,10 @@ just documentation.
 - **A submit response carries no fill.** Every one of the 15 paper-sleeve orders on this
   account (`ledger/paper.sqlite3`, 2026-09-24 and 2026-10-02) came back from
   `submit_order` still open: each filled 1-4 s after submission, and the ledger learned it
-  only at the next `mark`, 4-12 minutes later. `live/mark.py` exists for exactly this.
-  **S4 has no equivalent yet**: `intraday/orders.py::submit_order_with_fault_isolation`
-  records a fill only from the submit response, which the shadow broker fills instantly,
-  so on the real account S4 would record no fills at all (open item in `tasks/todo.md`,
-  2026-10-03).
+  only at the next `mark`, 4-12 minutes later. `live/mark.py` exists for exactly this,
+  and since 2026-10-03 so does S4's `intraday/orders.py::sync_open_orders`, which runs
+  first in every S4 job that acts on positions (before that, S4 recorded fills only
+  from the submit response and would have recorded none on the real account).
 - **Market-closed order submission is queued, not rejected.** Verified via WebSearch:
   Alpaca used to reject day-order submission while the market was closed; it now accepts
   the order and routes it at the next open. `execution/pretrade.py`'s market-open check
@@ -304,6 +303,15 @@ canceling an already-canceled order does not 422, see above), `get_account`/`get
   close, and any `BrokerError` from the submit is logged rather than raised, so the exact
   wording doesn't change behavior. Stage 2's first close is the first real test; the
   incidents table will show a "still canceling" error if 5 s is too short.
+- **Whether an OTO entry's stop leg can be looked up by its own `client_order_id`** (S4,
+  2026-10-03). The leg's id is Alpaca's, taken from the entry's submit response, and
+  `sync_open_orders`/`cancel_resting_stops` both look legs up with
+  `get_order_by_client_id`. If Alpaca doesn't serve legs that way, the lookup returns
+  nothing: the sync leaves the leg as it is, a cancel still goes out by the leg's broker
+  id and then marks it canceled, and a stop that fired would never have its fill or
+  reflection recorded. Exits stay safe either way, since `submit_exit` re-reads the
+  position from the broker. Stage 2's first trade, or the weekend smoke test offered
+  2026-10-03, would settle it.
 - Actual paper-account creation limit.
 - Trade-updates websocket stream: reconnect behavior, whether missed events during a
   disconnect are backfilled or lost (matters for `live/mark.py`'s fill tracking, which the

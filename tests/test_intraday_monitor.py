@@ -304,3 +304,21 @@ def test_a_rejected_close_is_reported_as_failed_and_its_stop_put_back(tmp_path):
     [restored] = ledger.open_stop_legs_for("NVDA")
     assert restored["client_order_id"] != "entry-NVDA::stop"
     ledger.close()
+
+
+@pytest.mark.parametrize(("price", "reason"), [(184.0, "invalidation"), (190.0, "time_stop")])
+def test_a_close_records_why_it_was_sent(tmp_path, price, reason):
+    """Kept on the exit's row so its reflection can be written if the fill comes later."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    _open_position(
+        broker, ledger, invalidation_price=185.0, filled_at=NOW - dt.timedelta(minutes=90)
+    )
+
+    check_invalidation_and_time_stops(
+        IntradayConfig(), broker, ledger, {"NVDA": price}, AS_OF, CYCLE, NOW
+    )
+
+    [exit_row] = [row for row in ledger.orders_for_proposal(1) if row["leg"] == "exit"]
+    assert exit_row["exit_reason"] == reason
+    ledger.close()

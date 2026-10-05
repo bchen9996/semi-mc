@@ -267,13 +267,32 @@ class FakeBroker:
         order = self._orders[client_order_id]
         if order.type not in ("stop", "stop_limit") or order.status not in ("new", "accepted"):
             raise ValueError(f"{client_order_id} is not a resting stop")
-        self._pending_cancels.pop(order.id, None)
-        order.status = "filled"
-        order.filled_qty = order.qty or 0.0
-        order.filled_avg_price = price
+        return self.fill_order(client_order_id, price)
+
+    def fill_order(self, client_order_id: str, price: float, qty: float | None = None) -> Order:
+        """Fills ``qty`` (default: all that's left) of a working order at ``price`` and
+        applies it to the position: the real paper account fills an order a second or more
+        after `submit_order` has already answered (`docs/alpaca_notes.md`). Nothing calls
+        this on its own; a test does, after `partial_fill_fraction=0.0` left the order
+        working, to put a fill the submit response never saw."""
+        order = self._orders[client_order_id]
+        if order.status not in ("new", "accepted", "partially_filled") or order.qty is None:
+            raise ValueError(f"{client_order_id} is not a working qty order")
+        remaining = order.qty - order.filled_qty
+        increment = remaining if qty is None else min(qty, remaining)
+        total = order.filled_qty + increment
+        order.filled_avg_price = (
+            (order.filled_avg_price or 0.0) * order.filled_qty + price * increment
+        ) / total
+        order.filled_qty = total
         order.filled_at = self.now
-        self._open_sides.get(order.symbol, set()).discard(order.side)
-        self._apply_fill_to_position(order)
+        if total >= order.qty - 1e-9:
+            order.status = "filled"
+            self._pending_cancels.pop(order.id, None)
+            self._open_sides.get(order.symbol, set()).discard(order.side)
+        else:
+            order.status = "partially_filled"
+        self._apply_fill_to_position(order, increment, price)
         return order
 
     def list_open_orders(self) -> list[Order]:
@@ -309,11 +328,16 @@ class FakeBroker:
                 f"available: {max(available, 0.0):g})"
             )
 
-    def _apply_fill_to_position(self, order: Order) -> None:
-        if order.filled_qty <= 0:
+    def _apply_fill_to_position(
+        self, order: Order, qty: float | None = None, price: float | None = None
+    ) -> None:
+        """Applies `qty` shares at `price` (default: everything `order` has filled, at its
+        average price) to the position."""
+        qty = order.filled_qty if qty is None else qty
+        if qty <= 0:
             return
-        signed = order.filled_qty if order.side == "buy" else -order.filled_qty
-        price = order.filled_avg_price or 0.0
+        signed = qty if order.side == "buy" else -qty
+        price = (order.filled_avg_price or 0.0) if price is None else price
         position = self._positions.get(order.symbol)
         new_qty = signed if position is None else position.qty + signed
         self._positions[order.symbol] = Position(

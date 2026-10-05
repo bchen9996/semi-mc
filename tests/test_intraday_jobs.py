@@ -2304,3 +2304,83 @@ def test_run_cycle_adds_no_tranche_to_a_position_whose_stop_out_failed(config, t
     assert ledger.pending_tranche_for("NVDA") is not None  # tranche 2 never went out
     assert len(ledger.open_stop_legs_for("NVDA")) == 1  # the re-placed stop
     ledger.close()
+
+
+def test_run_cycle_sees_an_entry_fill_that_arrived_after_submission(config, tmp_path):
+    """The real account answers `submit_order` before the fill (2026-10-03). Before the
+    sync, nothing recorded the fill, so the second tranche never went out."""
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=2)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    proposal = {
+        "action": "open",
+        "symbol": "NVDA",
+        "side": "buy",
+        "size_pct": 0.05,
+        "limit_price": 190.0,
+        "thesis": "AI capex",
+        "invalidation_price": 185.0,
+        "time_stop_minutes": 60,
+    }
+    broker = FakeBroker(now=NOW, partial_fill_fraction=0.0)
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [proposal]}),
+        _result_json(structured_output={"proposals": []}),
+    )
+    [entry_id] = run_cycle(
+        "cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW
+    ).orders_submitted
+    broker.fill_order(entry_id, 190.0)
+
+    result = run_cycle(
+        "cycle_2",
+        cfg,
+        broker,
+        ledger,
+        market_data,
+        client,
+        AS_OF,
+        NOW + dt.timedelta(minutes=20),
+    )
+
+    assert ledger.get_order(entry_id)["status"] == "filled"
+    [tranche_2] = result.orders_submitted
+    assert ledger.get_order(tranche_2)["tranche_index"] == 2
+    ledger.close()
+
+
+def test_run_eod_review_records_a_carry_close_that_filled_after_carry(config, tmp_path, market):
+    """Carry's closes fill seconds after 14:45, after the day's last cycle: eod-review's
+    sync is what records them, and their reflections, before the report reads them."""
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday")
+    broker.partial_fill_fraction = 0.0
+    run_carry(cfg, broker, ledger, _FakeMarketData(quotes={"NVDA": _quote(190.0)}), AS_OF, NOW)
+    assert ledger.reflections_for(AS_OF) == []
+    [close] = broker.list_open_orders()
+    broker.fill_order(close.client_order_id, 189.0)
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+
+    run_eod_review(
+        cfg,
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        market,
+        paper_ledger,
+        None,
+        ledger,
+        _sequenced_llm_client(_result_json()),
+        AS_OF,
+        "eod_review",
+        NOW,
+        broker=broker,
+    )
+
+    [reflection] = ledger.reflections_for(AS_OF)
+    assert reflection["content"]["close_reason"] == "carry"
+    assert reflection["content"]["avg_exit_price"] == pytest.approx(189.0)
+    paper_ledger.close()
+    ledger.close()

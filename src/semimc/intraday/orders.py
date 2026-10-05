@@ -19,7 +19,7 @@ import datetime as dt
 import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pandas as pd
 
@@ -40,6 +40,7 @@ from ..execution.orders import collared_limit_price, round_to_tick
 from ..execution.pretrade import check_order_tradable
 from .ledger import IntradayLedger
 from .proposals import OPEN_OR_ADD_ACTIONS, TradeProposal, whole_shares
+from .reflect import record_mechanical_reflection
 
 _OPEN_STATUSES = frozenset({"new", "accepted", "partially_filled"})
 
@@ -192,42 +193,56 @@ def cancel_resting_stops(
     open. Tolerates a leg already canceled or otherwise gone at the broker (`KeyError`/
     `ValueError` from `cancel_order`) the same forgiving way real Alpaca's own
     `cancel_order` already is (`docs/alpaca_notes.md`: canceling an already-canceled
-    order succeeds silently) -- nothing left to cancel is not a failure. A lookup that
-    raises counts as not yet confirmed and is retried.
+    order succeeds silently) -- nothing left to cancel is not a failure. A cancel the
+    broker refuses outright, or a lookup that raises, leaves the leg unconfirmed: still
+    open, asked about again on the next poll.
     """
     legs = ledger.open_stop_legs_for(symbol)
-    for leg in legs:
-        with contextlib.suppress(KeyError, ValueError):
-            broker.cancel_order(leg["broker_order_id"])
+    _cancel_and_settle(legs, broker, ledger, now or dt.datetime.now(dt.UTC), sleep)
+    return [leg["client_order_id"] for leg in legs]
 
-    waiting = list(legs)
+
+def _cancel_and_settle(
+    rows: list[dict],
+    broker: Broker,
+    ledger: IntradayLedger,
+    now: dt.datetime,
+    sleep: Callable[[float], None],
+) -> None:
+    """Cancels each ledger order row at the broker, then polls until each reports a
+    final status or the wait runs out (see :func:`cancel_resting_stops`), recording each
+    row's status and any fill as it goes."""
+    for row in rows:
+        with contextlib.suppress(KeyError, ValueError, BrokerError):
+            broker.cancel_order(row["broker_order_id"])
+
+    waiting = list(rows)
     for poll in range(_CANCEL_SETTLE_POLLS):
         if poll:
             sleep(_CANCEL_POLL_SECONDS)
         still_open = []
-        for leg in waiting:
+        for row in waiting:
             try:
-                refreshed = broker.get_order_by_client_id(leg["client_order_id"])
+                refreshed = broker.get_order_by_client_id(row["client_order_id"])
             except Exception:  # noqa: BLE001 - unconfirmed, ask again on the next poll
-                still_open.append(leg)
+                still_open.append(row)
                 continue
             status = refreshed.status if refreshed is not None else "canceled"
             ledger.record_order(
-                leg["client_order_id"],
-                leg["symbol"],
-                leg["side"],
+                row["client_order_id"],
+                row["symbol"],
+                row["side"],
                 status=status,
-                broker_order_id=leg["broker_order_id"],
-                leg="stop",
+                broker_order_id=row["broker_order_id"],
+                leg=row["leg"],
             )
             if refreshed is not None:
-                record_new_fill(refreshed, ledger, now or dt.datetime.now(dt.UTC))
+                record_new_fill(refreshed, ledger, now)
             if status in _OPEN_STATUSES:
-                still_open.append(leg)
+                still_open.append(row)
         waiting = still_open
         if not waiting:
             break
-    return [leg["client_order_id"] for leg in legs]
 
 
 def build_close_order(
@@ -346,6 +361,7 @@ def submit_order_with_fault_isolation(
     tranche_index: int = 1,
     tranche_total: int = 1,
     leg: str = "entry",
+    exit_reason: str | None = None,
 ) -> Order | None:
     """Mirrors `live/execute.py::run_execute`'s per-order try/except exactly.
 
@@ -370,6 +386,8 @@ def submit_order_with_fault_isolation(
     `IntradayLedger.latest_filled_entry_for`/`pending_tranche_for` both filter on
     `leg = 'entry'`, so a close/trim submitted through here without an explicit `leg`
     would otherwise masquerade as a fresh entry and corrupt both lookups.
+
+    `exit_reason` is recorded on an exit's row (see `IntradayLedger.record_order`).
     """
     tradable_failure = check_order_tradable(request, broker)
     if tradable_failure is not None:
@@ -407,6 +425,7 @@ def submit_order_with_fault_isolation(
         tranche_index=tranche_index,
         tranche_total=tranche_total,
         leg=leg,
+        exit_reason=exit_reason,
     )
     for child in submitted.legs or []:
         ledger.record_order(
@@ -422,13 +441,7 @@ def submit_order_with_fault_isolation(
             proposal_id=proposal_id,
             leg="stop",
         )
-    if submitted.filled_qty > 0 and submitted.filled_avg_price is not None:
-        ledger.record_fill(
-            submitted.client_order_id,
-            qty=submitted.filled_qty,
-            price=submitted.filled_avg_price,
-            filled_at=submitted.filled_at or now,
-        )
+    record_new_fill(submitted, ledger, now)
     return submitted
 
 
@@ -450,6 +463,7 @@ def submit_exit(
     ledger: IntradayLedger,
     now: dt.datetime,
     *,
+    reason: str,
     as_of: pd.Timestamp,
     cycle: str,
     stop_price: float | None,
@@ -460,13 +474,19 @@ def submit_exit(
     the cancels to complete, re-read the position, send the exit, and put a stop back if
     the exit doesn't go out. Every close and trim goes through here (added 2026-10-03,
     before Stage 2 first sends real orders; the shadow broker hides all of this by
-    canceling and filling instantly).
+    canceling and filling instantly). `reason` is recorded on the exit as its
+    `exit_reason`, for the reflection :func:`sync_open_orders` writes if the fill arrives
+    later.
 
-    1. :func:`cancel_resting_stops`, which waits for each cancel to complete. A stop still
-       canceling after the wait holds the exit back to the next cycle with an error
-       incident: sent now it would be rejected for "insufficient qty available", and if
-       the stop then fired the exit would sell shares no longer held. No stop is
-       re-placed here, since the old one is still working (it either cancels or fills).
+    1. Every order still working in the symbol is canceled, and each cancel waited out
+       the way :func:`cancel_resting_stops` does: the stops, an earlier exit that never
+       filled (its limit missed; it still holds the shares, so a second exit would be
+       rejected), and an entry tranche still working (an opposite-side order Alpaca
+       would treat as a potential wash trade). Anything still canceling after the wait
+       holds the exit back to the next cycle with an error incident: sent now it would
+       be rejected for "insufficient qty available", and if a stop then fired the exit
+       would sell shares no longer held. No stop is re-placed here, since the old one is
+       still working (it either cancels or fills).
     2. The position is re-read from the broker. A stop that fired before its cancel
        landed has already sold some or all of the shares, so the exit is built from what
        is still held, never from the caller's earlier read (closing the old quantity
@@ -478,11 +498,12 @@ def submit_exit(
        rejected exit doesn't leave the position unguarded until the next cycle. A
        missing `stop_price`, or a stop the broker rejects too, is an error incident.
     """
-    canceled = cancel_resting_stops(symbol, broker, ledger, now, sleep=sleep)
-    still_canceling = ledger.open_stop_legs_for(symbol)
+    canceled = [row["client_order_id"] for row in ledger.open_stop_legs_for(symbol)]
+    _cancel_and_settle(ledger.open_orders_for(symbol), broker, ledger, now, sleep)
+    still_canceling = ledger.open_orders_for(symbol)
     if still_canceling:
         failure = (
-            f"{symbol}: {len(still_canceling)} resting stop(s) still canceling after "
+            f"{symbol}: {len(still_canceling)} order(s) still canceling after "
             f"{_CANCEL_SETTLE_POLLS * _CANCEL_POLL_SECONDS:g}s; exit held back to the next cycle"
         )
         ledger.record_incident("error", failure)
@@ -496,12 +517,12 @@ def submit_exit(
         return ExitAttempt()
 
     try:
-        request = build_request(position)
+        request = _unused_client_order_id(build_request(position), ledger)
     except ValueError as exc:
         failure = str(exc)
     else:
         submitted = submit_order_with_fault_isolation(
-            request, broker, ledger, now, proposal_id=proposal_id, leg="exit"
+            request, broker, ledger, now, proposal_id=proposal_id, leg="exit", exit_reason=reason
         )
         if submitted is not None:
             return ExitAttempt(order=submitted, position=position)
@@ -510,6 +531,24 @@ def submit_exit(
     if canceled:
         _restore_stop(position, stop_price, broker, ledger, now, as_of, cycle, proposal_id)
     return ExitAttempt(position=position, failure=failure)
+
+
+def _unused_client_order_id(request: OrderRequest, ledger: IntradayLedger) -> OrderRequest:
+    """`request` under an id the ledger hasn't used yet, suffixed ``-r1``, ``-r2``... A
+    second exit in the same cycle (the first one's limit missed and it was just
+    canceled) would otherwise reuse the first one's id, and the broker answers a reused
+    id with the old, canceled order rather than placing a new one (`FakeBroker` returns
+    it; Alpaca's duplicate-id 422 falls back to looking it up). Entries keep their fixed
+    ids, which is what stops a re-run cycle from buying twice; an exit can't sell twice,
+    since :func:`submit_exit` cancels every working order and re-reads the position
+    first."""
+    client_order_id, attempt = request.client_order_id, 0
+    while ledger.get_order(client_order_id) is not None:
+        attempt += 1
+        client_order_id = f"{request.client_order_id}-r{attempt}"
+    if client_order_id == request.client_order_id:
+        return request
+    return replace(request, client_order_id=client_order_id)
 
 
 def _restore_stop(
@@ -532,7 +571,9 @@ def _restore_stop(
         )
         return
     side: OrderSide = "sell" if position.side == "long" else "buy"
-    request = build_replacement_stop_order(symbol, side, qty, stop_price, as_of, cycle)
+    request = _unused_client_order_id(
+        build_replacement_stop_order(symbol, side, qty, stop_price, as_of, cycle), ledger
+    )
     restored = submit_order_with_fault_isolation(
         request, broker, ledger, now, proposal_id=proposal_id, leg="stop"
     )
@@ -548,3 +589,84 @@ def _restore_stop(
             f"{symbol}: no exit went out after its stops were canceled; re-placed a stop "
             f"for {qty:g} shares at {request.stop_price:.2f}",
         )
+
+
+@dataclass(frozen=True)
+class OrderSync:
+    """What :func:`sync_open_orders` changed, by `client_order_id`."""
+
+    updated: list[str]
+    filled: list[str]
+    reflected: list[str]
+
+
+def sync_open_orders(
+    broker: Broker,
+    ledger: IntradayLedger,
+    config: IntradayConfig,
+    as_of: pd.Timestamp,
+    now: dt.datetime,
+) -> OrderSync:
+    """Brings the ledger up to date with the broker for every order it still shows open:
+    the broker's current status, and any fill beyond what is already recorded. Then
+    writes the reflection for any exit or stop that has filled since. Added 2026-10-03,
+    a Stage 2 blocker: S4 used to record a fill only from the submit response. The
+    shadow broker fills instantly, but on the real account every paper-sleeve order came
+    back from `submit_order` still open and filled 1-4 s later (`docs/alpaca_notes.md`).
+    Without this, every real entry would stay "accepted" in the ledger: the monitor would
+    find no filled entry to enforce a time stop on, no later tranche would go out
+    (`pending_tranche_for`), closes would get no reflection, and a stop that fired
+    between cycles would never be recorded. The same job `live/mark.py` does for s0/s3.
+
+    Runs first in every job that acts on positions (`run_cycle`, the `monitor` command,
+    `run_carry`) and before `run_eod_review` reads the day's fills.
+
+    - An order the broker has no record of is left as it is. S4's orders always live on
+      the broker that took them; the exception is Stage 1's shadow rows once Stage 2
+      switches to the real account, and the stop legs among them are cleared by the
+      orphan sweep (`jobs.py::_cancel_orphaned_stops`), which marks a leg the broker
+      doesn't know as canceled.
+    - A lookup that raises is skipped and asked again next time; it never stops the job.
+    - Reflections (`IntradayLedger.unreflected_exits`): an exit gets one under the
+      `exit_reason` it was sent with; a stop leg under ``"invalidation"``, plus the
+      ``"stopout:{symbol}"`` incident the cooldown rule reads
+      (`IntradayLedger.last_stopout_times`), timed when this sync notices the fill, so
+      the cooldown can only run long, never short. The reflection is dated `as_of`, the
+      day of the sync that noticed the fill.
+    """
+    updated: list[str] = []
+    filled: list[str] = []
+    for row in ledger.open_orders():
+        client_order_id = row["client_order_id"]
+        try:
+            order = broker.get_order_by_client_id(client_order_id)
+        except Exception:  # noqa: BLE001 - asked again next sync; never ends the job
+            continue
+        if order is None:
+            continue
+        if record_new_fill(order, ledger, now):
+            filled.append(client_order_id)
+        if order.status != row["status"]:
+            ledger.record_order(
+                client_order_id,
+                row["symbol"],
+                row["side"],
+                status=order.status,
+                broker_order_id=order.id or row["broker_order_id"],
+                leg=row["leg"],
+            )
+            updated.append(client_order_id)
+
+    reflected: list[str] = []
+    for row in ledger.unreflected_exits():
+        is_stop = row["leg"] == "stop"
+        reason = "invalidation" if is_stop else row["exit_reason"]
+        written = record_mechanical_reflection(
+            row["symbol"], row["client_order_id"], reason, ledger, config, as_of
+        )
+        if written is None:
+            continue
+        reflected.append(row["client_order_id"])
+        if is_stop:
+            ledger.record_incident("warning", f"stopout:{row['symbol']}")
+    return OrderSync(updated=updated, filled=filled, reflected=reflected)

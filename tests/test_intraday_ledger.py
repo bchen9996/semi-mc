@@ -722,3 +722,75 @@ def test_briefs_for_returns_only_that_days_briefs(tmp_path):
     assert [b["content"]["summary"] for b in briefs] == ["monday"]
     assert ledger.briefs_for(AS_OF - pd.Timedelta(days=1)) == []
     ledger.close()
+
+
+def test_opening_a_pre_exit_reason_ledger_adds_the_column(tmp_path):
+    """The real ledger's `orders` table predates `exit_reason` (2026-10-03)."""
+    path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_order_id TEXT NOT NULL UNIQUE,
+            proposal_id INTEGER,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            qty REAL,
+            notional REAL,
+            limit_price REAL,
+            status TEXT NOT NULL,
+            broker_order_id TEXT,
+            submitted_at TEXT,
+            updated_at TEXT NOT NULL,
+            leg TEXT NOT NULL DEFAULT 'entry',
+            tranche_index INTEGER NOT NULL DEFAULT 1,
+            tranche_total INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    ledger = IntradayLedger(path)
+    ledger.record_order("x-1", "NVDA", "sell", status="accepted", leg="exit", exit_reason="carry")
+    assert ledger.get_order("x-1")["exit_reason"] == "carry"
+    ledger.close()
+
+
+def test_unreflected_exits_lists_finished_filled_exits_and_stops_with_no_reflection(tmp_path):
+    ledger = _ledger(tmp_path)
+    filled_at = dt.datetime(2026, 9, 21, 15, 0)
+    rows = {
+        "exit-done": ("exit", "filled", "trader_close", True),
+        "exit-working": ("exit", "partially_filled", "trader_close", True),
+        "exit-unfilled": ("exit", "canceled", "carry", False),
+        "exit-before-reasons": ("exit", "filled", None, True),
+        "stop-fired": ("stop", "filled", None, True),
+        "entry": ("entry", "filled", None, True),
+        "exit-reflected": ("exit", "filled", "time_stop", True),
+    }
+    for client_order_id, (leg, status, reason, filled) in rows.items():
+        ledger.record_order(
+            client_order_id, "NVDA", "sell", status=status, leg=leg, exit_reason=reason
+        )
+        if filled:
+            ledger.record_fill(client_order_id, qty=1.0, price=190.0, filled_at=filled_at)
+    ledger.record_reflection(AS_OF, "NVDA", {}, client_order_id="exit-reflected")
+
+    found = [row["client_order_id"] for row in ledger.unreflected_exits()]
+
+    assert found == ["exit-done", "stop-fired"]
+    ledger.close()
+
+
+def test_open_orders_for_filters_by_symbol_and_leg(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_order("e", "NVDA", "buy", status="accepted")
+    ledger.record_order("s", "NVDA", "sell", status="new", leg="stop")
+    ledger.record_order("done", "NVDA", "sell", status="filled", leg="exit")
+    ledger.record_order("other", "AMD", "buy", status="new")
+
+    assert [r["client_order_id"] for r in ledger.open_orders_for("NVDA")] == ["e", "s"]
+    assert [r["client_order_id"] for r in ledger.open_orders_for("NVDA", leg="stop")] == ["s"]
+    ledger.close()

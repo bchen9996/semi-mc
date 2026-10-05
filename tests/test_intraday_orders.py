@@ -16,6 +16,7 @@ from semimc.execution.broker import Asset, BrokerError, OrderRequest, Position
 from semimc.execution.fake_broker import FakeBroker
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.orders import (
+    OrderSync,
     build_close_order,
     build_entry_order,
     build_replacement_stop_order,
@@ -24,6 +25,7 @@ from semimc.intraday.orders import (
     intraday_client_order_id,
     submit_exit,
     submit_order_with_fault_isolation,
+    sync_open_orders,
 )
 from semimc.intraday.proposals import TradeProposal
 
@@ -449,6 +451,7 @@ def _exit(broker, ledger, build=_close, stop_price=185.0):
         broker,
         ledger,
         NOW,
+        reason="trader_close",
         as_of=AS_OF,
         cycle=CYCLE,
         stop_price=stop_price,
@@ -546,7 +549,7 @@ def test_submit_exit_holds_back_while_a_stop_is_still_canceling(tmp_path):
 
     assert attempt.order is None
     assert attempt.failure == (
-        "NVDA: 1 resting stop(s) still canceling after 5s; exit held back to the next cycle"
+        "NVDA: 1 order(s) still canceling after 5s; exit held back to the next cycle"
     )
     assert _incidents(ledger, "error") == [attempt.failure]
     assert broker.list_positions()[0].qty == 6.0
@@ -662,4 +665,157 @@ def test_submit_exit_adds_no_stop_a_position_never_had(tmp_path):
     assert attempt.failure == "NVDA: exit order failed"
     assert ledger.open_stop_legs_for("NVDA") == []
     assert broker.list_open_orders() == []
+    ledger.close()
+
+
+def test_submit_exit_cancels_an_earlier_exit_that_never_filled(tmp_path):
+    """A close whose limit missed still holds the shares, so the retry would be rejected
+    "insufficient qty available" if it were left working."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(enforce_held_qty=True)
+    _held(broker, ledger)
+    broker.partial_fill_fraction = 0.0  # exits now rest unfilled
+    first = _exit(broker, ledger).order
+    assert first.status == "accepted"
+
+    retry = submit_exit(
+        "NVDA",
+        _close,
+        broker,
+        ledger,
+        NOW,
+        reason="time_stop",
+        as_of=AS_OF,
+        cycle="cycle_2",
+        stop_price=185.0,
+        sleep=_Sleeps(),
+    )
+
+    assert retry.order.client_order_id == f"{first.client_order_id}-r1"  # not the old order
+    assert ledger.get_order(first.client_order_id)["status"] == "canceled"
+    assert ledger.get_order(retry.order.client_order_id)["exit_reason"] == "time_stop"
+    assert _incidents(ledger, "error") == []
+    ledger.close()
+
+
+def test_submit_exit_cancels_an_entry_tranche_still_working(tmp_path):
+    """An open buy in the symbol is an opposite-side order Alpaca can refuse a sell over."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    _held(broker, ledger, "entry-t1", qty=3.0)
+    broker.partial_fill_fraction = 0.0
+    _held(broker, ledger, "entry-t2", qty=3.0)  # still working
+
+    attempt = _exit(broker, ledger)
+
+    assert ledger.get_order("entry-t2")["status"] == "canceled"
+    assert attempt.order.qty == 3.0
+    ledger.close()
+
+
+# -- sync_open_orders ----------------------------------------------------------------------
+
+
+def _traceable_entry(broker, ledger, qty=6.0) -> int:
+    """An entry the monitor and reflections can trace back to its proposal."""
+    proposal_id = ledger.record_proposal(
+        AS_OF, CYCLE, "NVDA", "open", "accepted", payload=_proposal().model_dump()
+    )
+    submit_order_with_fault_isolation(
+        _order(client_order_id="entry-1", qty=qty), broker, ledger, NOW, proposal_id=proposal_id
+    )
+    return proposal_id
+
+
+def _sync(broker, ledger):
+    return sync_open_orders(broker, ledger, IntradayConfig(), AS_OF, NOW)
+
+
+def test_sync_records_an_entry_fill_that_arrives_after_submission(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(partial_fill_fraction=0.0)  # open when submit returns, as on Alpaca
+    _held(broker, ledger)
+    assert ledger.latest_filled_entry_for("NVDA") is None
+    broker.fill_order("entry-1", 190.0)
+
+    synced = _sync(broker, ledger)
+
+    assert synced.filled == ["entry-1"]
+    assert synced.updated == ["entry-1"]
+    assert ledger.latest_filled_entry_for("NVDA")["client_order_id"] == "entry-1"
+    [fill] = ledger.fills_for_order("entry-1")
+    assert (fill["qty"], fill["price"]) == (6.0, 190.0)
+    assert ledger.get_order("entry-1::stop")["status"] == "new"
+    ledger.close()
+
+
+def test_sync_records_each_partial_fill_once(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(partial_fill_fraction=0.0)
+    _held(broker, ledger)
+
+    broker.fill_order("entry-1", 190.0, qty=2.0)
+    _sync(broker, ledger)
+    assert _sync(broker, ledger).filled == []  # nothing new
+    broker.fill_order("entry-1", 191.0)
+    _sync(broker, ledger)
+
+    assert [f["qty"] for f in ledger.fills_for_order("entry-1")] == [2.0, 4.0]
+    assert ledger.get_order("entry-1")["status"] == "filled"
+    ledger.close()
+
+
+def test_sync_writes_the_reflection_for_a_close_that_fills_later(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    _traceable_entry(broker, ledger)  # fills at once, at 190
+    broker.partial_fill_fraction = 0.0  # the close stays working, as on the real account
+    close_id = _exit(broker, ledger).order.client_order_id
+    assert ledger.unreflected_exits() == []  # nothing filled yet
+    broker.fill_order(close_id, 192.0)
+
+    synced = _sync(broker, ledger)
+
+    assert synced.reflected == [close_id]
+    [reflection] = ledger.reflections_for(AS_OF)
+    assert reflection["content"]["close_reason"] == "trader_close"
+    assert reflection["content"]["avg_exit_price"] == pytest.approx(192.0)
+    assert _sync(broker, ledger).reflected == []  # once only
+    ledger.close()
+
+
+def test_sync_records_a_stop_that_fired_between_cycles(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    _traceable_entry(broker, ledger)
+    broker.trigger_stop("entry-1::stop", 184.9)
+
+    synced = _sync(broker, ledger)
+
+    assert ledger.get_order("entry-1::stop")["status"] == "filled"
+    assert synced.reflected == ["entry-1::stop"]
+    [reflection] = ledger.reflections_for(AS_OF)
+    assert reflection["content"]["close_reason"] == "invalidation"
+    assert reflection["content"]["invalidation_respected"] is True
+    assert _incidents(ledger, "warning") == ["stopout:NVDA"]
+    assert "NVDA" in ledger.last_stopout_times()  # the cooldown applies
+    ledger.close()
+
+
+class _LookupFails(FakeBroker):
+    def get_order_by_client_id(self, client_order_id: str):
+        raise BrokerError("simulated outage")
+
+
+def test_sync_leaves_alone_an_order_it_cannot_look_up(tmp_path):
+    """Unknown to the broker (a Stage 1 shadow row once Stage 2 starts), or a lookup that
+    fails: nothing changes and the job carries on."""
+    ledger = _ledger(tmp_path)
+    ledger.record_order(
+        "shadow-stop", "NVDA", "sell", status="new", broker_order_id="gone", leg="stop"
+    )
+
+    assert _sync(FakeBroker(), ledger) == OrderSync(updated=[], filled=[], reflected=[])
+    assert _sync(_LookupFails(), ledger) == OrderSync(updated=[], filled=[], reflected=[])
+    assert ledger.get_order("shadow-stop")["status"] == "new"
     ledger.close()
