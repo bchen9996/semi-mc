@@ -141,6 +141,7 @@ def check_invalidation_and_time_stops(
             broker,
             ledger,
             now,
+            reason="invalidation" if stopped_out else "time_stop",
             as_of=as_of,
             cycle=cycle,
             stop_price=invalidation_price,

@@ -2064,6 +2064,7 @@ def intraday_monitor(
     from .intraday.jobs import current_prices
     from .intraday.ledger import IntradayLedger
     from .intraday.monitor import check_invalidation_and_time_stops
+    from .intraday.orders import sync_open_orders
 
     as_of_ts = _intraday_as_of(as_of)
     now = _intraday_now()
@@ -2071,6 +2072,7 @@ def intraday_monitor(
     market_data = _intraday_market_data()
     broker = _intraday_execution_broker(cfg, ledger, market_data, now)
     try:
+        sync_open_orders(broker, ledger, cfg.intraday, as_of_ts, now)
         positions = broker.list_positions()
         prices = current_prices({p.symbol for p in positions}, market_data, now)
         result = check_invalidation_and_time_stops(
@@ -2245,6 +2247,7 @@ def intraday_eod_review(
     paper_ledger = PaperLedger(cfg.path(cfg.paper.ledger_path))
     shadow_ledger = IntradayLedger(cfg.path(cfg.intraday.shadow_ledger_path))
     llm_client = ClaudeCliClient.from_env()
+    broker = _intraday_execution_broker(cfg, ledger, market_data, now)
     try:
         result = run_eod_review(
             cfg,
@@ -2258,6 +2261,7 @@ def intraday_eod_review(
             as_of_ts,
             cycle,
             now,
+            broker=broker,
         )
     finally:
         paper_ledger.close()
