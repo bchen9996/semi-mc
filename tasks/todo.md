@@ -2601,7 +2601,19 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       after the close) move from 2026-10-06 back to 2026-10-05. Today's failed Trader
       calls predate fix (1), so they left no incidents: once eod-review is re-run,
       2026-10-06 would read clean in the readiness report though the Trader was down
-      from 13:20 CT.
+      from 13:20 CT. **Owner decision 2026-10-07: 2026-10-06 is in
+      `readiness.excluded_days`** (both configs), since the ledger shows the six
+      in-session cycles from 13:20 to 14:40 CT ran with no Trader call (every cycle on
+      every other day had one). Credits running out wasn't outside the project's
+      control, but with 2026-10-05 already failed, excluding the day and failing it give
+      the same result: the streak starts 2026-10-07, so the rule can pass after
+      2026-10-09's close at the earliest (3 clean days with an accepted trade proposal),
+      else after 2026-10-13's (5 without). Considered and not chosen: counting 10-06
+      clean (one day sooner); a readiness check for a Trader call on every in-session
+      cycle (same dates, a change to the 2026-09-29 rule); and excluding 2026-10-05 as
+      GitHub's outage, which would pass the rule at once on 09-30 to 10-02, days that ran
+      before the 2026-10-03 fill-sync, safe-exit and stop re-placement fixes Stage 2
+      depends on.
 - [x] **Late duplicate runs after the close (found and fixed 2026-10-06).** GitHub's own
       cron copy of `cycle` landed after the close every trading day since 2026-09-29
       (16:00-18:00 CT), and its copy of `carry` around 18:16 CT. In shadow mode the
@@ -2635,8 +2647,8 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       high it shows whether extra turns, not thinking, are the cause. (2) Cycles every 30
       minutes instead of 20 (the brief's figure): 12 cycles plus the open batch, down
       from 18 plus it. The real cadence is the cron-job.org `cycle` job, which the owner
-      changes to `*/30 9-14 * * 1-5` (docs/external_scheduler.md); the GitHub backup cron,
-      `schedule.cycle_interval_minutes`, `trader.md` and the readiness gap limit
+      changed to `*/30 9-14 * * 1-5` the same evening (docs/external_scheduler.md); the
+      GitHub backup cron, `schedule.cycle_interval_minutes`, `trader.md` and the readiness gap limit
       (`max_cycle_gap_minutes`, 30 -> 45, still one missed trigger) follow it. Shadow
       stops are now enforced within ~30 minutes. Expected: ~$0.35-0.40 a day, ~$8 a
       month. Check the first day's `model_calls` output tokens to confirm the cap took.
