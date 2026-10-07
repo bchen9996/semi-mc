@@ -209,7 +209,7 @@ def _money(value: float | None) -> str:
 def render_eod_markdown(report: EodReport) -> str:
     lines = [f"# S4 end-of-day report: {report.as_of.date()}", ""]
     no_reviewer = (
-        f"No Reviewer call today: {report.reviewer_note}." if report.reviewer_note else None
+        f"No Reviewer narration today: {report.reviewer_note}." if report.reviewer_note else None
     )
 
     lines.append("## Blotter")

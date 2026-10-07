@@ -64,6 +64,34 @@ class ClaudeCliError(RuntimeError):
         self.stderr = stderr
 
 
+_REASON_MAX_CHARS = 200
+
+
+def _failure_reason(stdout: str, stderr: str) -> str:
+    """What the CLI said about a failed call, on one line and at most
+    `_REASON_MAX_CHARS` long: the JSON result's text when stdout parses as one (where
+    `--output-format json` reports API errors such as an exhausted credit balance), else
+    the last non-empty line of stderr, then of stdout. Added 2026-10-06: the API account
+    ran out of credits mid-session and every failed call logged only "exited 1"."""
+    reason = ""
+    try:
+        payload = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        payload = None
+    if isinstance(payload, dict):
+        reason = str(payload.get("result") or payload.get("error") or "")
+    if not reason:
+        for text in (stderr, stdout):
+            lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+            if lines:
+                reason = lines[-1]
+                break
+    reason = " ".join(reason.split())
+    if len(reason) > _REASON_MAX_CHARS:
+        reason = reason[: _REASON_MAX_CHARS - 3] + "..."
+    return reason
+
+
 class DailyBudgetExhausted(RuntimeError):
     """Raised by :func:`invoke_role` before spending anything, once `check_budget`
     already reports the daily cap spent -- never silently swallowed."""
@@ -152,8 +180,9 @@ class ClaudeCliClient:
             ) from exc
 
         if result.returncode != 0:
+            reason = _failure_reason(result.stdout, result.stderr)
             raise ClaudeCliError(
-                f"{role} call exited {result.returncode}",
+                f"{role} call exited {result.returncode}" + (f": {reason}" if reason else ""),
                 stdout=result.stdout,
                 stderr=result.stderr,
             )
@@ -205,6 +234,10 @@ def invoke_role(
     checks the *actual* `cost_usd` afterward: over the cap records an incident but still
     returns the response -- a warning, not a crash, the same reasoning as
     `market_data.py`'s "a single missing quote must not crash a whole report."
+
+    A call that fails outright (:class:`ClaudeCliError`: a nonzero exit, an error
+    result, unparseable output, a timeout) is recorded as an error incident carrying the
+    CLI's own reason, then re-raised (added 2026-10-06).
     """
     over_budget = check_budget(ledger, as_of, config)
     if over_budget is not None:
@@ -219,16 +252,23 @@ def invoke_role(
     else:
         json_schema = reviewer_output_json_schema()
 
-    response = client.call(
-        role=role,
-        system_prompt_path=system_prompt_path,
-        model=model,
-        context_payload=context.payload,
-        max_budget_usd=config.budget.max_cost_usd_per_call,
-        max_turns=config.models.max_turns,
-        timeout_seconds=config.models.timeout_seconds,
-        json_schema=json_schema,
-    )
+    try:
+        response = client.call(
+            role=role,
+            system_prompt_path=system_prompt_path,
+            model=model,
+            context_payload=context.payload,
+            max_budget_usd=config.budget.max_cost_usd_per_call,
+            max_turns=config.models.max_turns,
+            timeout_seconds=config.models.timeout_seconds,
+            json_schema=json_schema,
+        )
+    except ClaudeCliError as exc:
+        # Recorded, then re-raised: the job still fails loudly (the brief's hard stop),
+        # and the reason reaches the ledger, the eod report and the readiness check
+        # instead of only a workflow log.
+        ledger.record_incident("error", str(exc))
+        raise
 
     cost = ModelCallCost(
         role=role,

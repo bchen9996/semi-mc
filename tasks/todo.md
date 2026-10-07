@@ -2578,6 +2578,40 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       ledger it flags only 2026-10-05, so the streak restarts from 2026-10-06; the
       earliest the Stage 2 rule can pass is after 2026-10-08's close (3 clean days with
       trades), unless the owner lists 2026-10-05 in `readiness.excluded_days`.
+- [x] **2026-10-06: the API account ran out of credits mid-session; three fixes
+      (owner-approved).** The last Trader call that worked was 13:02 CT. Every later
+      cycle failed at its Trader call (the monitor, stop sweeps and placebo still ran
+      first, so positions stayed guarded), and eod-review failed at the Reviewer call
+      before writing anything, so the day has no report. The logs said only "trader call
+      exited 1". S4's own spend is small ($3.95 over 120 calls since 2026-09-24, at most
+      $1.11 a day), so whatever drained the balance wasn't mainly S4. Fixes:
+      (1) `llm.py`: a failed call's error now carries the CLI's own reason (the JSON
+      result text, else the last stderr/stdout line, one line, at most 200 characters),
+      and `invoke_role` records it as an error incident before re-raising, so the job
+      still fails and alerts. (2) `run_eod_review` writes the mechanical report whenever
+      the Reviewer can't narrate: the daily budget is spent, the call fails (then the job
+      still fails, after writing it), or the response is malformed (that last case used
+      to skip the report too). No Reviewer call is recorded on a failure, so a re-run
+      once the account is fixed narrates the day in full. The report line is now "No
+      Reviewer narration today: ...". (3) `IntradayLedger.incidents_for` dates incidents
+      by trading session (new `semimc/trading_day.py`: New York date, 04:00 rollover,
+      now also behind the CLI's default `--as-of`), not by UTC date: a late job at 19:57
+      CT used to count against the next day. Applied to the real ledger, Monday's two
+      after-hours TSM errors (a late cycle and the late carry, both unable to price
+      after the close) move from 2026-10-06 back to 2026-10-05. Today's failed Trader
+      calls predate fix (1), so they left no incidents: once eod-review is re-run,
+      2026-10-06 would read clean in the readiness report though the Trader was down
+      from 13:20 CT.
+- [ ] **Open, found 2026-10-06: late duplicate runs after the close.** GitHub's own cron
+      copies of `cycle`/`carry` often land after the close. In shadow mode the market
+      check reads the shadow broker's clock, which is always open, so a late cycle runs
+      in full and logs "no current price" errors for any position held (Monday's two
+      TSM errors). On the real account (Stage 2) the clock is real, but `run_cycle`
+      records the "market is closed" decline as an error incident, so every late
+      duplicate cycle would fail the day. Candidate fixes: check market hours on the
+      real clock in shadow mode too, and treat a closed-market decline as routine, not
+      an error (or drop the GitHub `cycle`/`carry` crons now that cron-job.org triggers
+      them). Owner decision.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

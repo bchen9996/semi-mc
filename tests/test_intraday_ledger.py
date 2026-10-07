@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from semimc.intraday.ledger import IntradayLedger
+from semimc.trading_day import trading_day
 
 AS_OF = pd.Timestamp("2026-09-21")
 
@@ -510,13 +511,37 @@ def test_incidents_reused_from_the_same_shape_as_live_ledger(tmp_path):
 
 def test_incidents_for_filters_to_the_given_days_incidents(tmp_path):
     """`incidents` has no `as_of` column -- `incidents_for` (Phase 9b, `review.py`'s
-    process scorecard) date-filters by `created_at`'s own UTC calendar date instead."""
+    process scorecard) dates each row by the session its `created_at` falls in."""
     ledger = _ledger(tmp_path)
     ledger.record_incident("warning", "today's incident")
-    today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
 
-    assert len(ledger.incidents_for(today)) == 1
+    assert len(ledger.incidents_for(trading_day())) == 1
     assert ledger.incidents_for(pd.Timestamp("2000-01-01")) == []
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("created_at", "session"),
+    [
+        ("2026-10-06T00:57:53+00:00", "2026-10-05"),  # 19:57 Central: the late carry
+        ("2026-10-06T07:59:00+00:00", "2026-10-05"),  # 03:59 New York
+        ("2026-10-06T08:00:00+00:00", "2026-10-06"),  # 04:00 New York: pre-market
+    ],
+)
+def test_incidents_for_dates_an_evening_incident_to_its_own_session(
+    tmp_path, monkeypatch, created_at, session
+):
+    """2026-10-05: GitHub's late copy of carry ran at 19:57 Central, already the next
+    day in UTC, and its error used to count against that next day."""
+    from semimc.intraday import ledger as ledger_module
+
+    monkeypatch.setattr(ledger_module, "_now", lambda: created_at)
+    ledger = _ledger(tmp_path)
+    ledger.record_incident("error", "TSM: carry could not price a close -- left open")
+
+    assert len(ledger.incidents_for(pd.Timestamp(session))) == 1
+    other = pd.Timestamp(session) + pd.Timedelta(days=1)
+    assert ledger.incidents_for(other) == []
     ledger.close()
 
 
