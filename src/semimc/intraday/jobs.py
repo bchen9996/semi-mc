@@ -423,7 +423,9 @@ def mark_broker_to_market(
 # "market is closed" is permanently, unconditionally true for preflight specifically --
 # it runs on its own fixed ~06:45 Central schedule, before the market opens (~08:30) by
 # design, every single day regardless of anything else -- so it never carries information
-# worth a daily failure email and is always a routine note, not a failure.
+# worth a daily failure email and is always a routine note, not a failure. `run_cycle`
+# treats it as routine too: a cycle triggered outside market hours (GitHub's late copy,
+# a holiday) declining is the gate working, not a fault.
 _ALWAYS_ROUTINE_PRETRADE_NOTE = "market is closed"
 
 
@@ -1075,8 +1077,14 @@ def run_cycle(
         shadow=intraday.shadow_mode,
     )
     if pretrade_failures:
+        # A closed market is an info line, not an error (added 2026-10-06): GitHub's own
+        # copy of `cycle` lands after the close every day, and a decline there must not
+        # fail the day's readiness. Every other finding stays an error.
         for failure in pretrade_failures:
-            ledger.record_incident("error", failure)
+            if failure == _ALWAYS_ROUTINE_PRETRADE_NOTE:
+                ledger.record_incident("info", f"{cycle} skipped: market is closed")
+            else:
+                ledger.record_incident("error", failure)
         result.skipped_reason = "; ".join(pretrade_failures)
         return result
 
