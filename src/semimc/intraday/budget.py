@@ -35,6 +35,7 @@ class ModelCallCost:
     input_tokens: int
     output_tokens: int
     cost_usd: float
+    num_turns: int | None = None
 
 
 def record_call_cost(
@@ -49,6 +50,7 @@ def record_call_cost(
         input_tokens=cost.input_tokens,
         output_tokens=cost.output_tokens,
         cost_usd=cost.cost_usd,
+        num_turns=cost.num_turns,
     )
 
 

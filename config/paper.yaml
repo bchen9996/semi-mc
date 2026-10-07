@@ -236,7 +236,7 @@ intraday:
     spread_feed: delayed_sip   # consolidated quote, 15 min old on the free plan; "sip" = real time (paid)
   schedule:
     timezone: America/Chicago
-    cycle_interval_minutes: 20
+    cycle_interval_minutes: 30
   options:
     enabled: false   # both gates unresolved -- see docs/alpaca_notes.md
     shadow_pricing: false   # Stage 4's own switch -- proposed, priced, logged, never traded
@@ -255,10 +255,11 @@ intraday:
     cost_model_extra_bps: 5.0
   models:
     researcher: sonnet
-    trader: haiku      # cheapest model -- ~20 calls/day, vs. 2/day for researcher/reviewer
+    trader: haiku      # cheapest model -- ~13 calls/day, vs. 2/day for researcher/reviewer
     reviewer: sonnet
     max_turns: 6
     timeout_seconds: 300
+    trader_max_thinking_tokens: 1500   # 0 = thinking off (config.py)
   research:
     news_lookback_hours: 16.0
     preopen_lookback_hours: 2.0
@@ -277,7 +278,7 @@ intraday:
     evidence_min_trades: 20
     review_after_days: 30   # placeholder -- brief gives no number, see config.py's caveat
   readiness:   # Stage 1 -> 2 "clean trading day" rule, owner decision 2026-09-29 (config.py)
-    max_cycle_gap_minutes: 30.0
+    max_cycle_gap_minutes: 45.0
     open_batch_grace_minutes: 10.0
     session_edge_minutes: 30.0
     clean_days_required: 3     # ... if the streak includes accepted proposals

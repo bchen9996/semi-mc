@@ -22,6 +22,7 @@ call rather than duplicating the daily-cap logic here.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -106,20 +107,32 @@ class ModelResponse:
     input_tokens: int
     output_tokens: int
     is_error: bool
+    # Model round trips in the call. More than one means it used turns beyond the
+    # answer, which is where output tokens go if not into thinking.
+    num_turns: int = 0
 
 
 def _run_subprocess(
-    argv: list[str], stdin_text: str, timeout_seconds: int
+    argv: list[str], stdin_text: str, timeout_seconds: int, env: dict[str, str]
 ) -> subprocess.CompletedProcess[str]:
+    """`env` holds only the variables to add for this call, on top of the parent's."""
     return subprocess.run(  # noqa: S603
-        argv, input=stdin_text, capture_output=True, text=True, timeout=timeout_seconds, check=False
+        argv,
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+        env={**os.environ, **env} if env else None,
     )
 
 
 class ClaudeCliClient:
     def __init__(
         self,
-        run: Callable[[list[str], str, int], subprocess.CompletedProcess[str]] = _run_subprocess,
+        run: Callable[
+            [list[str], str, int, dict[str, str]], subprocess.CompletedProcess[str]
+        ] = _run_subprocess,
     ) -> None:
         self._run = run
 
@@ -141,6 +154,7 @@ class ClaudeCliClient:
         max_turns: int,
         timeout_seconds: int,
         json_schema: dict | None = None,
+        max_thinking_tokens: int | None = None,
     ) -> ModelResponse:
         """One fresh, bounded `claude -p --bare` call. No `--allowedTools` entry for any
         role: `--permission-mode dontAsk` plus `--permission-prompts none` denies every
@@ -148,6 +162,10 @@ class ClaudeCliClient:
         this call needs -- "the Trader needs no broker tools at all," generalized to
         Researcher/Reviewer too, whose own read-only tool needs don't exist yet either
         (`tasks/todo.md`'s S4 prerequisite 4).
+
+        `max_thinking_tokens` caps extended thinking through Claude Code's own
+        `MAX_THINKING_TOKENS` environment variable (0 turns it off); `None` leaves the
+        CLI's default.
         """
         argv = [
             "claude",
@@ -171,9 +189,12 @@ class ClaudeCliClient:
         ]
         if json_schema is not None:
             argv += ["--json-schema", json.dumps(json_schema)]
+        env = {}
+        if max_thinking_tokens is not None:
+            env["MAX_THINKING_TOKENS"] = str(max_thinking_tokens)
 
         try:
-            result = self._run(argv, json.dumps(context_payload), timeout_seconds)
+            result = self._run(argv, json.dumps(context_payload), timeout_seconds, env)
         except subprocess.TimeoutExpired as exc:
             raise ClaudeCliError(
                 f"{role} call exceeded its {timeout_seconds}s timeout", stderr=str(exc)
@@ -211,6 +232,7 @@ class ClaudeCliClient:
             input_tokens=int(usage.get("input_tokens", 0)),
             output_tokens=int(usage.get("output_tokens", 0)),
             is_error=bool(payload.get("is_error", False)),
+            num_turns=int(payload.get("num_turns") or 0),
         )
 
 
@@ -262,6 +284,9 @@ def invoke_role(
             max_turns=config.models.max_turns,
             timeout_seconds=config.models.timeout_seconds,
             json_schema=json_schema,
+            max_thinking_tokens=(
+                config.models.trader_max_thinking_tokens if role == "trader" else None
+            ),
         )
     except ClaudeCliError as exc:
         # Recorded, then re-raised: the job still fails loudly (the brief's hard stop),
@@ -277,6 +302,7 @@ def invoke_role(
         input_tokens=response.input_tokens,
         output_tokens=response.output_tokens,
         cost_usd=response.cost_usd,
+        num_turns=response.num_turns,
     )
     record_call_cost(ledger, as_of, cycle, cost)
 

@@ -41,7 +41,7 @@ name: Intraday trading (S4)
 # the repo is private, so Actions minutes are metered, and the loop was ~385 of the
 # schedule's ~500 minutes a day. Every `cycle` runs the same invalidation/time-stop check
 # (`intraday/jobs.py::run_cycle`), so with cycles triggered on time externally
-# (docs/external_scheduler.md) shadow stops are enforced within ~20 minutes -- which
+# (docs/external_scheduler.md) shadow stops are enforced within ~30 minutes -- which
 # makes Stage 1's shadow stop-outs slightly worse than live ones, a conservative bias --
 # and from Stage 2 on real stop orders rest at Alpaca regardless of any job.
 #
@@ -78,7 +78,7 @@ name: Intraday trading (S4)
 #
 # `cycle`/`monitor` pass a per-invocation `--cycle` label derived from the current UTC
 # time (not a fixed literal) -- intraday_client_order_id's idempotency key includes this
-# label, so two different 20-minute (or 5-minute) runs on the same day must get distinct
+# label, so two different 30-minute (or 5-minute) runs on the same day must get distinct
 # labels, or the second run's orders would look like duplicate resubmissions of the
 # first's and never actually submit.
 #
@@ -139,15 +139,16 @@ name: Intraday trading (S4)
     # monitor: no cron (owner decision 2026-09-27, to keep private-repo Actions minutes
     # down -- each late firing started a loop of up to 5.5 hours). Every `cycle` already
     # runs the same invalidation/time-stop check, so shadow stops are enforced within
-    # ~20 minutes; from Stage 2 on, real stop orders rest at Alpaca regardless. The job
+    # ~30 minutes; from Stage 2 on, real stop orders rest at Alpaca regardless. The job
     # stays available on demand via workflow_dispatch (job: monitor).
-    # cycle: every 20 minutes, ~08:35-14:50 Central. Upper bound widened to hour 20 (not
-    # 19) -- found 2026-09-26: under CST (after 2026-11-01's DST change), a 13-19 UTC range
+    # cycle: every 30 minutes (20 until 2026-10-06, cut to save model spend), ~08:30-14:30
+    # Central. Upper bound widened to hour 20 (not 19) -- found 2026-09-26: under CST
+    # (after 2026-11-01's DST change), a 13-19 UTC range
     # maps to Central 07:00-13:55, cutting off ~55 minutes before the real ~14:50 close.
     # 13-20 covers Central 07:00-14:55 under CST and 08:00-15:55 under CDT -- the extra
     # hour past close under CDT is harmless (pretrade declines once the market's shut,
     # same as every other job here tolerates being triggered outside its real window).
-    - cron: "*/20 13-20 * * 1-5"
+    - cron: "*/30 13-20 * * 1-5"
     # carry: ~14:45 Central.
     - cron: "45 19 * * 1-5"
     # eod-review: ~15:15 Central.
@@ -442,7 +443,7 @@ jobs:
           exit 1
 
   cycle:
-    if: github.event.schedule == '*/20 13-20 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'cycle')
+    if: github.event.schedule == '*/30 13-20 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'cycle')
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write

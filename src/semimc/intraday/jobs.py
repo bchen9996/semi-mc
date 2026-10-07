@@ -286,7 +286,7 @@ def _protect_unguarded_positions(
 
     Every S4 stop is a `day` order, so Alpaca expires it at the close: a position carried
     overnight would otherwise go through the next day with no stop at the broker, guarded
-    only by the cycle's check every 20 minutes. This runs in every cycle, the 08:32 open
+    only by the cycle's check every 30 minutes. This runs in every cycle, the 08:32 open
     batch first, so a carried position is covered within minutes of the open (a stop
     only works in regular hours, so nothing guards an overnight gap). It also catches
     any other way shares end up without a stop: an exit held back while a cancel

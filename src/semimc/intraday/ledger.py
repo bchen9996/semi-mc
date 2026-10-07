@@ -4,7 +4,7 @@ logs, and headlines already seen (``BRIEF_INTRADAY.md``).
 
 Deliberately a **separate file** from ``live/ledger.py``'s ``ledger/paper.sqlite3``, and a
 separate class rather than new tables bolted onto :class:`~semimc.live.ledger.Ledger`: S4
-writes roughly every 20 minutes all trading day, versus s0/s3's monthly-decide-plus-
+writes roughly every 30 minutes all trading day, versus s0/s3's monthly-decide-plus-
 half-hourly-mark cadence, and sharing one file would mean every S4 cycle's git commit
 contends with s0/s3's on the exact same file -- the push-race class of bug Phase 8 of
 paper trading already had to fix once, at a much lower write frequency than S4's. A
@@ -132,7 +132,8 @@ CREATE TABLE IF NOT EXISTS model_calls (
     input_tokens INTEGER NOT NULL,
     output_tokens INTEGER NOT NULL,
     cost_usd REAL NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    num_turns INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS headlines_seen (
@@ -209,6 +210,7 @@ _OPEN_ORDER_STATUSES = ("new", "accepted", "partially_filled")
 _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "proposals": [("playbook_version", "INTEGER"), ("options_pricing_json", "TEXT")],
     "orders": [("exit_reason", "TEXT")],
+    "model_calls": [("num_turns", "INTEGER")],
 }
 
 
@@ -800,13 +802,14 @@ class IntradayLedger:
         input_tokens: int,
         output_tokens: int,
         cost_usd: float,
+        num_turns: int | None = None,
     ) -> int:
         cursor = self._conn.execute(
             """
             INSERT INTO model_calls
                 (as_of, cycle, role, model, prompt_hash, input_tokens, output_tokens,
-                 cost_usd, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 cost_usd, created_at, num_turns)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(pd.Timestamp(as_of)),
@@ -818,6 +821,7 @@ class IntradayLedger:
                 output_tokens,
                 cost_usd,
                 _now(),
+                num_turns,
             ),
         )
         self._conn.commit()

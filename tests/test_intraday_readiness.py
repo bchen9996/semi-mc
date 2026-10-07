@@ -230,7 +230,7 @@ def _at(day: pd.Timestamp, hhmm: str) -> str:
 
 def _clean_day(ledger, placebo, day, reports, pinned_clock, *, accepted=0, holds=0, skip=()):
     """Everything a clean day needs, timed like the external schedule: research at 08:30
-    ET, the open batch at 09:33 ET, cycles every 20 min from 10:00 to 15:40 ET."""
+    ET, the open batch at 09:33 ET, cycles every 30 min from 10:00 to 15:30 ET."""
     import datetime as dt
 
     if "research" not in skip:
@@ -239,7 +239,7 @@ def _clean_day(ledger, placebo, day, reports, pinned_clock, *, accepted=0, holds
     if "open_batch" not in skip:
         pinned_clock(_at(day, "09:33"))
         ledger.record_model_call(day, "open_batch", "trader", "haiku", "h", 1, 1, 0.01)
-    checks = ["09:33"] + [f"{h:02d}:{m:02d}" for h in range(10, 16) for m in (0, 20, 40)]
+    checks = ["09:33"] + [f"{h:02d}:{m:02d}" for h in range(10, 16) for m in (0, 30)]
     for hhmm in checks:
         if hhmm in skip:
             continue
@@ -280,8 +280,8 @@ def test_an_on_time_day_is_clean(two_ledgers, pinned_clock):
         (("open_batch",), "no open-batch Trader call"),
         (("placebo",), "the placebo did not run"),
         (("eod",), "no eod report filed under this date"),
-        (("12:00", "12:20"), "a 60-min gap between cycle checks"),
-        (tuple(f"15:{m:02d}" for m in (0, 20, 40)), "early in the afternoon"),
+        (("12:00",), "a 60-min gap between cycle checks"),
+        (("15:00", "15:30"), "early in the afternoon"),
     ],
 )
 def test_each_missing_piece_fails_the_day_with_its_reason(
@@ -303,6 +303,20 @@ def test_late_research_and_a_late_open_batch_fail_the_day(two_ledgers, pinned_cl
     [day] = stage_readiness(ledger, placebo, IntradayConfig(), reports, MON, MON).days
     assert any("after the open" in r for r in day.clean_failures)
     assert any("min after the open" in r for r in day.clean_failures)
+
+
+def test_a_few_minutes_of_runner_jitter_on_a_30_minute_schedule_is_not_a_gap(
+    two_ledgers, pinned_clock
+):
+    """Cycles every 30 minutes since 2026-10-06; a trigger that starts 3 minutes late
+    leaves a 33-minute gap, under the 45-minute limit."""
+    import datetime as dt
+
+    ledger, placebo, reports = two_ledgers
+    _clean_day(ledger, placebo, MON, reports, pinned_clock, skip=("12:00",))
+    ledger.record_monitor_check(MON, "cycle", dt.datetime.fromisoformat(_at(MON, "12:03")))
+    [day] = stage_readiness(ledger, placebo, IntradayConfig(), reports, MON, MON).days
+    assert day.clean, day.clean_failures
 
 
 def test_an_evening_check_outside_the_session_is_not_a_gap(two_ledgers, pinned_clock):

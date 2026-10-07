@@ -217,7 +217,7 @@ def _sequenced_llm_client(*stdouts: str) -> ClaudeCliClient:
     called more times than responses were supplied."""
     remaining = list(stdouts)
 
-    def run(argv, stdin_text, timeout_seconds):
+    def run(argv, stdin_text, timeout_seconds, env):
         stdout = remaining.pop(0) if len(remaining) > 1 else remaining[0]
         return _completed(stdout)
 
@@ -230,7 +230,7 @@ def _recording_llm_client(stdout: str) -> tuple[list[dict], ClaudeCliClient]:
     output, not just that `run_cycle` didn't crash."""
     calls: list[dict] = []
 
-    def run(argv, stdin_text, timeout_seconds):
+    def run(argv, stdin_text, timeout_seconds, env):
         calls.append({"argv": argv, "stdin": stdin_text})
         return _completed(stdout)
 
@@ -2571,7 +2571,7 @@ def test_run_eod_review_writes_its_report_when_the_reviewer_call_fails(config, t
     reflection_id = ledger.reflections_for(AS_OF)[0]["id"]
     paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
     out_of_credit = ClaudeCliClient(
-        run=lambda argv, stdin_text, timeout_seconds: subprocess.CompletedProcess(
+        run=lambda argv, stdin_text, timeout_seconds, env: subprocess.CompletedProcess(
             args=[],
             returncode=1,
             stdout=_result_json(is_error=True, result="Credit balance is too low"),
