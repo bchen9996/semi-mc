@@ -460,7 +460,9 @@ class IntradayRiskConfig(_Base):
 
 class IntradayScheduleConfig(_Base):
     timezone: str = "America/Chicago"
-    cycle_interval_minutes: int = Field(20, gt=0)
+    # Documents the external schedule (docs/external_scheduler.md), which sets the real
+    # cadence. 20 until 2026-10-06, when the owner moved to 30 to cut model spend.
+    cycle_interval_minutes: int = Field(30, gt=0)
 
 
 class IntradayOptionsConfig(_Base):
@@ -509,7 +511,7 @@ class IntradayModelsConfig(_Base):
     (`intraday/llm.py`). Plain `str`, not a `Literal`, for the model fields -- Claude Code
     resolves aliases like "sonnet"/"haiku" to whatever the latest model in that family is,
     and a `Literal` here would need a code change every time a new model ships. `trader`
-    defaults to the cheapest model (`~20 calls/day`); `researcher`/`reviewer` default to a
+    defaults to the cheapest model (`~13 calls/day`); `researcher`/`reviewer` default to a
     stronger model since they run only twice a day -- matching the cost estimate already
     given for S4 (BRIEF_INTRADAY.md's "Agent runtime and cost control": "pick models per
     role accordingly").
@@ -522,6 +524,22 @@ class IntradayModelsConfig(_Base):
     # A wall-clock backstop alongside --max-turns/--max-budget-usd, since an unattended
     # GH Actions job has no one to notice a hung call.
     timeout_seconds: int = Field(300, gt=0)
+    # The Trader's extended-thinking budget, passed as `MAX_THINKING_TOKENS` to its
+    # `claude` call; `None` leaves Claude Code's default, 0 turns thinking off. Added
+    # 2026-10-06 (owner decision): Claude Code thinks by default and bills it as output,
+    # and once the Trader got session data (2026-10-02) it averaged ~6,400 output tokens
+    # a call for an answer of a few hundred -- about $0.80 of each day's ~$1. Before
+    # then it ran at ~1,800. Trader only: the "sonnet" alias the other roles use resolves
+    # to Sonnet 5.5 on the Anthropic API, which ignores this.
+    trader_max_thinking_tokens: int | None = Field(1500, ge=0)
+
+    @field_validator("trader_max_thinking_tokens")
+    @classmethod
+    def _api_minimum_thinking_budget(cls, value: int | None) -> int | None:
+        # The API's smallest thinking budget is 1,024 tokens.
+        if value is not None and 0 < value < 1024:
+            raise ValueError("must be 0 (thinking off) or at least 1024")
+        return value
 
 
 class IntradayResearchConfig(_Base):
@@ -596,14 +614,15 @@ class IntradayReadinessConfig(_Base):
     proposals, else after `clean_days_if_sparse`. Stage 2 is still paper money, so the
     shadow stage's job is proving the plumbing, not the strategy (tasks/todo.md).
 
-    The minute thresholds follow the schedule, not research: cycles run every 20 minutes,
-    so a 30-minute gap means one missed trigger; the open batch fires at 08:32 CT, so 10
+    The minute thresholds follow the schedule, not research: cycles run every 30 minutes
+    (20 until 2026-10-06), so a gap over 45 minutes means one missed trigger, while
+    runner jitter of a few minutes passes; the open batch fires at 08:32 CT, so 10
     minutes of grace covers runner setup. `excluded_days` is the owner's written record of
     days that neither count nor reset the streak -- market holidays (this module has no
     market calendar) and outages the owner judged outside the project's control.
     """
 
-    max_cycle_gap_minutes: float = Field(30.0, gt=0)
+    max_cycle_gap_minutes: float = Field(45.0, gt=0)
     open_batch_grace_minutes: float = Field(10.0, ge=0)
     session_edge_minutes: float = Field(30.0, ge=0)
     clean_days_required: int = Field(3, ge=1)
@@ -648,7 +667,7 @@ class IntradayConfig(_Base):
     # Separate sentinel from paper.kill_switch_path -- S4 can be halted independently of
     # s0/s3 and vice versa.
     kill_switch_path: str = "runs/intraday/KILL_SWITCH"
-    # Separate ledger file from paper.ledger_path: S4 writes roughly every 20 minutes all
+    # Separate ledger file from paper.ledger_path: S4 writes roughly every 30 minutes all
     # day, versus s0/s3's monthly-decide-plus-half-hourly-mark cadence. Sharing one file
     # would mean every S4 cycle's git commit contends with s0/s3's commits on the exact
     # same file -- the push-race class of bug Phase 8 already had to fix once, at a much

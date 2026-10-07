@@ -2622,6 +2622,24 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       GitHub crons stay as a fallback. Market holidays now skip their cycles too (they
       used to run full cycles in shadow), so a holiday still belongs in
       `readiness.excluded_days`.
+- [x] **Model spend cut (owner decision 2026-10-06).** Stage 1 ran about $1 a trading day
+      (ledger, matching the Console), $3.95 in total from 2026-09-24. The Trader was ~85%
+      of it, and its cost per call roughly tripled on 2026-10-02 (from ~$0.017 to
+      ~$0.044) when it got session data: output went from ~1,800 to ~6,400 tokens a call
+      while its saved answer stayed a few hundred tokens, so most of the bill was extended
+      thinking, which Claude Code turns on by default and bills as output. Two changes:
+      (1) `intraday.models.trader_max_thinking_tokens: 1500`, passed as
+      `MAX_THINKING_TOKENS` to the Trader's `claude` call only (the "sonnet" alias is
+      Sonnet 5.5 on the API, which ignores it; 0 turns thinking off, and the API minimum
+      is 1,024). Each `model_calls` row now also records `num_turns`, so if output stays
+      high it shows whether extra turns, not thinking, are the cause. (2) Cycles every 30
+      minutes instead of 20 (the brief's figure): 12 cycles plus the open batch, down
+      from 18 plus it. The real cadence is the cron-job.org `cycle` job, which the owner
+      changes to `*/30 9-14 * * 1-5` (docs/external_scheduler.md); the GitHub backup cron,
+      `schedule.cycle_interval_minutes`, `trader.md` and the readiness gap limit
+      (`max_cycle_gap_minutes`, 30 -> 45, still one missed trigger) follow it. Shadow
+      stops are now enforced within ~30 minutes. Expected: ~$0.35-0.40 a day, ~$8 a
+      month. Check the first day's `model_calls` output tokens to confirm the cap took.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

@@ -54,7 +54,7 @@ def test_intraday_section_matches_the_briefs_defaults_table():
     assert cfg.intraday.risk.min_edge_multiple == pytest.approx(2.0)
     assert cfg.intraday.risk.equity_cost_bps_per_side == pytest.approx(8.0)
     assert cfg.intraday.schedule.timezone == "America/Chicago"
-    assert cfg.intraday.schedule.cycle_interval_minutes == 20
+    assert cfg.intraday.schedule.cycle_interval_minutes == 30  # brief: 20; owner, 2026-10-06
     assert cfg.intraday.options.enabled is False
     assert cfg.intraday.options.shadow_pricing is False
     assert cfg.intraday.options.premium_at_risk_pct_per_position == pytest.approx(0.005)
@@ -67,6 +67,8 @@ def test_intraday_section_matches_the_briefs_defaults_table():
     assert cfg.intraday.models.reviewer == "sonnet"
     assert cfg.intraday.models.max_turns == 6
     assert cfg.intraday.models.timeout_seconds == 300
+    assert cfg.intraday.models.trader_max_thinking_tokens == 1500
+    assert cfg.intraday.readiness.max_cycle_gap_minutes == pytest.approx(45.0)
 
 
 def test_intraday_ledger_and_kill_switch_paths_are_separate_from_paper():
@@ -111,3 +113,18 @@ def test_paper_yaml_loads_intraday_at_rollout_stage_1():
     assert cfg.intraday.options.enabled is False
     assert cfg.intraday.options.shadow_pricing is False
     assert cfg.intraday.shadow_mode is True
+    assert cfg.intraday.models.trader_max_thinking_tokens == 1500
+    assert cfg.intraday.schedule.cycle_interval_minutes == 30
+    assert cfg.intraday.readiness.max_cycle_gap_minutes == pytest.approx(45.0)
+
+
+@pytest.mark.parametrize("value", ["0", "1024", "null"])
+def test_trader_thinking_cap_takes_off_the_api_minimum_or_none(value):
+    cfg = load_config(overrides=[f"intraday.models.trader_max_thinking_tokens={value}"])
+    expected = None if value == "null" else int(value)
+    assert cfg.intraday.models.trader_max_thinking_tokens == expected
+
+
+def test_trader_thinking_cap_below_the_api_minimum_is_rejected():
+    with pytest.raises(ValidationError, match="at least 1024"):
+        load_config(overrides=["intraday.models.trader_max_thinking_tokens=500"])

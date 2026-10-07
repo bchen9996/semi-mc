@@ -30,13 +30,13 @@ A rough estimate of what the schedule below uses, per trading day:
 
 | what | minutes/day |
 |---|---|
-| `cycle`, 18 runs at ~3 min each (checkout, `uv sync`, claude CLI install, run) | ~55 |
+| `cycle`, 12 runs at ~3 min each (checkout, `uv sync`, claude CLI install, run) | ~36 |
 | other intraday jobs (preflight, research, preopen, open-batch, carry, eod-review) | ~20 |
 | paper `decide-and-execute`, `mark` (x2 sleeves every 30 min), `report` | ~45 |
-| **total** | **~120** |
+| **total** | **~100** |
 
-That's about **2,500 minutes a month**: a few dollars over GitHub Free's allowance, inside
-Pro's. The `monitor` loop would add ~385 minutes a day (~8,000 a month), which is why it
+That's about **2,100 minutes a month**: around GitHub Free's allowance, inside Pro's.
+(Cycles ran every 20 minutes until 2026-10-06, about 2,500 minutes a month.) The `monitor` loop would add ~385 minutes a day (~8,000 a month), which is why it
 has no schedule (owner decision 2026-09-27; see "The monitor loop" at the end). Late
 fallback-cron runs add a little on top.
 
@@ -101,7 +101,7 @@ uses the same request settings:
 | `research` | 07:30 | `30 7 * * 1-5` | runs once per day |
 | `preopen` | 08:15 | `15 8 * * 1-5` | |
 | `open-batch` | 08:32 | `32 8 * * 1-5` | 2 min after the open, so pretrade sees the market open; runs once per day |
-| `cycle` | every 20 min, 09:00-14:40 | `*/20 9-14 * * 1-5` | the open-batch covers 08:30 |
+| `cycle` | every 30 min, 09:00-14:30 | `*/30 9-14 * * 1-5` | the open-batch covers 08:30; every 20 min until 2026-10-06 |
 | `carry` | 14:45 | `45 14 * * 1-5` | |
 | `eod-review` | 15:15 | `15 15 * * 1-5` | one Reviewer call per day |
 | `weekly-review` | Fri 15:45 | `45 15 * * 5` | |
@@ -126,7 +126,7 @@ market, the same as it does today.
   table's times, each running one job.
 - **After the close:** run the readiness report (`tasks/todo.md` has the exact command). Its
   "first activity (UTC)" column should read about 11:45 (06:45 CT), not 17:29. The monitor
-  column should show checks about 20 minutes apart (each cycle records one).
+  column should show checks about 30 minutes apart (each cycle records one).
 - **On cron-job.org:** each job's execution history should show HTTP 204. Anything else is
   a failed trigger.
 
@@ -144,13 +144,13 @@ fallback. `monitor` already has no cron.
 
 `monitor` enforces invalidation and time stops every 5 minutes for up to 5.5 hours per run.
 `cycle` already runs the same check at the start of every cycle (`intraday/jobs.py::run_cycle`),
-so with reliable 20-minute cycles the loop only adds 5-minute granularity between cycles,
+so with reliable 30-minute cycles the loop only adds 5-minute granularity between cycles,
 and only for **shadow** positions: from Stage 2 on, real stop-loss orders rest at Alpaca and
 trigger regardless of any job.
 
 **Chosen 2026-09-27: rely on `cycle`'s check; `monitor` has no schedule.** Shadow stops are
-enforced within about 20 minutes. A shadow position can therefore overshoot its stop for up
-to ~20 minutes, making Stage 1's stopped-out trades slightly worse than live ones would be:
+enforced within about 30 minutes. A shadow position can therefore overshoot its stop for up
+to ~30 minutes, making Stage 1's stopped-out trades slightly worse than live ones would be:
 a conservative bias when deciding on promotion. Zero extra minutes.
 
 The alternatives, if that changes:

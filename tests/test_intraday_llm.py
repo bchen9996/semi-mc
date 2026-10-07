@@ -44,8 +44,8 @@ def _result_json(**overrides) -> str:
 def _recording_run(stdout: str = "", returncode: int = 0):
     calls: list[dict] = []
 
-    def run(argv, stdin_text, timeout_seconds):
-        calls.append({"argv": argv, "stdin": stdin_text, "timeout": timeout_seconds})
+    def run(argv, stdin_text, timeout_seconds, env):
+        calls.append({"argv": argv, "stdin": stdin_text, "timeout": timeout_seconds, "env": env})
         return _completed(stdout, returncode)
 
     return calls, run
@@ -231,7 +231,7 @@ def test_call_raises_on_unparseable_stdout():
 
 
 def test_call_raises_on_timeout():
-    def run(argv, stdin_text, timeout_seconds):
+    def run(argv, stdin_text, timeout_seconds, env):
         raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout_seconds)
 
     client = ClaudeCliClient(run=run)
@@ -387,7 +387,7 @@ def test_invoke_role_uses_the_reviewer_json_schema_for_the_reviewer_role(tmp_pat
 
 
 def _failed_call_message(stdout: str = "", stderr: str = "") -> str:
-    def run(argv, stdin_text, timeout_seconds):
+    def run(argv, stdin_text, timeout_seconds, env):
         return subprocess.CompletedProcess(args=[], returncode=1, stdout=stdout, stderr=stderr)
 
     with pytest.raises(ClaudeCliError) as raised:
@@ -450,3 +450,71 @@ def test_invoke_role_records_a_failed_call_as_an_error_incident_and_re_raises(tm
     ]
     assert ledger.model_calls_for(AS_OF) == []  # nothing spent is recorded
     ledger.close()
+
+
+# -- the Trader's thinking cap and turn count (2026-10-06) ---------------------------------
+
+
+def _invoke(role, tmp_path, config=None, stdout=None):
+    ledger = _ledger(tmp_path)
+    calls, run = _recording_run(stdout or _result_json())
+    invoke_role(
+        role,
+        as_of=AS_OF,
+        cycle="cycle_1",
+        config=config or IntradayConfig(),
+        ledger=ledger,
+        client=ClaudeCliClient(run=run),
+        context=build_context(role, AS_OF, "cycle_1", sections={"a": 1}),
+    )
+    return calls, ledger
+
+
+def test_the_trader_call_carries_the_configured_thinking_cap(tmp_path):
+    """Thinking was about $0.80 of each day's ~$1 of model spend."""
+    calls, ledger = _invoke("trader", tmp_path)
+    assert calls[0]["env"] == {"MAX_THINKING_TOKENS": "1500"}
+    ledger.close()
+
+
+@pytest.mark.parametrize("role", ["researcher", "reviewer"])
+def test_the_other_roles_get_no_thinking_cap(tmp_path, role):
+    calls, ledger = _invoke(role, tmp_path)
+    assert calls[0]["env"] == {}
+    ledger.close()
+
+
+def test_no_cap_configured_leaves_the_cli_default(tmp_path):
+    config = IntradayConfig()
+    config = config.model_copy(
+        update={"models": config.models.model_copy(update={"trader_max_thinking_tokens": None})}
+    )
+    calls, ledger = _invoke("trader", tmp_path, config=config)
+    assert calls[0]["env"] == {}
+    ledger.close()
+
+
+def test_a_call_records_its_turn_count(tmp_path):
+    _, ledger = _invoke("trader", tmp_path, stdout=_result_json(num_turns=3))
+    assert [row["num_turns"] for row in ledger.model_calls_for(AS_OF)] == [3]
+    ledger.close()
+
+
+def test_the_subprocess_gets_the_parents_environment_plus_the_call_s_variables(monkeypatch):
+    from semimc.intraday import llm
+
+    seen = {}
+
+    def fake_subprocess_run(argv, **kwargs):
+        seen.update(kwargs)
+        return _completed(_result_json())
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(llm.subprocess, "run", fake_subprocess_run)
+
+    llm._run_subprocess(["claude"], "{}", 10, {"MAX_THINKING_TOKENS": "1500"})
+    assert seen["env"]["MAX_THINKING_TOKENS"] == "1500"
+    assert seen["env"]["ANTHROPIC_API_KEY"] == "test-key"
+
+    llm._run_subprocess(["claude"], "{}", 10, {})
+    assert seen["env"] is None  # inherit unchanged

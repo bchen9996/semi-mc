@@ -128,7 +128,7 @@ def fake_intraday_env(monkeypatch):
     market_data = _FakeMarketData()
     news_client = _FakeNewsClient()
 
-    def fake_run(argv, stdin_text, timeout_seconds):
+    def fake_run(argv, stdin_text, timeout_seconds, env):
         return subprocess.CompletedProcess(args=[], returncode=0, stdout=_result_json(), stderr="")
 
     monkeypatch.setattr(
@@ -171,7 +171,7 @@ def test_research_declines_cleanly_when_trading_is_disabled(tmp_path, fake_intra
 
 
 def test_research_runs_cleanly_and_records_a_brief(tmp_path, fake_intraday_env, monkeypatch):
-    def fake_run(argv, stdin_text, timeout_seconds):
+    def fake_run(argv, stdin_text, timeout_seconds, env):
         return subprocess.CompletedProcess(
             args=[],
             returncode=0,
@@ -277,7 +277,7 @@ def fake_intraday_shadow_env(monkeypatch):
     news_client = _FakeNewsClient()
     real_account = _ClockOnlyBroker()
 
-    def fake_run(argv, stdin_text, timeout_seconds):
+    def fake_run(argv, stdin_text, timeout_seconds, env):
         return subprocess.CompletedProcess(args=[], returncode=0, stdout=_result_json(), stderr="")
 
     monkeypatch.setattr(
@@ -341,7 +341,7 @@ def test_cycle_in_shadow_mode_declines_on_the_real_clock_after_the_close(
     _market_data, _news_client, real_account = fake_intraday_shadow_env
     real_account.is_open = False
 
-    def trader_must_not_be_called(argv, stdin_text, timeout_seconds):
+    def trader_must_not_be_called(argv, stdin_text, timeout_seconds, env):
         raise AssertionError("no Trader call after the close")
 
     monkeypatch.setattr(
@@ -374,7 +374,7 @@ def test_shadow_broker_state_persists_across_two_separate_invocations(
     with IntradayLedger(ledger_path) as ledger:
         ledger.record_watchlist_item("2026-09-21", "NVDA", thesis="test")
 
-    def fake_run(argv, stdin_text, timeout_seconds):
+    def fake_run(argv, stdin_text, timeout_seconds, env):
         proposal = {
             "action": "open",
             "symbol": "NVDA",
@@ -497,7 +497,7 @@ def test_eod_review_grades_the_day_and_writes_a_full_report(
     )
     ledger.close()
 
-    def fake_run(argv, stdin_text, timeout_seconds):
+    def fake_run(argv, stdin_text, timeout_seconds, env):
         return subprocess.CompletedProcess(
             args=[],
             returncode=0,
