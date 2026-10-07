@@ -31,6 +31,8 @@ from typing import Any
 
 import pandas as pd
 
+from ..trading_day import trading_day
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS briefs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -903,18 +905,13 @@ class IntradayLedger:
 
     def incidents_for(self, as_of: pd.Timestamp) -> list[dict[str, Any]]:
         """`incidents` carries no `as_of` column (it's a plain timestamped log, not
-        scoped to a trading day) -- date-filtered here by comparing `created_at`'s own
-        UTC calendar date, the same normalize-and-compare pattern
-        `eod_report.py::s0_day_return` already uses for `snapshots`. `created_at` is
-        always UTC (`_now()`); a Central trading day's real hours (~07:00-16:00 Central)
-        never cross a UTC midnight, so this stays correct without a timezone conversion
-        beyond dropping the UTC offset itself."""
+        scoped to a trading day), so each row is dated by the session its `created_at`
+        falls in (`semimc/trading_day.py`: New York date, rolling over at 04:00). This
+        used to compare the UTC date, on the assumption that a trading day never crosses
+        a UTC midnight; a late job does (2026-10-05: GitHub's late copy of carry ran at
+        19:57 Central, and its error counted against the next day)."""
         day = pd.Timestamp(as_of).normalize()
-        return [
-            row
-            for row in self.incidents()
-            if pd.Timestamp(row["created_at"]).tz_convert(None).normalize() == day
-        ]
+        return [row for row in self.incidents() if trading_day(row["created_at"]) == day]
 
     def last_stopout_times(self) -> dict[str, dt.datetime]:
         """symbol -> most recent invalidation-triggered stop-out time (S4, Phase 5),

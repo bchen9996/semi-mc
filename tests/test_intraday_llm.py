@@ -381,3 +381,72 @@ def test_invoke_role_uses_the_reviewer_json_schema_for_the_reviewer_role(tmp_pat
         "playbook_proposal",
     ]
     ledger.close()
+
+
+# -- a failed call says why (2026-10-06) ---------------------------------------------------
+
+
+def _failed_call_message(stdout: str = "", stderr: str = "") -> str:
+    def run(argv, stdin_text, timeout_seconds):
+        return subprocess.CompletedProcess(args=[], returncode=1, stdout=stdout, stderr=stderr)
+
+    with pytest.raises(ClaudeCliError) as raised:
+        ClaudeCliClient(run=run).call(
+            role="trader",
+            system_prompt_path=Path("dummy.md"),
+            model="haiku",
+            context_payload={},
+            max_budget_usd=1.0,
+            max_turns=6,
+            timeout_seconds=300,
+        )
+    return str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected"),
+    [
+        (
+            _result_json(is_error=True, result="Credit balance is too low"),
+            "",
+            "trader call exited 1: Credit balance is too low",
+        ),
+        ("", "starting\nError: Invalid API key\n", "trader call exited 1: Error: Invalid API key"),
+        ("not json\nlast line", "", "trader call exited 1: last line"),
+        ("", "", "trader call exited 1"),
+    ],
+)
+def test_a_failed_call_says_why(stdout, stderr, expected):
+    """2026-10-06: the API account ran out of credits and every failed call logged only
+    "exited 1"."""
+    assert _failed_call_message(stdout, stderr) == expected
+
+
+def test_a_long_failure_reason_is_cut_to_one_short_line():
+    message = _failed_call_message(stderr="first\n" + "x" * 500)
+    assert message == "trader call exited 1: " + "x" * 197 + "..."
+
+
+def test_invoke_role_records_a_failed_call_as_an_error_incident_and_re_raises(tmp_path):
+    ledger = _ledger(tmp_path)
+    _, run = _recording_run(
+        _result_json(is_error=True, result="Credit balance is too low"), returncode=1
+    )
+    context = build_context("trader", AS_OF, "cycle_1", sections={"a": 1})
+
+    with pytest.raises(ClaudeCliError):
+        invoke_role(
+            "trader",
+            as_of=AS_OF,
+            cycle="cycle_1",
+            config=IntradayConfig(),
+            ledger=ledger,
+            client=ClaudeCliClient(run=run),
+            context=context,
+        )
+
+    assert [(i["severity"], i["message"]) for i in ledger.incidents()] == [
+        ("error", "trader call exited 1: Credit balance is too low")
+    ]
+    assert ledger.model_calls_for(AS_OF) == []  # nothing spent is recorded
+    ledger.close()

@@ -56,7 +56,7 @@ from .context import (
     build_trader_context,
 )
 from .ledger import IntradayLedger
-from .llm import ClaudeCliClient, DailyBudgetExhausted, invoke_role
+from .llm import ClaudeCliClient, ClaudeCliError, DailyBudgetExhausted, invoke_role
 from .monitor import check_invalidation_and_time_stops
 from .options import OptionPricing, OptionQuote, price_contract
 from .orders import (
@@ -1576,7 +1576,9 @@ def run_eod_review(
     is exactly the kind of day it exists to measure. Idempotent per `as_of` for a graded
     day: if today's reflections already carry a non-null `category`, this already ran
     (mirrors `run_research`'s `watchlist_for(as_of)`-non-empty check); a quiet-day re-run
-    just rewrites the same mechanical report.
+    just rewrites the same mechanical report. The mechanical report is also written when
+    the Reviewer can't narrate the day (2026-10-06): the daily budget is spent, the call
+    fails (then the job still fails, after writing it), or the response is malformed.
 
     `shadow_ledger` is optional -- `None` skips the placebo benchmark gracefully (Phase 7
     might not be enabled in every deployment) rather than requiring a second ledger no
@@ -1654,21 +1656,29 @@ def run_eod_review(
 
     scorecard = process_scorecard(ledger, intraday, as_of)
     attribution = day_attribution(reflections_today, soxx_return)
+    out_path = config.path(intraday.reports_dir) / str(pd.Timestamp(as_of).date()) / "eod.md"
 
-    if nothing_to_grade:
-        reviewer_note = "nothing to grade today"
+    def write_mechanical_report(note: str) -> str:
+        """The report without the Reviewer's narration: everything above it is
+        mechanical, so a day the Reviewer can't narrate still gets its report."""
         report = build_eod_report(
             ledger,
             as_of,
             benchmarks=benchmarks,
             process_scorecard=scorecard,
             attribution=attribution,
-            reviewer_note=f"{reviewer_note} (no proposals and no closed trades)",
+            reviewer_note=note,
         )
-        out_path = config.path(intraday.reports_dir) / str(pd.Timestamp(as_of).date()) / "eod.md"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(render_eod_markdown(report), encoding="utf-8")
-        return EodReviewResult(report_path=str(out_path), reviewer_skipped_reason=reviewer_note)
+        return str(out_path)
+
+    if nothing_to_grade:
+        reviewer_note = "nothing to grade today"
+        report_path = write_mechanical_report(
+            f"{reviewer_note} (no proposals and no closed trades)"
+        )
+        return EodReviewResult(report_path=report_path, reviewer_skipped_reason=reviewer_note)
 
     # `news_lookback_hours` (16h, tuned for the Researcher's overnight coverage) reaches
     # well back past this session's own 08:30 open when called near the 15:15 close --
@@ -1739,7 +1749,16 @@ def run_eod_review(
             context=context,
         )
     except DailyBudgetExhausted as exc:
-        return EodReviewResult(skipped_reason=str(exc))
+        report_path = write_mechanical_report(f"the daily model budget is spent ({exc})")
+        return EodReviewResult(report_path=report_path, reviewer_skipped_reason=str(exc))
+    except ClaudeCliError as exc:
+        # The report is written, then the job still fails: the brief's hard stop, and the
+        # failure email. Added 2026-10-06, when the API account ran out of credits and the
+        # Reviewer's failure took the whole report with it. `invoke_role` has already
+        # recorded the reason; no Reviewer call is recorded, so a re-run once the account
+        # is fixed calls the Reviewer and rewrites this report in full.
+        write_mechanical_report(f"the Reviewer call failed ({exc})")
+        raise
 
     payload = response.structured_output if isinstance(response.structured_output, dict) else None
     required_keys = {
@@ -1751,7 +1770,10 @@ def run_eod_review(
     }
     if payload is None or not required_keys.issubset(payload):
         ledger.record_incident("error", "malformed reviewer response: missing required keys")
-        return EodReviewResult(skipped_reason="malformed reviewer response")
+        report_path = write_mechanical_report("the Reviewer's response was malformed")
+        return EodReviewResult(
+            report_path=report_path, reviewer_skipped_reason="malformed reviewer response"
+        )
 
     reflections_by_id = {row["id"]: row for row in reflections_today}
     updated = 0
@@ -1825,7 +1847,6 @@ def run_eod_review(
         closing_market_report=closing_market_report,
         playbook_proposal=playbook_proposal,
     )
-    out_path = config.path(intraday.reports_dir) / str(pd.Timestamp(as_of).date()) / "eod.md"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(render_eod_markdown(report), encoding="utf-8")
 

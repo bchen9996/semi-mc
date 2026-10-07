@@ -1494,26 +1494,12 @@ def signals(
 # ---------------------------------------------------------------------------------------
 
 
-# A job's default date is the session it belongs to, and a trading day starts with
-# pre-market at 04:00 New York time, not at midnight: anything after the close and before
-# 04:00 belongs to the session that just ended. This used to be `pd.Timestamp.now()`,
-# which on GitHub's runners is UTC and already tomorrow from 20:00 New York time, so a late
-# cron copy or an evening test run filed itself under the next day and could take that
-# day's run-once slot. Found 2026-09-30: test runs at 23:52 Central (00:52 New York) all
-# wrote rows dated 2026-10-01 -- which is why the rollover is 04:00, not midnight.
-_EXCHANGE_TZ = "America/New_York"
-_TRADING_DAY_ROLLOVER = pd.Timedelta(hours=4)
-
-
 def _trading_day(now: pd.Timestamp | None = None) -> pd.Timestamp:
-    """The current session's date as a naive midnight, the same shape an explicit
-    `--as-of` parses to. `now` (aware, or naive read as UTC) is for tests; it defaults to
-    the clock."""
-    stamp = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
-    if stamp.tzinfo is None:
-        stamp = stamp.tz_localize("UTC")
-    local = stamp.tz_convert(_EXCHANGE_TZ) - _TRADING_DAY_ROLLOVER
-    return local.normalize().tz_localize(None)
+    """A job's default date: the session it belongs to (`trading_day.py`, where the
+    04:00 New York rollover and its reasons live). `now` is for tests."""
+    from .trading_day import trading_day
+
+    return trading_day(now)
 
 
 def _paper_as_of(value: str | None) -> pd.Timestamp:
@@ -2273,7 +2259,7 @@ def intraday_eod_review(
         return
     typer.echo(f"Wrote {result.report_path}")
     if result.reviewer_skipped_reason is not None:
-        typer.echo(f"No Reviewer call: {result.reviewer_skipped_reason}")
+        typer.echo(f"No Reviewer narration: {result.reviewer_skipped_reason}")
         return
     typer.echo(f"Reflections graded: {result.reflections_updated}")
     if result.playbook_proposal_written:

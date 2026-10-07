@@ -395,7 +395,7 @@ def test_eod_review_on_a_quiet_day_writes_a_report_without_a_model_call(
     )
     assert result.exit_code == 0, result.output
     assert "Wrote" in result.output
-    assert "No Reviewer call: nothing to grade today" in result.output
+    assert "No Reviewer narration: nothing to grade today" in result.output
     assert len(list((tmp_path / "reports").rglob("eod.md"))) == 1
 
 

@@ -35,7 +35,7 @@ from semimc.intraday.jobs import (
     run_weekly_review,
 )
 from semimc.intraday.ledger import IntradayLedger
-from semimc.intraday.llm import ClaudeCliClient
+from semimc.intraday.llm import ClaudeCliClient, ClaudeCliError
 from semimc.intraday.orders import (
     build_close_order,
     build_entry_order,
@@ -1782,7 +1782,7 @@ def test_run_eod_review_on_a_quiet_day_writes_the_mechanical_report_without_a_mo
     assert "No proposals today." in text
     assert "## Benchmarks for the day" in text
     assert "Placebo (T6 control)" in text
-    assert "No Reviewer call today: nothing to grade today" in text
+    assert "No Reviewer narration today: nothing to grade today" in text
     assert "Not yet built" not in text
     paper_ledger.close()
     ledger.close()
@@ -1838,8 +1838,10 @@ def test_run_eod_review_handles_a_malformed_response_without_crashing(config, tm
         NOW,
     )
 
-    assert result.skipped_reason == "malformed reviewer response"
+    assert result.reviewer_skipped_reason == "malformed reviewer response"
     assert any("malformed reviewer response" in i["message"] for i in ledger.incidents())
+    text = Path(result.report_path).read_text(encoding="utf-8")
+    assert "No Reviewer narration today: the Reviewer's response was malformed." in text
     paper_ledger.close()
     ledger.close()
 
@@ -2512,4 +2514,59 @@ def test_protect_unguarded_positions_warns_when_there_is_no_price_to_stop_at(con
     assert [i["message"] for i in ledger.incidents()] == [
         "NVDA: 5 share(s) held with no resting stop, and no invalidation price on file to place one"
     ]
+    ledger.close()
+
+
+def test_run_eod_review_writes_its_report_when_the_reviewer_call_fails(config, tmp_path, market):
+    """2026-10-06: the API account ran out of credits and the Reviewer's failure took the
+    whole report with it. Now the report is written, the job still fails, and a re-run
+    once the account is fixed narrates the day in full."""
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday")
+    run_carry(cfg, broker, ledger, _FakeMarketData(quotes={"NVDA": _quote(190.0)}), AS_OF, NOW)
+    reflection_id = ledger.reflections_for(AS_OF)[0]["id"]
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+    out_of_credit = ClaudeCliClient(
+        run=lambda argv, stdin_text, timeout_seconds: subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout=_result_json(is_error=True, result="Credit balance is too low"),
+            stderr="",
+        )
+    )
+
+    def review(client):
+        return run_eod_review(
+            cfg,
+            _FakeMarketData(),
+            _FakeNewsClient(),
+            market,
+            paper_ledger,
+            None,
+            ledger,
+            client,
+            AS_OF,
+            "eod_review",
+            NOW,
+        )
+
+    with pytest.raises(ClaudeCliError, match="Credit balance is too low"):
+        review(out_of_credit)
+
+    report = cfg.path(cfg.intraday.reports_dir) / str(AS_OF.date()) / "eod.md"
+    assert (
+        "No Reviewer narration today: the Reviewer call failed (reviewer call exited 1: "
+        "Credit balance is too low)."
+    ) in report.read_text(encoding="utf-8")
+    assert "reviewer call exited 1: Credit balance is too low" in [
+        i["message"] for i in ledger.incidents()
+    ]
+
+    result = review(_sequenced_llm_client(_reviewer_response(reflection_id)))
+
+    assert result.reflections_updated == 1
+    assert "Semis broadly higher into the close." in report.read_text(encoding="utf-8")
+    paper_ledger.close()
     ledger.close()

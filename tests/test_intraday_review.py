@@ -20,6 +20,7 @@ from semimc.intraday.review import (
     render_weekly_review_markdown,
     weekly_summary,
 )
+from semimc.trading_day import trading_day
 
 AS_OF = pd.Timestamp("2026-09-21")
 
@@ -102,9 +103,8 @@ def test_process_scorecard_invalidation_adherence_is_none_with_no_closes_today(t
 def test_process_scorecard_includes_todays_incidents_only(tmp_path):
     ledger = _ledger(tmp_path)
     ledger.record_incident("warning", "today's incident")
-    today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
 
-    scorecard = process_scorecard(ledger, IntradayConfig(), today)
+    scorecard = process_scorecard(ledger, IntradayConfig(), trading_day())
     assert len(scorecard["incidents"]) == 1
     other_day_scorecard = process_scorecard(ledger, IntradayConfig(), pd.Timestamp("2000-01-01"))
     assert other_day_scorecard["incidents"] == []
