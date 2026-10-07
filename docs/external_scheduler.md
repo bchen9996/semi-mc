@@ -10,7 +10,8 @@ cutoff. The delay happens before any code runs, so it can't be fixed in code.
 GitHub starts a dispatched run within seconds. Each workflow takes a `job` input and runs
 only that job. The crons stay in place as a fallback, and the jobs tolerate a late duplicate:
 `research`, `open-batch` and `eod-review` run once per day, `decide` has its own cadence
-guard, and the rest are safe to repeat.
+guard, a `cycle` that lands after the close declines quietly on the real market clock (no
+Trader call, an info line instead of an error), and the rest are safe to repeat.
 
 The steps below use [cron-job.org](https://cron-job.org), which is free, runs each job in a
 timezone you set (so daylight saving is handled for you, with no twice-yearly edits), and

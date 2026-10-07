@@ -18,6 +18,7 @@ from semimc.execution.broker import (
     Asset,
     AssetNotTradableError,
     BrokerError,
+    Clock,
     MarketClosedError,
     Order,
     OrderRequest,
@@ -315,6 +316,21 @@ def test_closed_market_rejects_every_order():
     broker = FakeBroker(market_open=False)
     with pytest.raises(MarketClosedError):
         broker.submit_order(buy())
+
+
+def test_a_given_clock_is_what_get_clock_reports_and_orders_still_follow_market_open():
+    """The intraday shadow broker carries the real exchange clock: whether the market is
+    open is real, while fills stay simulated."""
+    closed = Clock(
+        timestamp=dt.datetime(2026, 10, 6, 22, 56),
+        is_open=False,
+        next_open=dt.datetime(2026, 10, 7, 13, 30),
+        next_close=dt.datetime(2026, 10, 7, 20, 0),
+    )
+    broker = FakeBroker(clock=closed)
+
+    assert broker.get_clock() is closed
+    assert broker.submit_order(buy()).status == "filled"
 
 
 def test_blocked_account_rejects_every_order():

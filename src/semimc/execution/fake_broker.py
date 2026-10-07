@@ -67,6 +67,12 @@ class FakeBroker:
         the same side already hold is rejected with :class:`BrokerError`, the way Alpaca
         answers "insufficient qty available for order". A stop still pending cancel holds
         its shares too. Off by default, so every existing test keeps its behavior.
+    clock
+        When set, :meth:`get_clock` returns it instead of a clock built from
+        ``market_open`` and ``now``. The intraday shadow broker carries the real
+        exchange clock this way (``cli.py::_intraday_execution_broker``): its fills are
+        simulated, whether the market is open is not. ``submit_order`` still reads only
+        ``market_open``. Not persisted by ``to_state``.
 
     An ``OrderRequest`` with ``order_class="oto"`` (S4's protective stop, Phase 3) fills
     its entry leg exactly like a simple order -- ``submit_order`` never reads
@@ -91,6 +97,7 @@ class FakeBroker:
     partial_fill_fraction: float = 1.0
     cancel_delay_lookups: int = 0
     enforce_held_qty: bool = False
+    clock: Clock | None = None
     now: dt.datetime = field(default_factory=lambda: dt.datetime(2026, 1, 2, 15, 0))
 
     _orders: dict[str, Order] = field(default_factory=dict, repr=False, compare=False)
@@ -118,6 +125,8 @@ class FakeBroker:
         return self.assets.get(symbol, Asset(symbol=symbol))
 
     def get_clock(self) -> Clock:
+        if self.clock is not None:
+            return self.clock
         return Clock(
             timestamp=self.now, is_open=self.market_open, next_open=self.now, next_close=self.now
         )

@@ -2602,16 +2602,26 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       calls predate fix (1), so they left no incidents: once eod-review is re-run,
       2026-10-06 would read clean in the readiness report though the Trader was down
       from 13:20 CT.
-- [ ] **Open, found 2026-10-06: late duplicate runs after the close.** GitHub's own cron
-      copies of `cycle`/`carry` often land after the close. In shadow mode the market
-      check reads the shadow broker's clock, which is always open, so a late cycle runs
-      in full and logs "no current price" errors for any position held (Monday's two
-      TSM errors). On the real account (Stage 2) the clock is real, but `run_cycle`
-      records the "market is closed" decline as an error incident, so every late
-      duplicate cycle would fail the day. Candidate fixes: check market hours on the
-      real clock in shadow mode too, and treat a closed-market decline as routine, not
-      an error (or drop the GitHub `cycle`/`carry` crons now that cron-job.org triggers
-      them). Owner decision.
+- [x] **Late duplicate runs after the close (found and fixed 2026-10-06).** GitHub's own
+      cron copy of `cycle` landed after the close every trading day since 2026-09-29
+      (16:00-18:00 CT), and its copy of `carry` around 18:16 CT. In shadow mode the
+      market check read the shadow broker's clock, which was always open, so each late
+      cycle ran in full: 7 Trader calls on after-hours quotes, one of which (2026-10-05,
+      16:06 CT) logged Monday's TSM "no current price" error, and any of which could have
+      bought at a stale price that nothing closed until the next morning. On the real
+      account (Stage 2) the clock is real, but `run_cycle` recorded the "market is
+      closed" decline as an error, so every late copy would have failed the day. Owner
+      chose the fix: the shadow broker now carries the real exchange clock
+      (`FakeBroker.clock`, set in `cli.py::_intraday_execution_broker` from
+      `_intraday_market_clock`, which reads the S4 account's clock and hands the broker to
+      nothing else; fills stay simulated), and `run_cycle` records a closed-market decline
+      as an info incident ("cycle_2256 skipped: market is closed") with no Trader call.
+      Every other pretrade finding stays an error. `carry` is unchanged on purpose: if the
+      on-time carry was missed, a late one still has work to do (on the real account the
+      close queues for the next open), and after an on-time carry it finds nothing. The
+      GitHub crons stay as a fallback. Market holidays now skip their cycles too (they
+      used to run full cycles in shadow), so a holiday still belongs in
+      `readiness.excluded_days`.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

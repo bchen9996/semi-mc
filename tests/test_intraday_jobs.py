@@ -764,6 +764,48 @@ def test_run_cycle_is_skipped_when_trading_is_disabled(config, tmp_path):
     ledger.close()
 
 
+def test_run_cycle_skips_a_closed_market_as_routine_not_an_error(config, tmp_path):
+    """2026-10-06: GitHub's own copy of `cycle` lands after the close every day. The
+    decline is the gate working, so it is an info line, not an error that fails the day,
+    and no Trader call is made."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    calls, client = _recording_llm_client(_result_json())
+    broker = FakeBroker(market_open=False)
+
+    result = run_cycle("cycle_2256", cfg, broker, ledger, _FakeMarketData(), client, AS_OF, NOW)
+
+    assert result.skipped_reason == "market is closed"
+    assert calls == []
+    assert [(i["severity"], i["message"]) for i in ledger.incidents()] == [
+        ("info", "cycle_2256 skipped: market is closed")
+    ]
+    ledger.close()
+
+
+def test_run_cycle_keeps_every_other_pretrade_finding_an_error_when_the_market_is_closed(
+    config, tmp_path
+):
+    cfg = _tradeable_config(config, tmp_path)
+    (tmp_path / "KILL_SWITCH").write_text("stop", encoding="utf-8")
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(market_open=False)
+
+    result = run_cycle(
+        "cycle_1", cfg, broker, ledger, _FakeMarketData(), _sequenced_llm_client(""), AS_OF, NOW
+    )
+
+    severities = {
+        i["severity"] for i in ledger.incidents() if "market is closed" not in i["message"]
+    }
+    assert result.skipped_reason is not None
+    assert severities == {"error"}
+    assert ("info", "cycle_1 skipped: market is closed") in [
+        (i["severity"], i["message"]) for i in ledger.incidents()
+    ]
+    ledger.close()
+
+
 # -- run_cycle: shadow mode (Phase 11, Rollout Stage 1) ----------------------------------
 
 

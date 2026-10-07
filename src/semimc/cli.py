@@ -1874,15 +1874,29 @@ def _intraday_execution_broker(cfg, ledger, market_data, now):  # noqa: ANN001 -
     manager.
 
     `research`/`preflight` deliberately never call this -- both stay on the real broker
-    always (see `intraday/jobs.py`'s Phase 11 docstring additions for why)."""
+    always (see `intraday/jobs.py`'s Phase 11 docstring additions for why).
+
+    The shadow broker carries the real exchange clock (`_intraday_market_clock`), so a
+    shadow cycle outside market hours declines exactly as Stage 2's will. Added
+    2026-10-06: the shadow clock used to read open around the clock, and GitHub's late
+    copy of `cycle`, landing after the close every day, ran a full Trader cycle on
+    after-hours quotes."""
     if not cfg.intraday.shadow_mode:
         return _intraday_broker()
     from .execution.fake_broker import FakeBroker
     from .intraday.jobs import mark_broker_to_market
 
     broker = FakeBroker.from_state(ledger.load_shadow_broker_state(), now=now)
+    broker.clock = _intraday_market_clock()
     mark_broker_to_market(broker, ledger, market_data, cfg.intraday.shadow_starting_equity, now)
     return broker
+
+
+def _intraday_market_clock():  # noqa: ANN001 -- returns Clock
+    """The exchange clock, read from the real S4 account: open/closed, with Alpaca's own
+    holidays and early closes. The broker is used for this one read and never handed to a
+    job, so shadow mode still has no route to submit anything to the account."""
+    return _intraday_broker().get_clock()
 
 
 IntradayAsOfOption = Annotated[

@@ -18,6 +18,7 @@ import pytest
 from typer.testing import CliRunner
 
 from semimc.cli import app
+from semimc.execution.broker import Clock
 from semimc.execution.fake_broker import FakeBroker
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.llm import ClaudeCliClient
@@ -249,25 +250,39 @@ def _shadow_tradeable_overrides(tmp_path: Path) -> list[str]:
     )
 
 
+class _ClockOnlyBroker:
+    """The real account as shadow mode may see it: the exchange clock and nothing else.
+    Any other attribute raises, so a test proves no shadow order can reach the account."""
+
+    def __init__(self) -> None:
+        self.is_open = True
+
+    def get_clock(self) -> Clock:
+        now = dt.datetime(2026, 9, 21, 15, 0)
+        return Clock(timestamp=now, is_open=self.is_open, next_open=now, next_close=now)
+
+    def __getattr__(self, name):
+        raise AssertionError(f"shadow mode must only read the real account's clock, not {name}")
+
+
 @pytest.fixture
 def fake_intraday_shadow_env(monkeypatch):
-    """Shadow mode: `open-batch`/`cycle`/`carry`/`monitor` must never construct a real
-    `AlpacaPaperBroker` at all (`cli.py::_intraday_execution_broker` builds a shadow
-    `FakeBroker` from the ledger's own persisted state instead) -- patched to raise, not
-    just a benign fake, to prove that structurally, mirroring `fake_placebo_env`'s own
-    assertion style for the identical claim about the placebo."""
+    """Shadow mode: `open-batch`/`cycle`/`carry`/`monitor` trade against a shadow
+    `FakeBroker` built from the ledger's own persisted state
+    (`cli.py::_intraday_execution_broker`). The real `AlpacaPaperBroker` is read for the
+    exchange clock only (added 2026-10-06), so `from_env` returns a `_ClockOnlyBroker`
+    that raises on anything else -- proving that structurally, mirroring
+    `fake_placebo_env`'s own assertion style for the placebo."""
     market_data = _FakeMarketData()
     news_client = _FakeNewsClient()
+    real_account = _ClockOnlyBroker()
 
     def fake_run(argv, stdin_text, timeout_seconds):
         return subprocess.CompletedProcess(args=[], returncode=0, stdout=_result_json(), stderr="")
 
-    def _must_not_be_called(*_args, **_kwargs):
-        raise AssertionError("shadow mode must never construct a real AlpacaPaperBroker")
-
     monkeypatch.setattr(
         "semimc.execution.alpaca_broker.AlpacaPaperBroker.from_env",
-        classmethod(lambda cls, **kwargs: _must_not_be_called()),
+        classmethod(lambda cls, **kwargs: real_account),
     )
     monkeypatch.setattr(
         "semimc.execution.market_data.AlpacaMarketDataClient.from_env",
@@ -282,7 +297,7 @@ def fake_intraday_shadow_env(monkeypatch):
         classmethod(lambda cls: ClaudeCliClient(run=fake_run)),
     )
     monkeypatch.setattr("semimc.data.load_market_data", lambda *a, **k: _FakePitMarketData())
-    return market_data, news_client
+    return market_data, news_client, real_account
 
 
 def test_open_batch_runs_cleanly_in_shadow_mode_without_a_real_broker(
@@ -317,12 +332,42 @@ def test_monitor_runs_cleanly_in_shadow_mode_without_a_real_broker(
     assert "Closed: (none)" in result.output
 
 
+def test_cycle_in_shadow_mode_declines_on_the_real_clock_after_the_close(
+    tmp_path, fake_intraday_shadow_env, monkeypatch
+):
+    """2026-10-06: the shadow broker's own clock read open around the clock, so GitHub's
+    late copy of `cycle` ran a full Trader cycle after the close every day. It now reads
+    the real exchange clock, declines without a Trader call, and does not fail the job."""
+    _market_data, _news_client, real_account = fake_intraday_shadow_env
+    real_account.is_open = False
+
+    def trader_must_not_be_called(argv, stdin_text, timeout_seconds):
+        raise AssertionError("no Trader call after the close")
+
+    monkeypatch.setattr(
+        "semimc.intraday.llm.ClaudeCliClient.from_env",
+        classmethod(lambda cls: ClaudeCliClient(run=trader_must_not_be_called)),
+    )
+
+    result = runner.invoke(
+        app,
+        ["intraday", "cycle", "--cycle", "cycle_2256"] + _shadow_tradeable_overrides(tmp_path),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Skipped: market is closed" in result.output
+    with IntradayLedger(tmp_path / "intraday.sqlite3") as ledger:
+        assert [(i["severity"], i["message"]) for i in ledger.incidents()] == [
+            ("info", "cycle_2256 skipped: market is closed")
+        ]
+
+
 def test_shadow_broker_state_persists_across_two_separate_invocations(
     tmp_path, fake_intraday_shadow_env, monkeypatch
 ):
     """Each cron-triggered CLI call is a fresh process -- Stage 1's shadow book must
     survive that the same way the placebo's own shadow ledger already does."""
-    market_data, _news_client = fake_intraday_shadow_env
+    market_data, _news_client, _real_account = fake_intraday_shadow_env
     market_data._quotes["NVDA"] = 190.0
 
     ledger_path = tmp_path / "intraday.sqlite3"
