@@ -2652,6 +2652,45 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       (`max_cycle_gap_minutes`, 30 -> 45, still one missed trigger) follow it. Shadow
       stops are now enforced within ~30 minutes. Expected: ~$0.35-0.40 a day, ~$8 a
       month. Check the first day's `model_calls` output tokens to confirm the cap took.
+      **Confirmed 2026-10-07:** Trader output ~2,500 tokens a call (was ~6,400), $0.018 a
+      call (was $0.044), `num_turns` 2-4; S4 ledger total $0.34 (Trader $0.235, Reviewer
+      $0.077, Researcher $0.031). The owner saw $0.62 for the day. Two leads, neither
+      confirmed: the last four Trader calls (13:30-14:31 CT) report $0.002-0.003 for
+      1,500-3,300 output tokens, below Haiku's output price alone, so the CLI's
+      `total_cost_usd` (installed fresh each run) may undercount; and re-run Trader calls
+      on rejected pushes (next entry) were billed but never ledgered.
+- [x] **2026-10-07: no errors, but not clean -- the 12:00 CT cycle never ran; two
+      workflow fixes 2026-10-08 (owner-approved).** A 61-minute gap between cycle checks
+      (11:31 -> 12:32 CT; the limit is 45) fails the day, so the streak starts
+      2026-10-08: the earliest Stage 2 pass is after 2026-10-12's close with an accepted
+      trade proposal, else 2026-10-14's. cron-job.org's history shows the 12:00 trigger
+      sent cleanly and no run committed, so GitHub dropped it. Likely cause (unconfirmed
+      -- the Actions tab would show a cancelled run): a concurrency group holds one
+      pending run, and a newer arrival cancels it silently; GitHub's own cron copies of
+      the morning jobs land 4-6 hours late, mid-session (preopen/open-batch at 18:25-21:07
+      UTC every day that week; preflight/research copies leave no commit), so one waiting
+      in `intraday-trading-ledger-write` could knock out the dispatch. A late `cycle` copy
+      also opened a MU trade at 14:07 CT, six minutes after the on-time cycle chose
+      no_trade (the Reviewer flagged it). Fix 1: the crons for preflight, research,
+      preopen, open-batch and cycle are removed; cron-job.org is their only trigger (its
+      failure emails are the alarm). carry, eod-review and weekly-review keep theirs (late
+      copies land after the close and still have work if the on-time run failed). Found
+      on the way, fix 2: on a rejected push every job reset to the latest main and re-ran
+      its whole command -- for `cycle` a second Trader call, billed but only the last
+      attempt ledgered, and on the real account the first attempt's orders would be at the
+      broker with their ledger rows discarded. Since 2026-10-06 every cycle fires in the
+      same minute as the two paper marks' pushes (one in three did at the 20-minute
+      cadence). Now each job commits once and pushes through
+      `.github/scripts/push_ledger.sh`, which rebases onto the latest main; exit 3 means
+      another run changed the same binary ledger, which fails an intraday job (the group
+      should make it impossible) and re-runs a paper job (its sleeves share
+      `ledger/paper.sqlite3`, and decide/execute/mark are idempotent).
+      `tests/test_push_ledger.py` drives the script against local repos and pins the
+      remaining crons. Consequence: the `monitor` loop (outside the group, manual only,
+      last run 2026-09-25) must not run during a session -- its push would now fail a
+      cycle instead of being re-run around (docs/external_scheduler.md). Unchanged:
+      `forecast_journal.yml` keeps its deliberate re-run (no orders, no model call, runs
+      after hours).
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

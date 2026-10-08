@@ -96,9 +96,13 @@ jobs:
         # run still showed two matrix entries' pushes interleaving (Phase 8, confirmed
         # against GitHub's actual infrastructure, not assumed). `ledger/paper.sqlite3` is
         # binary, so a plain `git pull --rebase` can't 3-way-merge two independent row
-        # insertions into it -- on a rejected push, re-fetch the latest ledger and re-run
-        # decide/execute against it instead, reconciling at the application level (both are
-        # already idempotent: decide's own cadence-skip, execute's same-decision no-op).
+        # insertions into it. Since 2026-10-08 a rejected push is first rebased
+        # (`.github/scripts/push_ledger.sh`): the run that beat it is usually the intraday
+        # workflow, writing other files, and re-running there only repeated work already
+        # done. Only when the rebase conflicts -- another sleeve changed paper.sqlite3 --
+        # does this re-fetch the latest ledger and re-run decide/execute against it,
+        # reconciling at the application level (both are already idempotent: decide's own
+        # cadence-skip, execute's same-decision no-op).
         # A genuine command failure (e.g. missing credentials) still fails the job, so
         # Phase 7's "an incident fails the job" behavior is unchanged -- but only after
         # committing whatever the command already wrote (an execute that submitted some
@@ -131,12 +135,17 @@ jobs:
             fi
             # The session date, as in cli.py::_trading_day: the day rolls over at 04:00 New York.
             git commit -m "paper decide/execute: ${{ matrix.sleeve }} $(TZ=America/New_York date -d '4 hours ago' +%F)"
-            if git push; then
+            push_status=0
+            bash .github/scripts/push_ledger.sh || push_status=$?
+            if [ "$push_status" = 0 ]; then
               exit "$status"
             fi
-            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+            if [ "$push_status" != 3 ]; then
+              exit 1
+            fi
+            echo "ledger/paper.sqlite3 changed upstream (attempt $attempt/3) -- re-running against it"
           done
-          echo "failed to push after 3 attempts"
+          echo "ledger/paper.sqlite3 still changing upstream after 3 attempts"
           exit 1
 
   mark:
@@ -160,7 +169,8 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - name: Poll fills, reconcile, and commit the ledger
-        # Retried on a git push race -- see the decide-and-execute job's identical comment.
+        # A rejected push is rebased first, and mark re-runs only when another sleeve
+        # changed paper.sqlite3 -- see the decide-and-execute job's identical comment.
         # mark is already safe to re-run: each attempt re-polls fresh state from the broker
         # rather than assuming anything about the previous attempt's local ledger state.
         env:
@@ -182,12 +192,17 @@ jobs:
               exit "$status"
             fi
             git commit -m "paper mark: ${{ matrix.sleeve }} $(TZ=America/New_York date -d '4 hours ago' +%F)"
-            if git push; then
+            push_status=0
+            bash .github/scripts/push_ledger.sh || push_status=$?
+            if [ "$push_status" = 0 ]; then
               exit "$status"
             fi
-            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
+            if [ "$push_status" != 3 ]; then
+              exit 1
+            fi
+            echo "ledger/paper.sqlite3 changed upstream (attempt $attempt/3) -- re-running against it"
           done
-          echo "failed to push after 3 attempts"
+          echo "ledger/paper.sqlite3 still changing upstream after 3 attempts"
           exit 1
 
   report:
