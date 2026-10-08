@@ -8,10 +8,11 @@ cutoff. The delay happens before any code runs, so it can't be fixed in code.
 
 **How.** An external scheduler calls GitHub's `workflow_dispatch` API at the exact minute.
 GitHub starts a dispatched run within seconds. Each workflow takes a `job` input and runs
-only that job. The crons stay in place as a fallback, and the jobs tolerate a late duplicate:
-`research`, `open-batch` and `eod-review` run once per day, `decide` has its own cadence
-guard, a `cycle` that lands after the close declines quietly on the real market clock (no
-Trader call, an info line instead of an error), and the rest are safe to repeat.
+only that job. Since 2026-10-08 the intraday `preflight`, `research`, `preopen`,
+`open-batch` and `cycle` jobs have **no GitHub cron at all**: cron-job.org is their only
+trigger (see "The late cron copies" below for why). Every other job keeps its cron as a
+fallback and tolerates a late duplicate: `eod-review` runs once per day, `decide` has its
+own cadence guard, and the rest are safe to repeat.
 
 The steps below use [cron-job.org](https://cron-job.org), which is free, runs each job in a
 timezone you set (so daylight saving is handled for you, with no twice-yearly edits), and
@@ -38,7 +39,8 @@ A rough estimate of what the schedule below uses, per trading day:
 That's about **2,100 minutes a month**: around GitHub Free's allowance, inside Pro's.
 (Cycles ran every 20 minutes until 2026-10-06, about 2,500 minutes a month.) The `monitor` loop would add ~385 minutes a day (~8,000 a month), which is why it
 has no schedule (owner decision 2026-09-27; see "The monitor loop" at the end). Late
-fallback-cron runs add a little on top.
+fallback-cron runs add a little on top: fewer since 2026-10-08, when five intraday crons
+were removed (about six late copies a trading day).
 
 ---
 
@@ -132,13 +134,26 @@ market, the same as it does today.
 
 ## The late cron copies
 
-The original crons still fire, hours late. The once-per-day guards make most of those
-no-ops. The one kind that still does work is a late `cycle` cron: an extra Trader cycle
-mid-afternoon, capped by the daily budget, costing a few minutes of runner time and about
-a cent of model spend each. Once the external triggers have run cleanly for about a week,
-consider removing the `cycle` cron from `intraday_trading.yml` (its `if:` condition keeps
-working for dispatch without it). The single-fire jobs' crons are cheap to keep as a
-fallback. `monitor` already has no cron.
+The original crons fire hours late. They were meant as a harmless fallback, but on
+2026-10-07 the 12:00 CT `cycle` dispatch never ran, though cron-job.org shows it was
+sent: the likely cause is GitHub's concurrency rule. A group holds at most one *pending*
+run, and when another arrives GitHub cancels the older one, silently. The late copies of
+the morning jobs land mid-session (18:25-21:07 UTC on every day of the week before), so
+one waiting in `intraday-trading-ledger-write` can knock out an on-time dispatch, and a
+late `cycle` copy adds an unscheduled Trader call (one opened a trade on 2026-10-07, six
+minutes after the on-time cycle had passed).
+
+**Removed 2026-10-08 (owner decision): the crons for `preflight`, `research`, `preopen`,
+`open-batch` and `cycle`.** cron-job.org is now their only trigger, so if it fails those
+jobs don't run that day: its failure notifications (Step 3) are the alarm. Kept: `carry`,
+`eod-review` and `weekly-review`, whose late copies land after the close, when nothing is
+pending, and still have work to do if the on-time run failed. The paper workflow keeps
+all its crons: it has its own concurrency group, and a late `mark` is harmless.
+
+The same day, a rejected `git push` stopped re-running the job: each job's commit is now
+rebased onto the latest main (`.github/scripts/push_ledger.sh`). Paper marks and intraday
+cycles fire in the same minutes, so rejections are routine, and re-running a cycle
+repeated its Trader call.
 
 ## The monitor loop
 
@@ -157,6 +172,11 @@ The alternatives, if that changes:
 
 - **5-minute loop:** add cron-job.org entries for `monitor` at 08:35 and 14:00 CT (two
   loops cover the session; the loop stops itself at 15:00 CT). About 385 minutes a day.
+  **No longer safe as built (2026-10-08):** the loop runs outside the concurrency group,
+  and since the grouped jobs rebase instead of re-running, a monitor push landing during
+  a cycle now fails that cycle.
 - **Single-shot every 5 minutes:** same cadence at roughly 100-150 minutes a day, from one
-  scheduler entry (`*/5 8-14 * * 1-5`). This needs a small workflow change first: a
-  single-check mode for the `monitor` job.
+  scheduler entry (`*/5 8-14 * * 1-5`). This needs a workflow change first: a
+  single-check mode for the `monitor` job, and a way to run it that neither collides with
+  a cycle's push (outside the group) nor cancels a waiting cycle (inside it, a newer
+  pending run replaces the older one).

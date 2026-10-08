@@ -235,3 +235,15 @@ compared to a closed form, the closed form is written out in the test.
   config-relative path) and using `cfg.path(cfg.signals.research_log)` instead — tests
   redirect it with an absolute `-s` override. Any future command that writes outside
   `reporting.runs_dir` needs the same pattern, not a hand-rolled path off `project_root`.
+- **A GitHub concurrency group holds one *pending* run; a newer arrival cancels it,
+  silently.** `cancel-in-progress: false` only protects the *running* job. On 2026-10-07 a
+  dispatched intraday `cycle` most likely vanished this way behind GitHub's own hours-late
+  cron copies, so five intraday crons were removed (2026-10-08). Anything added to
+  `intraday-trading-ledger-write` must not arrive while a dispatched job may be waiting.
+- **A workflow job never re-runs its command on a rejected push.** It commits once and
+  pushes through `.github/scripts/push_ledger.sh`, which rebases onto the latest main.
+  The old reset-and-re-run loop repeated each cycle's Trader call, and on the real account
+  would have discarded the ledger rows of orders already sent. Exit 3 means another run
+  changed the same (binary) ledger: intraday jobs fail on it; paper jobs, whose sleeves
+  share one ledger and are idempotent, re-run. `tests/test_push_ledger.py` drives the
+  script against local repos and pins which jobs keep a cron.

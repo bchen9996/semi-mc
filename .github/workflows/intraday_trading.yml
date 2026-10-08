@@ -35,7 +35,11 @@ name: Intraday trading (S4)
 # whichever comes first -- see the job's own step comment for the loop itself. An
 # overlapping second loop is harmless (each iteration's own fetch/reset/push-retry already
 # handles concurrent writers safely), which is why `monitor` sits outside the shared
-# concurrency group -- a 5.5-hour-long loop must not block `cycle`/`carry`.
+# concurrency group -- a 5.5-hour-long loop must not block `cycle`/`carry`. **Since
+# 2026-10-08 the grouped jobs rebase instead of re-running**, so a monitor push landing
+# between a cycle's checkout and its push now fails that cycle (same ledger file, no
+# merge). Don't run the loop during a session; a 5-minute monitor needs a redesign
+# first (docs/external_scheduler.md, "The monitor loop").
 #
 # **Since 2026-09-27 `monitor` has no cron and runs only on demand** (owner decision):
 # the repo is private, so Actions minutes are metered, and the loop was ~385 of the
@@ -50,11 +54,28 @@ name: Intraday trading (S4)
 # 17:10-18:20 UTC during Stage 1, whatever its cron said (tasks/todo.md). The reliable
 # fix is outside GitHub: an external scheduler calls the `workflow_dispatch` API at the
 # exact minute with `{"ref": "main", "inputs": {"job": "<job>"}}`, and each job below
-# runs only for its own name. The crons stay as a fallback -- every job here is already
-# idempotent or safely repeatable, so a late cron firing after the external one is a
-# no-op or a harmless re-check. A manual "Run workflow" click now runs exactly the one
+# runs only for its own name. A manual "Run workflow" click now runs exactly the one
 # job picked, not every job at once (which is what the old bare `workflow_dispatch`
 # condition on each job did). Setup steps: docs/external_scheduler.md.
+#
+# **Only carry, eod-review and weekly-review keep a cron (owner decision 2026-10-08).**
+# The late cron copies were meant as a harmless fallback, but GitHub keeps at most one
+# *pending* run per concurrency group and cancels the older one when another arrives,
+# silently. A late copy running or waiting in `intraday-trading-ledger-write` could
+# therefore cancel an on-time dispatch -- the likely loss of 2026-10-07's 12:00 CT
+# cycle. The morning jobs' copies landed mid-session as no-ops and the cycle copies
+# added unscheduled Trader calls, so those five crons are gone. The remaining three land
+# after the close, when nothing is pending, and still have work to do if the on-time run
+# failed.
+#
+# **A rejected push is rebased, never re-run** (`.github/scripts/push_ledger.sh`, added
+# 2026-10-08). Each job used to reset to the latest main and re-run its whole command:
+# for `cycle` that repeated the Trader call (billed; only the last attempt reached the
+# ledger), and on the real account it would have discarded the ledger rows of orders
+# already at the broker. Every job below except `monitor` shares one concurrency group,
+# so the run that beat a push is almost always the paper workflow, writing other files,
+# and the rebase applies cleanly. If it conflicts, another run changed this ledger
+# despite the group; the job fails (GitHub's failure email) rather than guess.
 #
 # `weekly-review` never accepts, rejects, or retires a playbook proposal -- confirmed
 # directly against the brief before building it: the schedule table names no agent for
@@ -128,27 +149,15 @@ name: Intraday trading (S4)
           - eod-review
           - weekly-review
   schedule:
-    # preflight: ~06:45 Central.
-    - cron: "45 11 * * 1-5"
-    # research: ~07:30 Central.
-    - cron: "30 12 * * 1-5"
-    # preopen: ~08:15 Central.
-    - cron: "15 13 * * 1-5"
-    # open-batch: ~08:30 Central.
-    - cron: "30 13 * * 1-5"
+    # preflight, research, preopen, open-batch and cycle: no cron since 2026-10-08 (owner
+    # decision). cron-job.org dispatches them on the minute; GitHub's copies landed 4-6
+    # hours late, mid-session, where they did nothing useful and, waiting in the shared
+    # concurrency group, could cancel a pending on-time dispatch (see the header comment).
     # monitor: no cron (owner decision 2026-09-27, to keep private-repo Actions minutes
     # down -- each late firing started a loop of up to 5.5 hours). Every `cycle` already
     # runs the same invalidation/time-stop check, so shadow stops are enforced within
     # ~30 minutes; from Stage 2 on, real stop orders rest at Alpaca regardless. The job
     # stays available on demand via workflow_dispatch (job: monitor).
-    # cycle: every 30 minutes (20 until 2026-10-06, cut to save model spend), ~08:30-14:30
-    # Central. Upper bound widened to hour 20 (not 19) -- found 2026-09-26: under CST
-    # (after 2026-11-01's DST change), a 13-19 UTC range
-    # maps to Central 07:00-13:55, cutting off ~55 minutes before the real ~14:50 close.
-    # 13-20 covers Central 07:00-14:55 under CST and 08:00-15:55 under CDT -- the extra
-    # hour past close under CDT is harmless (pretrade declines once the market's shut,
-    # same as every other job here tolerates being triggered outside its real window).
-    - cron: "*/30 13-20 * * 1-5"
     # carry: ~14:45 Central.
     - cron: "45 19 * * 1-5"
     # eod-review: ~15:15 Central.
@@ -161,7 +170,7 @@ permissions:
 
 jobs:
   preflight:
-    if: github.event.schedule == '45 11 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'preflight')
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'preflight'
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write
@@ -192,30 +201,25 @@ jobs:
           set -e
           git config user.name "semimc-bot"
           git config user.email "semimc-bot@users.noreply.github.com"
-          for attempt in 1 2 3; do
-            git fetch origin main
-            git reset --hard origin/main
-            # A failing command still gets its ledger rows committed, then fails
-            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
-            status=0
-            uv run semimc intraday preflight --config config/paper.yaml || status=$?
-            git add ledger/intraday.sqlite3
-            if git diff --cached --quiet; then
-              echo "nothing to commit"
-              exit "$status"
-            fi
-            # The session date, as in cli.py::_trading_day: the day rolls over at 04:00 New York.
-            git commit -m "intraday preflight: $(TZ=America/New_York date -d '4 hours ago' +%F)"
-            if git push; then
-              exit "$status"
-            fi
-            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
-          done
-          echo "failed to push after 3 attempts"
-          exit 1
+          git fetch origin main
+          git reset --hard origin/main
+          # A failing command still gets its ledger rows committed, then fails
+          # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+          status=0
+          uv run semimc intraday preflight --config config/paper.yaml || status=$?
+          git add ledger/intraday.sqlite3
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit "$status"
+          fi
+          # The session date, as in cli.py::_trading_day: the day rolls over at 04:00 New York.
+          git commit -m "intraday preflight: $(TZ=America/New_York date -d '4 hours ago' +%F)"
+          # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
+          bash .github/scripts/push_ledger.sh
+          exit "$status"
 
   research:
-    if: github.event.schedule == '30 12 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'research')
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'research'
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write
@@ -245,30 +249,25 @@ jobs:
           set -e
           git config user.name "semimc-bot"
           git config user.email "semimc-bot@users.noreply.github.com"
-          for attempt in 1 2 3; do
-            git fetch origin main
-            git reset --hard origin/main
-            uv run semimc fetch --config config/paper.yaml
-            # A failing command still gets its ledger rows committed, then fails
-            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
-            status=0
-            uv run semimc intraday research --config config/paper.yaml || status=$?
-            git add ledger/intraday.sqlite3
-            if git diff --cached --quiet; then
-              echo "nothing to commit"
-              exit "$status"
-            fi
-            git commit -m "intraday research: $(TZ=America/New_York date -d '4 hours ago' +%F)"
-            if git push; then
-              exit "$status"
-            fi
-            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
-          done
-          echo "failed to push after 3 attempts"
-          exit 1
+          git fetch origin main
+          git reset --hard origin/main
+          uv run semimc fetch --config config/paper.yaml
+          # A failing command still gets its ledger rows committed, then fails
+          # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+          status=0
+          uv run semimc intraday research --config config/paper.yaml || status=$?
+          git add ledger/intraday.sqlite3
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit "$status"
+          fi
+          git commit -m "intraday research: $(TZ=America/New_York date -d '4 hours ago' +%F)"
+          # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
+          bash .github/scripts/push_ledger.sh
+          exit "$status"
 
   preopen:
-    if: github.event.schedule == '15 13 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'preopen')
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'preopen'
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write
@@ -290,26 +289,21 @@ jobs:
           set -e
           git config user.name "semimc-bot"
           git config user.email "semimc-bot@users.noreply.github.com"
-          for attempt in 1 2 3; do
-            git fetch origin main
-            git reset --hard origin/main
-            # A failing command still gets its ledger rows committed, then fails
-            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
-            status=0
-            uv run semimc intraday preopen --config config/paper.yaml || status=$?
-            git add ledger/intraday.sqlite3
-            if git diff --cached --quiet; then
-              echo "nothing to commit"
-              exit "$status"
-            fi
-            git commit -m "intraday preopen: $(TZ=America/New_York date -d '4 hours ago' +%F)"
-            if git push; then
-              exit "$status"
-            fi
-            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
-          done
-          echo "failed to push after 3 attempts"
-          exit 1
+          git fetch origin main
+          git reset --hard origin/main
+          # A failing command still gets its ledger rows committed, then fails
+          # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+          status=0
+          uv run semimc intraday preopen --config config/paper.yaml || status=$?
+          git add ledger/intraday.sqlite3
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit "$status"
+          fi
+          git commit -m "intraday preopen: $(TZ=America/New_York date -d '4 hours ago' +%F)"
+          # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
+          bash .github/scripts/push_ledger.sh
+          exit "$status"
 
   monitor:
     if: github.event_name == 'workflow_dispatch' && inputs.job == 'monitor'
@@ -392,7 +386,7 @@ jobs:
           echo "monitor loop finished for this invocation"
 
   open-batch:
-    if: github.event.schedule == '30 13 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'open-batch')
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'open-batch'
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write
@@ -420,30 +414,25 @@ jobs:
           set -e
           git config user.name "semimc-bot"
           git config user.email "semimc-bot@users.noreply.github.com"
-          for attempt in 1 2 3; do
-            git fetch origin main
-            git reset --hard origin/main
-            # A failing command still gets its ledger rows committed, then fails
-            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
-            status=0
-            uv run semimc intraday open-batch --config config/paper.yaml || status=$?
-            uv run semimc intraday placebo open-batch --config config/paper.yaml || status=$?
-            git add ledger/intraday.sqlite3 ledger/intraday_shadow.sqlite3
-            if git diff --cached --quiet; then
-              echo "nothing to commit"
-              exit "$status"
-            fi
-            git commit -m "intraday open-batch: $(TZ=America/New_York date -d '4 hours ago' +%F)"
-            if git push; then
-              exit "$status"
-            fi
-            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
-          done
-          echo "failed to push after 3 attempts"
-          exit 1
+          git fetch origin main
+          git reset --hard origin/main
+          # A failing command still gets its ledger rows committed, then fails
+          # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+          status=0
+          uv run semimc intraday open-batch --config config/paper.yaml || status=$?
+          uv run semimc intraday placebo open-batch --config config/paper.yaml || status=$?
+          git add ledger/intraday.sqlite3 ledger/intraday_shadow.sqlite3
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit "$status"
+          fi
+          git commit -m "intraday open-batch: $(TZ=America/New_York date -d '4 hours ago' +%F)"
+          # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
+          bash .github/scripts/push_ledger.sh
+          exit "$status"
 
   cycle:
-    if: github.event.schedule == '*/30 13-20 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'cycle')
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'cycle'
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write
@@ -471,28 +460,23 @@ jobs:
           set -e
           git config user.name "semimc-bot"
           git config user.email "semimc-bot@users.noreply.github.com"
-          for attempt in 1 2 3; do
-            git fetch origin main
-            git reset --hard origin/main
-            cycle_label="cycle_$(date -u +%H%M)"
-            # A failing command still gets its ledger rows committed, then fails
-            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
-            status=0
-            uv run semimc intraday cycle --cycle "$cycle_label" --config config/paper.yaml || status=$?
-            uv run semimc intraday placebo cycle --cycle "$cycle_label" --config config/paper.yaml || status=$?
-            git add ledger/intraday.sqlite3 ledger/intraday_shadow.sqlite3
-            if git diff --cached --quiet; then
-              echo "nothing to commit"
-              exit "$status"
-            fi
-            git commit -m "intraday cycle: $(TZ=America/New_York date -d '4 hours ago' +%F) $(date -u +%H:%M)"
-            if git push; then
-              exit "$status"
-            fi
-            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
-          done
-          echo "failed to push after 3 attempts"
-          exit 1
+          git fetch origin main
+          git reset --hard origin/main
+          cycle_label="cycle_$(date -u +%H%M)"
+          # A failing command still gets its ledger rows committed, then fails
+          # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+          status=0
+          uv run semimc intraday cycle --cycle "$cycle_label" --config config/paper.yaml || status=$?
+          uv run semimc intraday placebo cycle --cycle "$cycle_label" --config config/paper.yaml || status=$?
+          git add ledger/intraday.sqlite3 ledger/intraday_shadow.sqlite3
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit "$status"
+          fi
+          git commit -m "intraday cycle: $(TZ=America/New_York date -d '4 hours ago' +%F) $(date -u +%H:%M)"
+          # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
+          bash .github/scripts/push_ledger.sh
+          exit "$status"
 
   carry:
     if: github.event.schedule == '45 19 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'carry')
@@ -517,27 +501,22 @@ jobs:
           set -e
           git config user.name "semimc-bot"
           git config user.email "semimc-bot@users.noreply.github.com"
-          for attempt in 1 2 3; do
-            git fetch origin main
-            git reset --hard origin/main
-            # A failing command still gets its ledger rows committed, then fails
-            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
-            status=0
-            uv run semimc intraday carry --config config/paper.yaml || status=$?
-            uv run semimc intraday placebo carry --config config/paper.yaml || status=$?
-            git add ledger/intraday.sqlite3 ledger/intraday_shadow.sqlite3
-            if git diff --cached --quiet; then
-              echo "nothing to commit"
-              exit "$status"
-            fi
-            git commit -m "intraday carry: $(TZ=America/New_York date -d '4 hours ago' +%F)"
-            if git push; then
-              exit "$status"
-            fi
-            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
-          done
-          echo "failed to push after 3 attempts"
-          exit 1
+          git fetch origin main
+          git reset --hard origin/main
+          # A failing command still gets its ledger rows committed, then fails
+          # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+          status=0
+          uv run semimc intraday carry --config config/paper.yaml || status=$?
+          uv run semimc intraday placebo carry --config config/paper.yaml || status=$?
+          git add ledger/intraday.sqlite3 ledger/intraday_shadow.sqlite3
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit "$status"
+          fi
+          git commit -m "intraday carry: $(TZ=America/New_York date -d '4 hours ago' +%F)"
+          # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
+          bash .github/scripts/push_ledger.sh
+          exit "$status"
 
   eod-review:
     if: github.event.schedule == '15 20 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'eod-review')
@@ -574,29 +553,24 @@ jobs:
           set -e
           git config user.name "semimc-bot"
           git config user.email "semimc-bot@users.noreply.github.com"
-          for attempt in 1 2 3; do
-            git fetch origin main
-            git reset --hard origin/main
-            uv run semimc fetch --config config/paper.yaml
-            # A failing command still gets its ledger rows committed, then fails
-            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
-            status=0
-            uv run semimc intraday eod-review --config config/paper.yaml || status=$?
-            git add ledger/intraday.sqlite3
-            [ -d reports ] && git add reports/ || true
-            [ -d proposals ] && git add proposals/ || true
-            if git diff --cached --quiet; then
-              echo "nothing to commit"
-              exit "$status"
-            fi
-            git commit -m "intraday eod-review: $(TZ=America/New_York date -d '4 hours ago' +%F)"
-            if git push; then
-              exit "$status"
-            fi
-            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
-          done
-          echo "failed to push after 3 attempts"
-          exit 1
+          git fetch origin main
+          git reset --hard origin/main
+          uv run semimc fetch --config config/paper.yaml
+          # A failing command still gets its ledger rows committed, then fails
+          # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+          status=0
+          uv run semimc intraday eod-review --config config/paper.yaml || status=$?
+          git add ledger/intraday.sqlite3
+          [ -d reports ] && git add reports/ || true
+          [ -d proposals ] && git add proposals/ || true
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit "$status"
+          fi
+          git commit -m "intraday eod-review: $(TZ=America/New_York date -d '4 hours ago' +%F)"
+          # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
+          bash .github/scripts/push_ledger.sh
+          exit "$status"
 
   weekly-review:
     if: github.event.schedule == '45 20 * * 5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'weekly-review')
@@ -622,24 +596,19 @@ jobs:
           set -e
           git config user.name "semimc-bot"
           git config user.email "semimc-bot@users.noreply.github.com"
-          for attempt in 1 2 3; do
-            git fetch origin main
-            git reset --hard origin/main
-            # A failing command still gets its ledger rows committed, then fails
-            # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
-            status=0
-            uv run semimc intraday weekly-review --config config/paper.yaml || status=$?
-            git add ledger/intraday.sqlite3
-            [ -d reports ] && git add reports/ || true
-            if git diff --cached --quiet; then
-              echo "nothing to commit"
-              exit "$status"
-            fi
-            git commit -m "intraday weekly-review: $(TZ=America/New_York date -d '4 hours ago' +%F)"
-            if git push; then
-              exit "$status"
-            fi
-            echo "push rejected (attempt $attempt/3) -- refetching and retrying"
-          done
-          echo "failed to push after 3 attempts"
-          exit 1
+          git fetch origin main
+          git reset --hard origin/main
+          # A failing command still gets its ledger rows committed, then fails
+          # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
+          status=0
+          uv run semimc intraday weekly-review --config config/paper.yaml || status=$?
+          git add ledger/intraday.sqlite3
+          [ -d reports ] && git add reports/ || true
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit "$status"
+          fi
+          git commit -m "intraday weekly-review: $(TZ=America/New_York date -d '4 hours ago' +%F)"
+          # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
+          bash .github/scripts/push_ledger.sh
+          exit "$status"
