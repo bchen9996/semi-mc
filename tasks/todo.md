@@ -2720,7 +2720,11 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       comparison. Cost: about 18 more symbols of session data per Trader call, a few
       thousand input tokens. Streak: 3 clean days through 10-12 with no accepted trade
       proposal; the rule passes after 10-13's close if that day is clean and has one, else
-      after 10-14's (5 clean days).
+      after 10-14's (5 clean days). Verified: 1,223 tests passed. **Still to re-run:** the 11
+      `regime`/`factor_regime` model tests (`tests/test_models.py`,
+      `tests/test_models_addendum.py`, `test_cli.py::test_simulate_runs_for_every_model`),
+      blocked by a Smart App Control burst on statsmodels' `_kim_smoother` from 19:07 CT
+      on 2026-10-12 and still blocked at 20:39; they touch nothing this change did.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).
