@@ -298,6 +298,7 @@ intraday:
     bar_minutes: 5
     opening_range_minutes: 30
     volume_lookback_sessions: 10
+    panel_benchmarks: [SOXX, SMH, QQQ, SPY]   # + the universe = the market panel (owner decision 2026-10-12)
   placebo:
     stop_distance_pct: 0.02
     time_stop_minutes: 120

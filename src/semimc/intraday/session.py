@@ -18,6 +18,19 @@ be meaningless. Instead, today's cumulative IEX volume is divided by the average
 cumulative IEX volume over the same bar slots on the previous `lookback_sessions`
 sessions. Matching the time of day matters because volume is U-shaped through the day: a
 straight-line pro-rating of daily volume would read every morning as unusually busy.
+
+**The prior close is the previous session's last regular-session trade on IEX** (added
+2026-10-12), read from the same bars the volume lookback already fetches. The official
+close is set by the closing auction, which IEX doesn't carry, so it can differ by a few
+cents: close enough for "green or red on the day", not for a precise level. Added with
+the market panel (`jobs.py::market_panel`): the Researcher's triggers had started
+comparing a name with its peers ("ASML green while AMAT/LRCX trade red"), and up or down
+on the day was the one part the Trader still couldn't check.
+
+:data:`SESSION_FIELDS` describes every field :func:`symbol_session` returns. It is the
+single description both prompts rely on: the Researcher receives it (`jobs.py::
+trader_view`) so it writes triggers the Trader can check, and a test pins its keys to the
+function's actual output.
 """
 
 from __future__ import annotations
@@ -30,6 +43,31 @@ import pandas as pd
 _EXCHANGE_TZ = "America/New_York"
 _OPEN = dt.time(9, 30)
 _CLOSE = dt.time(16, 0)
+
+SESSION_FIELDS: dict[str, str] = {
+    "open": "today's first regular-session trade, in dollars",
+    "high": "today's regular-session high so far",
+    "low": "today's regular-session low so far",
+    "last": "the latest 5-minute bar's close",
+    "last_bar_start_et": "start time of that bar, New York time (HH:MM)",
+    "prior_close": (
+        "the previous session's last regular-session trade (IEX), within a few cents of the "
+        "official close"
+    ),
+    "change_from_prior_close_pct": (
+        "last versus prior_close as a ratio (0.012 is +1.2%): green or red on the day"
+    ),
+    "change_from_open_pct": "last versus today's open as a ratio",
+    "vwap": "today's volume-weighted average price so far",
+    "opening_range": "the first N minutes' high and low, and whether that window is complete",
+    "last_vs_opening_range": "above, inside or below the opening range",
+    "volume_so_far_iex": "today's share volume on IEX alone (a small slice of all trading)",
+    "relative_volume": (
+        "today's IEX volume versus the same time of day over recent sessions: 1.0 is "
+        "normal, above 1.0 busier"
+    ),
+    "relative_volume_sessions": "how many earlier sessions relative_volume compares with",
+}
 
 
 def _frame(bars: list[Any]) -> pd.DataFrame:
@@ -112,6 +150,9 @@ def symbol_session(
         else float(typical.mean())
     )
 
+    before_today = frame[dates < now_ny.date()]
+    prior_close = float(before_today["close"].iloc[-1]) if not before_today.empty else None
+
     # Compare like with like: each earlier session's volume over the same bar slots.
     last_slot = today.index[-1].time()
     earlier = frame[(dates < now_ny.date()) & (frame.index.time <= last_slot)]
@@ -129,6 +170,10 @@ def symbol_session(
         "low": _round(today["low"].min()),
         "last": _round(last),
         "last_bar_start_et": today.index[-1].strftime("%H:%M"),
+        "prior_close": _round(prior_close),
+        "change_from_prior_close_pct": _round(
+            (last - prior_close) / prior_close if prior_close else None
+        ),
         "change_from_open_pct": _round((last - open_price) / open_price if open_price else None),
         "vwap": _round(vwap),
         "opening_range": {

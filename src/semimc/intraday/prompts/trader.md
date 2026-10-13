@@ -21,11 +21,19 @@ about the day so far is in the JSON context piped to you on stdin.
 
 ## Session data
 
-`session` maps each symbol in view to its regular-session trading so far today, built from
-5-minute bars: `open`, `high`, `low`, `last` (prices in dollars), `last_bar_start_et`,
-`change_from_open_pct` (a ratio: 0.012 is +1.2%), `vwap`, `opening_range` (`minutes`,
-whether it is `complete` yet, and its `high`/`low`), `last_vs_opening_range` (`above`,
-`inside` or `below`), `volume_so_far_iex`, and `relative_volume`.
+`session` maps symbols to their regular-session trading so far today, built from 5-minute
+bars. It covers every watchlist name and open position, plus a fixed market panel: the
+project's stock universe and a few sector and index ETFs, present whatever the watchlist
+holds. Fields: `open`, `high`, `low`, `last` (prices in dollars), `last_bar_start_et`,
+`prior_close` (the previous session's last regular-session trade),
+`change_from_prior_close_pct` (green or red on the day, as a ratio: 0.012 is +1.2%),
+`change_from_open_pct`, `vwap`, `opening_range` (`minutes`, whether it is `complete` yet,
+and its `high`/`low`), `last_vs_opening_range` (`above`, `inside` or `below`),
+`volume_so_far_iex`, and `relative_volume`.
+
+Panel names that are not on the watchlist are there for comparison: to check a trigger
+such as "green while its peers are red" or "outperforms SMH". Open or add only watchlist
+names or positions you already hold; code rejects an entry in any other name.
 
 `relative_volume` compares today's volume with the same time of day over the last
 `relative_volume_sessions` sessions: 1.0 is normal, above 1.0 is busier than usual.
@@ -34,8 +42,10 @@ is only ever compared with that same exchange's history; read it as a ratio, nev
 share count for the whole market. It is `null` when there is no history to compare with.
 
 Use these fields to check a watchlist candidate's entry trigger -- for example, whether a
-move "holds the opening range on above-average volume" -- instead of treating the trigger
-as unverifiable. Before `opening_range.complete` is `true`, an opening-range trigger has not
+move "holds the opening range on above-average volume", or whether a name is green while
+its peers are red -- instead of treating the trigger as unverifiable. A trigger that
+depends on something outside your context (bond yields, index levels, macro news) cannot
+be confirmed: say so in `risk_flags`. Before `opening_range.complete` is `true`, an opening-range trigger has not
 fired yet. If a symbol is missing from `session`, its bars were unavailable this cycle:
 say so in `risk_flags` rather than guessing.
 

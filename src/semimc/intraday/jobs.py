@@ -49,6 +49,7 @@ from ..execution.market_data import AlpacaMarketDataClient, AlpacaOptionsMarketD
 from ..execution.news import AlpacaNewsClient
 from ..execution.orders import round_to_tick
 from .context import (
+    TRADER_SECTIONS,
     ReflectionUpdate,
     WatchlistCandidate,
     build_researcher_context,
@@ -85,7 +86,7 @@ from .proposals import (
 )
 from .reflect import _entry_and_proposal, record_mechanical_reflection
 from .security import sanitize_and_log
-from .session import session_snapshot
+from .session import SESSION_FIELDS, session_snapshot
 
 
 def midpoint_price(quote: Any) -> float | None:
@@ -539,6 +540,33 @@ def run_preflight(
 # -- research (Phase 6) ------------------------------------------------------------------
 
 
+def market_panel(config: Config) -> list[str]:
+    """The names every cycle's session data covers whatever the watchlist holds: the
+    universe plus `intraday.session_data.panel_benchmarks`, universe first (owner decision
+    2026-10-12). Lets the Trader check a trigger that compares a candidate with its peers
+    or a sector ETF; reference only, since `validate_proposal` keeps entries to the
+    watchlist."""
+    names = [*config.universe.tickers, *config.intraday.session_data.panel_benchmarks]
+    return list(dict.fromkeys(names))
+
+
+def trader_view(config: Config) -> dict[str, Any]:
+    """What the Trader can see each cycle, for the Researcher's context (2026-10-12).
+    Built from the same constants and config the Trader's own context uses
+    (`context.py::TRADER_SECTIONS`, `session.py::SESSION_FIELDS`, `market_panel`), so a
+    change to what the Trader receives changes this description with it."""
+    settings = config.intraday.session_data
+    return {
+        "sections": TRADER_SECTIONS,
+        "market_panel": market_panel(config),
+        "session_fields": SESSION_FIELDS,
+        "bar_minutes": settings.bar_minutes,
+        "opening_range_minutes": settings.opening_range_minutes,
+        "relative_volume_sessions": settings.volume_lookback_sessions,
+        "cycle_interval_minutes": config.intraday.schedule.cycle_interval_minutes,
+    }
+
+
 def _session_context(
     symbols: list[str],
     market_data: AlpacaMarketDataClient,
@@ -836,6 +864,7 @@ def run_research(
             premarket_moves_today,
             upcoming_earnings,
             realized_vol,
+            trader_view=trader_view(config),
         )
         response = invoke_role(
             "researcher",
@@ -1174,7 +1203,11 @@ def run_cycle(
 
     symbols_in_view = {row["symbol"] for row in tradable_watchlist} | set(positions_notional)
     headlines = ledger.recent_headlines_for(as_of, list(symbols_in_view)) if symbols_in_view else []
-    session = _session_context(sorted(symbols_in_view), market_data, intraday, ledger, now)
+    # Session data also covers the market panel (2026-10-12), so a trigger comparing a
+    # candidate with peers or a sector ETF can be checked. Headlines stay with the names
+    # in view: the panel is for prices, not a second news feed.
+    session_symbols = sorted(symbols_in_view | set(market_panel(config)))
+    session = _session_context(session_symbols, market_data, intraday, ledger, now)
 
     try:
         context = build_trader_context(
@@ -1266,6 +1299,7 @@ def run_cycle(
             option_forecast_vol=option_forecast_vol,
             spot_price=spot_price,
             next_earnings_date=next_earnings_date,
+            tradable_symbols=frozenset(symbols_in_view),
         )
         failures = validate_proposal(proposal, validation_context)
         status = "rejected" if failures else "accepted"

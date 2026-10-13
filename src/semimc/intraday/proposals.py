@@ -168,6 +168,13 @@ class ValidationContext:
     next_earnings_date: dict[str, str] | None = (
         None  # symbol -> ISO date, jobs.py::_upcoming_earnings shape
     )
+    # What an open/add may name this cycle: the watchlist after the spread gate, plus
+    # positions already held (2026-10-12). Since the market panel the Trader sees every
+    # universe name and four ETFs; keeping entries to the watchlist keeps them to names
+    # the Researcher vetted and the spread gate passed, and keeps the placebo, which draws
+    # from the same watchlist, a fair comparison. `None` skips the check (unit tests that
+    # aren't about it); `jobs.py::run_cycle`, the only real caller, always sets it.
+    tradable_symbols: frozenset[str] | None = None
 
 
 def _accepted_proposals(context: ValidationContext) -> list[dict]:
@@ -202,6 +209,12 @@ def validate_proposal(proposal: TradeProposal, context: ValidationContext) -> li
 
     if proposal.action not in OPEN_OR_ADD_ACTIONS:
         return failures
+
+    if context.tradable_symbols is not None and proposal.symbol not in context.tradable_symbols:
+        failures.append(
+            f"{proposal.symbol} is neither on this cycle's tradable watchlist nor held; "
+            "the market panel is reference data only"
+        )
 
     risk = context.config.risk
 
