@@ -202,11 +202,18 @@ compared to a closed form, the closed form is written out in the test.
   Windows Code Integrity log (`Microsoft-Windows-CodeIntegrity/Operational`, event 3077).
   **Smart App Control** is on for this machine. It blocks unsigned compiled files that
   Microsoft's cloud reputation service doesn't vouch for, and many `.pyd` extensions in
-  `.venv` are unsigned. The blocks come in **bursts**: one file refused for roughly 20-40
-  minutes, then allowed again with nothing changed. On 2026-09-29, 13 tests (the
-  `signals` CLI tests and `test_signals_forecasting.py`) failed on
+  `.venv` are unsigned. The blocks come in **bursts**: one file refused for a while, then
+  allowed again with nothing changed. Most bursts last 20-40 minutes, but they can run
+  well past an hour. On 2026-09-29, 13 tests (the `signals` CLI tests and
+  `test_signals_forecasting.py`) failed on
   `sklearn/preprocessing/_csr_polynomial_expansion` from 17:16 to 17:50 and passed
-  unchanged once the burst ended. Since 2026-09-15 it has hit about 18 different files:
+  unchanged once the burst ended. On 2026-10-12, statsmodels'
+  `tsa/regime_switching/_kim_smoother` was blocked from 19:07 CT and still blocked at
+  20:39 (154 refusals logged), failing the 11 `regime`/`factor_regime` model tests;
+  retrying every few minutes changed nothing. When a burst outlasts the session and the
+  blocked tests don't touch the change, don't hold the commit for it: name the blocked
+  tests in the commit or `tasks/todo.md` and re-run them next session. Since 2026-09-15 it
+  has hit about 18 different files:
   scipy (7), scikit-learn (3), statsmodels (3), matplotlib, curl_cffi, `pytest.exe` and
   `semimc.exe`. So it is not one bad file, and dropping a dependency won't fix it (scipy
   and statsmodels are blocked too, and the project can't run without them). Smart App
