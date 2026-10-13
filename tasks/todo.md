@@ -2691,6 +2691,36 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       cycle instead of being re-run around (docs/external_scheduler.md). Unchanged:
       `forecast_journal.yml` keeps its deliberate re-run (no orders, no model call, runs
       after hours).
+- [x] **2026-10-08/09/12: three clean days, no trades -- the Researcher's triggers had
+      outgrown the Trader's data; market panel built 2026-10-12 (owner chose both fixes).**
+      Every cycle answered `no_trade` (27, 32, 22 a day) after accepted trades on most
+      earlier days. On 10-08 and 10-12, 19 of 27 and 21 of 22 answers cited data the Trader
+      couldn't see (2-3 a day before 10-07): from 10-07 the Researcher's triggers compared
+      names with peers and sector ETFs ("ASML green while AMAT/LRCX trade red",
+      "outperforms SMH", "SOX/QQQ stabilizing") or named yields and Iran headlines, and
+      session data covered only watchlist names and positions. 10-09 was different: the
+      triggers were checkable and didn't fire (inside the opening range on low volume).
+      Not the thinking cap or a model change: the trigger style changed in the 07:30 CT
+      Researcher run, before the Trader's cost oddity began. Fixes: (1) each cycle's
+      session data also covers the market panel, the universe plus
+      `intraday.session_data.panel_benchmarks` (SOXX, SMH, QQQ, SPY; owner-confirmed), in
+      the same bars request (`jobs.py::market_panel`; alpaca-py follows page tokens, so the
+      larger request comes back whole); (2) session data gains `prior_close` and
+      `change_from_prior_close_pct` (the previous session's last regular-session IEX trade,
+      within cents of the official close), since "green/red on the day" was the part of
+      the 10-12 trigger the panel alone wouldn't have answered; (3) the Researcher gets a
+      `trader_view` section built from the same constants the Trader's context uses
+      (`context.py::TRADER_SECTIONS`, `session.py::SESSION_FIELDS`, the panel), and its
+      prompt says to write triggers only in those terms, naming what the Trader can't see;
+      tests pin both constants to the real outputs, so the description can't drift;
+      (4) `validate_proposal` rejects an open/add in a name that is neither on the cycle's
+      spread-gated watchlist nor held (`ValidationContext.tradable_symbols`): the Trader
+      now sees names the Researcher never vetted, and the placebo, which draws from the
+      same watchlist, stays a fair comparison. The Trader prompt explains the panel is for
+      comparison. Cost: about 18 more symbols of session data per Trader call, a few
+      thousand input tokens. Streak: 3 clean days through 10-12 with no accepted trade
+      proposal; the rule passes after 10-13's close if that day is clean and has one, else
+      after 10-14's (5 clean days).
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).

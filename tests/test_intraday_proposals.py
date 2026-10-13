@@ -406,3 +406,27 @@ def test_cooldown_compares_a_naive_utc_now_against_the_ledgers_aware_stopout_tim
     )
     failures = validate_proposal(_open(), context)
     assert any("cooldown" in f for f in failures)
+
+
+# -- tradable symbols (2026-10-12, with the market panel) ---------------------------------
+
+
+def test_an_open_outside_the_tradable_symbols_is_rejected(tmp_path):
+    # The Trader sees the whole market panel; it may enter only what it was given to trade.
+    context = _context(tmp_path, tradable_symbols=frozenset({"MU"}))
+    failures = validate_proposal(_open(symbol="NVDA"), context)
+    assert any("NVDA is neither on this cycle's tradable watchlist nor held" in f for f in failures)
+
+
+def test_an_open_or_add_inside_the_tradable_symbols_passes_that_check(tmp_path):
+    context = _context(tmp_path, tradable_symbols=frozenset({"NVDA"}))
+    for action in ("open", "add"):
+        failures = validate_proposal(_open(action=action), context)
+        assert not any("tradable watchlist" in f for f in failures), action
+
+
+def test_a_close_is_never_held_to_the_tradable_symbols(tmp_path):
+    # Reducing exposure must always be possible, whatever the cycle could enter.
+    context = _context(tmp_path, tradable_symbols=frozenset(), positions={"NVDA": 9_500.0})
+    close = TradeProposal(action="close", symbol="NVDA", thesis="done")
+    assert validate_proposal(close, context) == []

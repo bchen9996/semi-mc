@@ -22,10 +22,12 @@ from fixtures.injection_corpus import INJECTION_CORPUS
 from semimc.execution.broker import BrokerError, OrderRequest
 from semimc.execution.fake_broker import FakeBroker
 from semimc.execution.market_data import OptionMarketQuote
+from semimc.intraday.context import TRADER_SECTIONS
 from semimc.intraday.jobs import (
     _protect_unguarded_positions,
     current_prices,
     mark_broker_to_market,
+    market_panel,
     run_carry,
     run_cycle,
     run_eod_review,
@@ -44,6 +46,7 @@ from semimc.intraday.orders import (
     sync_open_orders,
 )
 from semimc.intraday.proposals import TradeProposal
+from semimc.intraday.session import SESSION_FIELDS
 from semimc.live.ledger import Ledger as PaperLedger
 
 AS_OF = pd.Timestamp("2026-09-21")
@@ -1554,6 +1557,37 @@ def test_run_research_records_a_brief_and_watchlist(config, tmp_path, market):
     ledger.close()
 
 
+def test_run_research_tells_the_researcher_what_the_trader_can_see(config, tmp_path, market):
+    # 2026-10-12: the Researcher kept writing triggers on yields, macro news and peers the
+    # Trader never saw. `trader_view` is generated from the code that builds the Trader's
+    # context, so it can't drift from what the Trader actually receives.
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    calls, client = _recording_llm_client(
+        _result_json(structured_output={"morning_brief": "quiet", "watchlist": []})
+    )
+
+    run_research(
+        cfg,
+        FakeBroker(),
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        market,
+        ledger,
+        client,
+        AS_OF,
+        "research",
+        NOW,
+    )
+
+    view = json.loads(calls[0]["stdin"])["sections"]["trader_view"]
+    assert view["market_panel"] == market_panel(cfg)
+    assert set(view["session_fields"]) == set(SESSION_FIELDS)
+    assert set(view["sections"]) == set(TRADER_SECTIONS)
+    assert view["opening_range_minutes"] == cfg.intraday.session_data.opening_range_minutes
+    ledger.close()
+
+
 def test_run_research_succeeds_before_the_market_opens(config, tmp_path, market):
     """(Phase 11) A real bug found while building Stage 1's shadow mode: research runs
     at 07:30 Central, before the 08:30 open, so `check_intraday_pretrade`'s default
@@ -2267,11 +2301,67 @@ def test_run_cycle_gives_the_trader_session_data_for_symbols_in_view(config, tmp
 
     run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, now)
 
-    assert market_data.bar_requests[0]["symbols"] == ["NVDA"]
+    assert market_data.bar_requests[0]["symbols"] == sorted({"NVDA", *market_panel(cfg)})
     session = json.loads(calls[0]["stdin"])["sections"]["session"]
     assert session["NVDA"]["open"] == 186
     assert session["NVDA"]["opening_range"]["complete"] is True
     assert session["NVDA"]["last_vs_opening_range"] == "above"
+    ledger.close()
+
+
+def test_run_cycle_session_data_covers_the_market_panel_beyond_the_watchlist(config, tmp_path):
+    # 2026-10-12: the Researcher's triggers compared candidates with peers and sector ETFs
+    # ("outperforms SMH"), which the Trader could not check while session data covered
+    # only the watchlist. A panel name with bars now appears whatever the watchlist holds.
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="relative strength")
+    now = dt.datetime(2026, 9, 21, 14, 12)  # 10:12 New York
+    market_data = _FakeMarketData(
+        quotes={"NVDA": _quote(190.0, at=now)},
+        bars_by_symbol={
+            "NVDA": _session_bars(AS_OF.date(), [186, 187, 188, 187, 186, 187, 190]),
+            "SOXX": _session_bars(AS_OF.date(), [250, 249, 248, 249, 250, 251, 252]),
+        },
+    )
+    calls, client = _recording_llm_client(_result_json())
+
+    run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, now)
+
+    assert "SOXX" in market_panel(cfg)
+    session = json.loads(calls[0]["stdin"])["sections"]["session"]
+    assert set(session) == {"NVDA", "SOXX"}
+    assert session["SOXX"]["last"] == 252
+    # The panel is for prices only: headlines and the watchlist stay with names in view.
+    assert [row["symbol"] for row in json.loads(calls[0]["stdin"])["sections"]["watchlist"]] == [
+        "NVDA"
+    ]
+    ledger.close()
+
+
+def test_run_cycle_rejects_an_open_in_a_panel_name_that_is_not_on_the_watchlist(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0), "SOXX": _quote(250.0)})
+    proposal = {
+        "action": "open",
+        "symbol": "SOXX",
+        "side": "buy",
+        "size_pct": 0.02,
+        "limit_price": 250.0,
+        "thesis": "sector strength",
+        "invalidation_price": 245.0,
+        "time_stop_minutes": 60,
+    }
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
+
+    result = run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, NOW)
+
+    assert result.proposals_rejected == 1
+    assert result.orders_submitted == []
+    [recorded] = ledger.proposals_for(AS_OF)
+    assert "SOXX is neither on this cycle's tradable watchlist nor held" in recorded["reason"]
     ledger.close()
 
 

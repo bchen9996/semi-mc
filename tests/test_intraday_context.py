@@ -8,6 +8,7 @@ import pytest
 
 from semimc.config import IntradayConfig
 from semimc.intraday.context import (
+    TRADER_SECTIONS,
     ReflectionUpdate,
     WatchlistCandidate,
     build_context,
@@ -210,6 +211,7 @@ def test_build_researcher_context_marks_only_news_as_untrusted():
         premarket_moves={"NVDA": 0.01},
         upcoming_earnings={"AMD": "2026-09-25"},
         realized_vol={"NVDA": 0.35},
+        trader_view={"market_panel": ["NVDA"]},
     )
     assert bundle.payload["untrusted"] == ["news"]
     assert bundle.role == "researcher"
@@ -222,8 +224,17 @@ def test_build_researcher_context_passes_through_every_section():
     upcoming_earnings = {"AMD": "2026-09-25"}
     realized_vol = {"NVDA": 0.35}
 
+    trader_view = {"market_panel": ["NVDA", "SOXX"], "session_fields": {"last": "..."}}
+
     bundle = build_researcher_context(
-        AS_OF, "research", config, news, premarket_moves, upcoming_earnings, realized_vol
+        AS_OF,
+        "research",
+        config,
+        news,
+        premarket_moves,
+        upcoming_earnings,
+        realized_vol,
+        trader_view=trader_view,
     )
 
     sections = bundle.payload["sections"]
@@ -231,6 +242,18 @@ def test_build_researcher_context_passes_through_every_section():
     assert sections["premarket_moves"] == premarket_moves
     assert sections["upcoming_earnings"] == upcoming_earnings
     assert sections["realized_vol"] == realized_vol
+    assert sections["trader_view"] == trader_view
+
+
+def test_trader_sections_describe_exactly_the_trader_payloads_sections(tmp_path):
+    # The Researcher reads TRADER_SECTIONS as the list of what the Trader receives; a
+    # section added to the payload without a description would go unmentioned.
+    ledger = _ledger(tmp_path)
+    bundle = build_trader_context(
+        AS_OF, "cycle_1", IntradayConfig(), ledger, watchlist=[], positions={}, prices={}
+    )
+    assert set(TRADER_SECTIONS) == set(bundle.payload["sections"])
+    ledger.close()
 
 
 # -- WatchlistCandidate / researcher_output_json_schema -----------------------------------

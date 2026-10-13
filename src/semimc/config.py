@@ -564,11 +564,18 @@ class IntradaySessionDataConfig(_Base):
     volume for the time of day. Starting choices, not researched figures, same caveat as
     `IntradayRiskConfig.max_spread_bps`. 30 minutes matches the Researcher's own habit of
     writing "after the first 15-30 minutes" triggers; 10 sessions is two weeks.
+
+    `panel_benchmarks` (owner decision 2026-10-12) joins the universe in the market panel
+    every cycle covers (`intraday/jobs.py::market_panel`): from 2026-10-07 the
+    Researcher's triggers compared names with peers and sector ETFs ("outperforms SMH",
+    "SOX/QQQ stabilizing"), which the Trader could not check and so declined. Reference
+    data only: the Trader may still open only watchlist names (`validate_proposal`).
     """
 
     bar_minutes: int = Field(5, gt=0)
     opening_range_minutes: int = Field(30, gt=0)
     volume_lookback_sessions: int = Field(10, gt=0)
+    panel_benchmarks: list[str] = Field(default_factory=lambda: ["SOXX", "SMH", "QQQ", "SPY"])
 
 
 class IntradayPlaybookConfig(_Base):

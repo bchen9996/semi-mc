@@ -88,6 +88,24 @@ def context_hash(bundle: ContextBundle) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+TRADER_SECTIONS: dict[str, str] = {
+    "watchlist": "today's candidates from your watchlist, minus any a spread check drops",
+    "positions": "open positions, symbol to signed notional",
+    "prices": "latest trade price (or quote midpoint) for watchlist names and positions",
+    "budget_remaining": "new positions, and round trips per symbol, still allowed today",
+    "rejected_today": "proposals rejected so far today, with the reason",
+    "headlines": "today's headlines for watchlist names and open positions only",
+    "session": (
+        "trading so far today, from 5-minute bars, for each watchlist name, each open "
+        "position and every name in market_panel; fields as in session_fields"
+    ),
+    "options_available": "whether option proposals are being priced this cycle",
+}
+"""What each section of :func:`build_trader_context`'s payload holds, in words: the
+Researcher receives it (`jobs.py::trader_view`) so its triggers name only what the Trader
+can check, and a test pins these keys to the payload's actual sections (2026-10-12)."""
+
+
 def build_trader_context(
     as_of: pd.Timestamp,
     cycle: str,
@@ -284,6 +302,8 @@ def build_researcher_context(
     premarket_moves: dict[str, float],
     upcoming_earnings: dict[str, str],
     realized_vol: dict[str, float],
+    *,
+    trader_view: dict[str, Any],
 ) -> ContextBundle:
     """The Researcher's once-a-morning payload (Phase 6).
 
@@ -293,11 +313,18 @@ def build_researcher_context(
     garman_klass` on cached OHLC), not labeled untrusted -- the same distinction
     `build_trader_context` already draws between `watchlist`/`prices` (untrusted-sourced)
     and `budget_remaining` (ours).
+
+    `trader_view` (2026-10-12, `jobs.py::trader_view`) describes what the Trader will see
+    each cycle, generated from the code that builds its context. From 2026-10-07 the
+    Researcher wrote triggers on peers, sector ETFs, yields and macro headlines; the
+    Trader could check none of them and declined every cycle. Required, so no caller can
+    leave the Researcher guessing.
     """
     sections = {
         "news": news,
         "premarket_moves": premarket_moves,
         "upcoming_earnings": upcoming_earnings,
         "realized_vol": realized_vol,
+        "trader_view": trader_view,
     }
     return build_context("researcher", as_of, cycle, sections, untrusted_keys=["news"])

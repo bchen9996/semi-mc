@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from semimc.intraday.session import session_snapshot, symbol_session
+from semimc.intraday.session import SESSION_FIELDS, session_snapshot, symbol_session
 
 DAY = dt.date(2026, 9, 30)
 PRIOR = [dt.date(2026, 9, 25), dt.date(2026, 9, 28), dt.date(2026, 9, 29)]
@@ -147,3 +147,34 @@ def test_a_symbol_without_a_bar_today_is_left_out_of_the_snapshot():
         10,
     )
     assert list(snapshot) == ["NVDA"]
+
+
+# -- prior close (2026-10-12, with the market panel) ---------------------------------------
+
+
+def test_prior_close_is_the_previous_sessions_last_regular_session_bar():
+    # Two earlier sessions; the latest ends at 52.0 before an after-hours print that must
+    # not count (post-market bars are dropped like pre-market ones).
+    history = _flat_day(PRIOR[1], 4, 40.0, 100.0) + [
+        *_flat_day(PRIOR[2], 3, 50.0, 100.0),
+        _Bar(_et(PRIOR[2], "15:55"), 52.0, 52.5, 51.5, 52.0, 100.0),
+        _Bar(_et(PRIOR[2], "17:00"), 60.0, 60.5, 59.5, 60.0, 100.0),
+    ]
+    out = symbol_session(history + _today([51.0, 53.04]), _et(DAY, "09:42"), 30, 10)
+    assert out["prior_close"] == 52.0
+    assert out["change_from_prior_close_pct"] == pytest.approx(0.02)  # 53.04 / 52 - 1
+
+
+def test_prior_close_is_none_without_an_earlier_session():
+    out = symbol_session(_today([100, 101]), _et(DAY, "09:40"), 30, 10)
+    assert out["prior_close"] is None
+    assert out["change_from_prior_close_pct"] is None
+
+
+def test_session_fields_describe_exactly_what_symbol_session_returns():
+    # The Researcher is told SESSION_FIELDS is what the Trader can check; a field added to
+    # or dropped from the output without updating it would quietly mislead the triggers.
+    out = symbol_session(
+        _flat_day(PRIOR[2], 4, 50.0, 100.0) + _today([100, 101]), _et(DAY, "09:40"), 30, 10
+    )
+    assert set(SESSION_FIELDS) == set(out)
