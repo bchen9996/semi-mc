@@ -2730,6 +2730,25 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       panel name, 4 mentioned missing or weak data (21 of 22 on 10-12). Still no trade, on
       the merits: SOXX red all day (-2.46% at its low), MU inside its opening range. Clean
       day, streak 4 with no accepted trade proposal: a clean 10-14 passes the rule (5).
+- [x] **2026-10-14: clean, streak 5 -- the Stage 2 rule passes** (5 clean days without an
+      accepted trade proposal, 10-08 to 10-14). Promotion stays the owner's decision. Still
+      no trade (35 no_trade): all three triggers (AMAT, LRCX, ASML) were long breakouts that
+      also needed equipment peers green on the day. Why the agent stays quiet (owner asked
+      2026-10-13): every candidate since 10-08 has been a 4-5-condition long breakout;
+      the most common failures were price inside the opening range, low volume (10-09) and
+      the sector red (all 25 answers on 10-13); 2-3 names a day gave few chances; and in
+      practice it is long-only (the schema allows shorts, but neither prompt mentions them
+      and no short entry has ever been sent). Sitting out paid: over 10-08 to 10-13 the
+      placebo, trading random entries in the same names under the same risk rules, closed
+      14 trades for -$805 net. **Owner chose option A of four (2026-10-14):** the
+      Researcher prompt now asks for four to six candidates instead of "a short list",
+      with no padding and, where possible, triggers that don't all hinge on the same
+      condition. Not chosen: short setups (B; the short path is untested end to end and
+      needs margin/borrow on the real account -- test in shadow first if wanted), simpler
+      triggers (C; lowers the bar the experiment measures), and leaving it (D; the
+      playbook's 20-trade evidence threshold would never be reached). Takes effect with
+      the 2026-10-15 07:30 CT research run, the same day Stage 2 could start: read day
+      one's trade count with both changes in mind.
 - [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
       Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
       existing fields (no code needed -- every field is already `--set`/YAML-overridable).
