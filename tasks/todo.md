@@ -2749,9 +2749,19 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       playbook's 20-trade evidence threshold would never be reached). Takes effect with
       the 2026-10-15 07:30 CT research run, the same day Stage 2 could start: read day
       one's trade count with both changes in mind.
-- [ ] Stage 2 -- equities, half budget, 2 weeks. Flip `intraday.shadow_mode: false` once
-      Stage 1's clean-day streak passes (above) and the owner decides; "half budget" is a plain edit to `intraday.risk`'s
-      existing fields (no code needed -- every field is already `--set`/YAML-overridable).
+- [ ] Stage 2 -- equities, half budget, 2 weeks. **Owner's go 2026-10-14; starts
+      2026-10-15** (06:45 CT preflight). `config/paper.yaml`: `intraday.shadow_mode:
+      false`, so open-batch/cycle/carry/monitor submit real orders to PA33HJGNHLI7 (owner
+      confirmed the number 2026-10-14; code has never checked it, since shadow mode skips
+      the account check -- a wrong number fails preflight and every cycle refuses to
+      trade, it can't reach another account). Half budget = `new_positions_per_day` 3,
+      `daily_turnover_pct` 0.75, `gross_cap_pct` 0.75, `overnight_gross_cap_pct` 0.50;
+      `risk_per_trade_pct` and `single_name_cap_pct` unchanged, so each trade is full
+      size. The placebo keeps running on its own shadow ledger. After the first real
+      trade, check incidents for the two Alpaca behaviors no test could pin: the OTO
+      stop leg found by `client_order_id`, and cancel timing (the 5-second wait is a
+      guess). The brief sets no promotion rule for Stage 3; decide from the 2 weeks'
+      results.
 - [ ] Stage 3 -- equities, full budget.
 - [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded). **Built
       ahead of turn, 2026-09-26**: schema/config/gates (Phase 12a) and the real Alpaca
