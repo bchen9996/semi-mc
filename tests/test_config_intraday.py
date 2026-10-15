@@ -98,21 +98,30 @@ def test_intraday_settings_are_overridable_with_set():
     assert cfg.intraday.budget.max_cost_usd_per_day == pytest.approx(5.0)
 
 
-def test_paper_yaml_loads_intraday_at_rollout_stage_1():
+def test_paper_yaml_loads_intraday_at_rollout_stage_2():
     """`config/paper.yaml` is the shared config root for both s0/s3 and S4. Rollout Stage
-    1 started 2026-09-23 (owner's deliberate action, mirroring s3's own two-step go-live --
-    `test_paper_yaml_loads_and_keeps_runs_separate_from_research_runs`'s docstring):
-    `trading_enabled: true` lets the real loop run for real, but `shadow_mode: true`
-    (unchanged, still the safe default) means every fill still goes through `FakeBroker`,
-    never Alpaca -- see `tasks/todo.md`'s "Rollout stages from the brief" entry."""
+    1 (shadow) started 2026-09-23; Stage 2 starts 2026-10-15 (owner's go 2026-10-14, after
+    the Stage 2 rule passed): `shadow_mode: false` submits real orders to the registered
+    paper account, under half the brief's budget. Half means the four count and exposure
+    limits; per-trade risk and the single-name cap stay at the defaults, so each trade is
+    full size, just fewer at once -- see `tasks/todo.md`'s "Rollout stages from the
+    brief" entry."""
     cfg = load_config(PROJECT_ROOT / "config" / "paper.yaml")
+    defaults = load_config().intraday.risk
     assert cfg.intraday.trading_enabled is True
     assert cfg.intraday.registered_account == "PA33HJGNHLI7"
     # The free plan's delayed consolidated quote for the spread gate, not IEX's own book.
     assert cfg.intraday.risk.spread_feed == "delayed_sip"
     assert cfg.intraday.options.enabled is False
     assert cfg.intraday.options.shadow_pricing is False
-    assert cfg.intraday.shadow_mode is True
+    assert cfg.intraday.shadow_mode is False
+    risk = cfg.intraday.risk
+    assert risk.new_positions_per_day == defaults.new_positions_per_day // 2 == 3
+    assert risk.daily_turnover_pct == pytest.approx(defaults.daily_turnover_pct / 2)
+    assert risk.gross_cap_pct == pytest.approx(defaults.gross_cap_pct / 2)
+    assert risk.overnight_gross_cap_pct == pytest.approx(defaults.overnight_gross_cap_pct / 2)
+    assert risk.risk_per_trade_pct == pytest.approx(defaults.risk_per_trade_pct)
+    assert risk.single_name_cap_pct == pytest.approx(defaults.single_name_cap_pct)
     assert cfg.intraday.models.trader_max_thinking_tokens == 1500
     assert cfg.intraday.schedule.cycle_interval_minutes == 30
     assert cfg.intraday.readiness.max_cycle_gap_minutes == pytest.approx(45.0)

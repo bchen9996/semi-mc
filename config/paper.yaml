@@ -205,29 +205,33 @@ paper:
 
 intraday:
   # S4 (BRIEF_INTRADAY.md): its own sleeve, its own Alpaca paper account, never s0/s3's.
-  # Rollout Stage 1 ("shadow, 2 weeks") started 2026-09-23, owner's deliberate action --
-  # trading_enabled: true lets the real loop run and propose/risk-validate for real, but
-  # shadow_mode: true (still the default) means every fill is against FakeBroker, never
-  # submitted to Alpaca -- see tasks/todo.md's "Rollout stages from the brief" entry.
+  # Rollout Stage 1 ("shadow, 2 weeks") started 2026-09-23, owner's deliberate action.
+  # Stage 2 ("equities, half budget, 2 weeks") starts 2026-10-15, owner's go 2026-10-14 after the
+  # Stage 2 rule passed (5 clean days, 10-08..10-14): shadow_mode: false submits real
+  # orders to the paper account below; the risk block carries the half budget -- see
+  # tasks/todo.md's "Rollout stages from the brief" entry.
   trading_enabled: true
   registered_account: PA33HJGNHLI7
-  shadow_mode: true
+  shadow_mode: false
   shadow_starting_equity: 100000.0
   budget:
     max_cost_usd_per_call: 1.0
     max_cost_usd_per_day: 10.0   # placeholder -- recalibrate from real shadow-mode logging
   risk:
-    new_positions_per_day: 6
+    # Stage 2's half budget (owner decision 2026-10-14): the four count/exposure limits
+    # are halved from the brief's defaults; per-trade risk and the single-name cap are
+    # not, so each trade is the same size as Stage 3's, just fewer of them at once.
+    new_positions_per_day: 3          # default 6
     round_trips_per_symbol_per_day: 2
-    daily_turnover_pct: 1.50
+    daily_turnover_pct: 0.75          # default 1.50
     risk_per_trade_pct: 0.0075
     single_name_cap_pct: 0.15
-    gross_cap_pct: 1.50
+    gross_cap_pct: 0.75               # default 1.50
     net_long_cap_pct: 1.00
     daily_loss_soft_pct: 0.02
     daily_loss_hard_pct: 0.03
     cooldown_minutes_after_stopout: 30
-    overnight_gross_cap_pct: 1.00
+    overnight_gross_cap_pct: 0.50     # default 1.00
     min_edge_multiple: 2.0
     equity_cost_bps_per_side: 8.0
     entry_tranches: 2
