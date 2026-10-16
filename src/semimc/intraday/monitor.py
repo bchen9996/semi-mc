@@ -29,7 +29,7 @@ import pandas as pd
 from ..config import IntradayConfig
 from ..execution.broker import Broker
 from .ledger import IntradayLedger
-from .orders import build_close_order, submit_exit
+from .orders import build_close_order, market_is_open, submit_exit
 from .reflect import record_mechanical_reflection
 
 
@@ -54,6 +54,8 @@ def check_invalidation_and_time_stops(
     as_of: pd.Timestamp,
     cycle: str,
     now: dt.datetime,
+    *,
+    market_exit_without_price: bool = False,
 ) -> MonitorResult:
     """For every held `Position`, recovers the proposal that opened it (the most recent
     filled entry order for that symbol, via `ledger.latest_filled_entry_for`, then that
@@ -63,10 +65,20 @@ def check_invalidation_and_time_stops(
     `invalidation_price`, or `time_stop_minutes` has elapsed since the entry's first
     fill (`ledger.fills_for_order`).
 
-    A position with no traceable entry/proposal, or no current price to close it at
-    safely, is left alone and logged as an incident rather than guessed at -- the same
-    "never act on incomplete information" caution `execution/pretrade.py` uses
-    elsewhere.
+    A position with no traceable entry/proposal is left alone and logged as an incident
+    rather than guessed at -- the same "never act on incomplete information" caution
+    `execution/pretrade.py` uses elsewhere.
+
+    With no current price, only a time stop can come due (an invalidation needs a price
+    to cross, and the stop resting at the broker covers that level meanwhile). By
+    default that position is left open with an error incident. With
+    `market_exit_without_price`, which only the real account's callers set, it is closed
+    with a market order instead, provided the broker's clock says the market is open
+    (`orders.py::build_close_order`). Added 2026-10-15, after that day's outage, the
+    first of Stage 2: every quote went stale and then missing from about 11:55 to 13:00
+    CT, and both positions stayed open 30 to 60 minutes past their time stops. A shadow
+    or placebo `FakeBroker` has no market to fill a market order against, so it keeps
+    the default.
 
     A confirmed close also records a mechanical reflection (`reflect.py`, Phase 9a) tagged
     `"invalidation"` or `"time_stop"` -- the qualitative fields (category, process grade)
@@ -127,13 +139,18 @@ def check_invalidation_and_time_stops(
             continue
 
         if price is None:
+            if not (market_exit_without_price and market_is_open(broker)):
+                ledger.record_incident(
+                    "error",
+                    f"{symbol}: invalidation/time-stop breached but no current price to "
+                    "close at -- left open, needs attention",
+                )
+                still_open.append(symbol)
+                continue
             ledger.record_incident(
-                "error",
-                f"{symbol}: invalidation/time-stop breached but no current price to "
-                "close at -- left open, needs attention",
+                "warning",
+                f"{symbol}: time stop due with no current price -- closing with a market order",
             )
-            still_open.append(symbol)
-            continue
 
         attempt = submit_exit(
             symbol,

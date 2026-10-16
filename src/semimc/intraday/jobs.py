@@ -66,6 +66,7 @@ from .orders import (
     build_replacement_stop_order,
     build_trim_order,
     cancel_resting_stops,
+    market_is_open,
     place_protective_stop,
     submit_exit,
     submit_order_with_fault_isolation,
@@ -1127,8 +1128,17 @@ def run_cycle(
     positions = broker.list_positions()
     prices = current_prices({p.symbol for p in positions}, market_data, now)
 
+    # Only the real account can close with a market order when there's no price
+    # (`monitor.py`); shadow mode's `FakeBroker` has no market to fill one against.
     monitor_result = check_invalidation_and_time_stops(
-        intraday, broker, ledger, prices, as_of, cycle, now
+        intraday,
+        broker,
+        ledger,
+        prices,
+        as_of,
+        cycle,
+        now,
+        market_exit_without_price=not intraday.shadow_mode,
     )
     if monitor_result.closed:
         positions = broker.list_positions()
@@ -1490,6 +1500,8 @@ def run_carry(
     market_data: AlpacaMarketDataClient,
     as_of: pd.Timestamp,
     now: dt.datetime,
+    *,
+    market_exit_without_price: bool = False,
 ) -> CarryResult:
     """At 14:45: closes every position whose opening proposal's `horizon` is
     `"intraday"` or untraceable (a safe default -- never carry something with no
@@ -1500,12 +1512,19 @@ def run_carry(
     partial trim -- simpler, and this is already an off-thesis risk-cap action, not a
     sizing decision) until back under cap. Every close here records a mechanical
     reflection tagged `"carry"` (`reflect.py`, Phase 9a).
+
+    A close with no current price is skipped (carried) by default. With
+    `market_exit_without_price` it goes out as a market order while the market is open,
+    the same fallback as `monitor.py`'s time stop (added 2026-10-15). Only the real
+    account's caller (`cli.py`) sets it: the placebo runs this same function against a
+    `FakeBroker` under the same config.
     """
     result = CarryResult()
     intraday = config.intraday
     sync_open_orders(broker, ledger, intraday, as_of, now)
     positions = broker.list_positions()
     account = broker.get_account()
+    market_exit = market_exit_without_price and market_is_open(broker)
 
     carried_candidates: list[tuple[Position, dict[str, Any]]] = []
     for position in positions:
@@ -1516,12 +1535,17 @@ def run_carry(
             continue
 
         price = current_prices({position.symbol}, market_data, now).get(position.symbol)
-        if price is None:
+        if price is None and not market_exit:
             ledger.record_incident(
                 "error", f"{position.symbol}: carry could not price a close -- left open"
             )
             result.carried.append(position.symbol)
             continue
+        if price is None:
+            ledger.record_incident(
+                "warning",
+                f"{position.symbol}: carry has no current price -- closing with a market order",
+            )
         _carry_close(position.symbol, payload, price, config, broker, ledger, as_of, now)
         result.closed.append(position.symbol)
 
@@ -1534,9 +1558,15 @@ def run_carry(
             result.carried.append(position.symbol)
             continue
         price = current_prices({position.symbol}, market_data, now).get(position.symbol)
-        if price is None:
+        if price is None and not market_exit:
             result.carried.append(position.symbol)
             continue
+        if price is None:
+            ledger.record_incident(
+                "warning",
+                f"{position.symbol}: carry has no current price -- closing with a market order "
+                "for the overnight cap",
+            )
         _carry_close(position.symbol, payload, price, config, broker, ledger, as_of, now)
         overnight_notional -= abs(position.market_value)
         result.closed_for_cap.append(position.symbol)
@@ -1547,14 +1577,15 @@ def run_carry(
 def _carry_close(
     symbol: str,
     payload: dict[str, Any] | None,
-    price: float,
+    price: float | None,
     config: Config,
     broker: Broker,
     ledger: IntradayLedger,
     as_of: pd.Timestamp,
     now: dt.datetime,
 ) -> None:
-    """One carry close through `submit_exit`, with its mechanical reflection."""
+    """One carry close through `submit_exit`, with its mechanical reflection. `price=None`
+    sends a market order (`orders.py::build_close_order`)."""
     intraday = config.intraday
     attempt = submit_exit(
         symbol,
