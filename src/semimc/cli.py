@@ -2076,7 +2076,14 @@ def intraday_monitor(
         positions = broker.list_positions()
         prices = current_prices({p.symbol for p in positions}, market_data, now)
         result = check_invalidation_and_time_stops(
-            cfg.intraday, broker, ledger, prices, as_of_ts, cycle, now
+            cfg.intraday,
+            broker,
+            ledger,
+            prices,
+            as_of_ts,
+            cycle,
+            now,
+            market_exit_without_price=not cfg.intraday.shadow_mode,
         )
         if cfg.intraday.shadow_mode:
             ledger.save_shadow_broker_state(broker.to_state())
@@ -2199,7 +2206,15 @@ def intraday_carry(
     market_data = _intraday_market_data()
     broker = _intraday_execution_broker(cfg, ledger, market_data, now)
     try:
-        result = run_carry(cfg, broker, ledger, market_data, as_of_ts, now)
+        result = run_carry(
+            cfg,
+            broker,
+            ledger,
+            market_data,
+            as_of_ts,
+            now,
+            market_exit_without_price=not cfg.intraday.shadow_mode,
+        )
         if cfg.intraday.shadow_mode:
             ledger.save_shadow_broker_state(broker.to_state())
     finally:

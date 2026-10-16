@@ -236,6 +236,8 @@ def test_records_a_mechanical_reflection_when_closing_through_invalidation(tmp_p
 
 
 def test_missing_a_current_price_leaves_the_position_open_and_logs_an_incident(tmp_path):
+    """The default, which the shadow book and the placebo keep: a `FakeBroker` has no
+    market to fill a market order against."""
     ledger = _ledger(tmp_path)
     broker = FakeBroker()
     _open_position(broker, ledger, time_stop_minutes=60, filled_at=NOW - dt.timedelta(minutes=90))
@@ -246,6 +248,72 @@ def test_missing_a_current_price_leaves_the_position_open_and_logs_an_incident(t
 
     assert result.still_open == ["NVDA"]
     assert any("no current price" in i["message"] for i in ledger.incidents())
+    ledger.close()
+
+
+# -- no current price on the real account (added 2026-10-15) --------------------------------
+
+
+def _exit_rows(ledger: IntradayLedger) -> list[dict]:
+    return [row for row in ledger.orders_for_proposal(1) if row["leg"] == "exit"]
+
+
+def test_a_due_time_stop_with_no_price_closes_with_a_market_order(tmp_path):
+    """2026-10-15, Stage 2's first day: every quote went stale and then missing from
+    about 11:55 to 13:00 CT, and both positions stayed open past their time stops."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _open_position(
+        broker,
+        ledger,
+        time_stop_minutes=60,
+        filled_at=NOW - dt.timedelta(minutes=90),
+        order_class="oto",
+    )
+    [stop] = ledger.open_stop_legs_for("NVDA")
+    broker.partial_fill_fraction = 0.0  # a real market order fills a moment after it's sent
+
+    result = check_invalidation_and_time_stops(
+        IntradayConfig(), broker, ledger, {}, AS_OF, CYCLE, NOW, market_exit_without_price=True
+    )
+
+    assert result.closed == ["NVDA"]
+    [exit_row] = _exit_rows(ledger)
+    assert exit_row["exit_reason"] == "time_stop"
+    exit_order = broker.get_order_by_client_id(exit_row["client_order_id"])
+    assert exit_order.type == "market"
+    assert exit_order.limit_price is None
+    assert broker.get_order_by_client_id(stop["client_order_id"]).status == "canceled"
+    incidents = ledger.incidents()
+    assert any("closing with a market order" in i["message"] for i in incidents)
+    assert not any(i["severity"] == "error" for i in incidents)
+    ledger.close()
+
+
+class _ClockUnreadable(FakeBroker):
+    def get_clock(self):
+        raise BrokerError("clock endpoint unreachable")
+
+
+@pytest.mark.parametrize("closed_or_unreadable", ["closed", "unreadable"])
+def test_no_market_exit_unless_the_clock_says_the_market_is_open(tmp_path, closed_or_unreadable):
+    """Alpaca holds a market order sent while the market is closed and fills it at the
+    next open, at whatever price that turns out to be."""
+    ledger = _ledger(tmp_path)
+    broker = _ClockUnreadable(now=NOW) if closed_or_unreadable == "unreadable" else FakeBroker()
+    _open_position(broker, ledger, time_stop_minutes=60, filled_at=NOW - dt.timedelta(minutes=90))
+    if closed_or_unreadable == "closed":
+        broker.market_open = False
+
+    result = check_invalidation_and_time_stops(
+        IntradayConfig(), broker, ledger, {}, AS_OF, CYCLE, NOW, market_exit_without_price=True
+    )
+
+    assert result.still_open == ["NVDA"]
+    assert _exit_rows(ledger) == []
+    assert any(
+        i["severity"] == "error" and "no current price" in i["message"] for i in ledger.incidents()
+    )
     ledger.close()
 
 

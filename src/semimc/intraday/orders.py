@@ -249,7 +249,7 @@ def build_close_order(
     position: Position,
     as_of: pd.Timestamp,
     cycle: str,
-    price: float,
+    price: float | None,
     config: IntradayConfig,
     attempt: int = 0,
 ) -> OrderRequest:
@@ -260,17 +260,37 @@ def build_close_order(
     `order_class="simple"` -- exiting needs no new stop leg. The resting stop-loss legs
     from the original entry must be canceled first; :func:`submit_exit` does that and
     calls this with the position as re-read once they're gone.
+
+    `price=None` builds a market order instead of a collared limit: the exit a time stop
+    or carry sends on the real account when there is no current price to collar
+    (owner decision 2026-10-15, after that day's midday quote outage held both positions
+    past their time stops). Never for an entry, and only while the market is
+    open (:func:`market_is_open`), or it would wait at Alpaca for the next open.
     """
     side: OrderSide = "sell" if position.side == "long" else "buy"
     return OrderRequest(
         symbol=position.symbol,
         side=side,
-        type="limit",
+        type="limit" if price is not None else "market",
         time_in_force="day",
         client_order_id=intraday_client_order_id(as_of, cycle, position.symbol, attempt),
         qty=abs(position.qty),
-        limit_price=collared_limit_price(price, side, config.risk.equity_cost_bps_per_side),
+        limit_price=(
+            collared_limit_price(price, side, config.risk.equity_cost_bps_per_side)
+            if price is not None
+            else None
+        ),
     )
+
+
+def market_is_open(broker: Broker) -> bool:
+    """The broker's own clock says the exchange is open. ``False`` if the clock can't be
+    read: a market order sent while the market is closed waits at Alpaca and fills at
+    the next open, at whatever price that turns out to be."""
+    try:
+        return bool(broker.get_clock().is_open)
+    except Exception:  # noqa: BLE001 - an unreadable clock means no market order, never a crash
+        return False
 
 
 def build_trim_order(

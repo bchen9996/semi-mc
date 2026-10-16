@@ -356,6 +356,20 @@ def test_build_close_order_buys_back_a_short_position():
     assert order.qty == pytest.approx(10.0)
 
 
+def test_build_close_order_without_a_price_is_a_market_order():
+    """What a due time stop or carry sends on the real account when no price could be read
+    (2026-10-15); with a price it stays a collared limit."""
+    position = Position(
+        symbol="NVDA", qty=26.0, side="long", market_value=4940.0, avg_entry_price=190.0
+    )
+    priced = build_close_order(position, AS_OF, CYCLE, price=190.0, config=IntradayConfig())
+    unpriced = build_close_order(position, AS_OF, CYCLE, price=None, config=IntradayConfig())
+    assert (priced.type, unpriced.type) == ("limit", "market")
+    assert unpriced.limit_price is None
+    assert (unpriced.side, unpriced.qty) == ("sell", pytest.approx(26.0))
+    assert unpriced.client_order_id == priced.client_order_id
+
+
 # -- build_trim_order ----------------------------------------------------------------------
 
 

@@ -1785,6 +1785,77 @@ def test_run_carry_closes_the_lowest_confidence_position_over_the_overnight_cap(
     assert "AMD" not in remaining_symbols
 
 
+def _exit_order_types(broker: FakeBroker, ledger: IntradayLedger) -> list[str]:
+    """Types of the NVDA exits still working (unfilled: `partial_fill_fraction=0`)."""
+    return [
+        broker.get_order_by_client_id(row["client_order_id"]).type
+        for row in ledger.open_orders_for("NVDA", leg="exit")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("market_exit", "market_open", "closes"),
+    [(True, True, True), (True, False, False), (False, True, False)],
+)
+def test_run_carry_with_no_price_closes_with_a_market_order_only_on_the_real_account(
+    config, tmp_path, market_exit, market_open, closes
+):
+    """Added 2026-10-15. Only `cli.py` sets `market_exit_without_price`, for the real
+    account; the placebo runs `run_carry` against a `FakeBroker` under the same config and
+    keeps the default. With the market closed, a market order would wait for the next
+    open."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday")
+    broker.partial_fill_fraction = 0.0  # a real market order fills a moment after it's sent
+    broker.market_open = market_open
+
+    result = run_carry(
+        cfg, broker, ledger, _FakeMarketData(), AS_OF, NOW, market_exit_without_price=market_exit
+    )
+
+    errors = [i for i in ledger.incidents() if i["severity"] == "error"]
+    if closes:
+        assert result.closed == ["NVDA"]
+        assert _exit_order_types(broker, ledger) == ["market"]
+        assert errors == []
+    else:
+        assert result.carried == ["NVDA"]
+        assert _exit_order_types(broker, ledger) == []
+        assert any("carry could not price a close" in i["message"] for i in errors)
+    ledger.close()
+
+
+@pytest.mark.parametrize("shadow_mode", [False, True])
+def test_run_cycle_closes_an_unpriced_due_time_stop_with_a_market_order_only_when_live(
+    config, tmp_path, shadow_mode
+):
+    """Added 2026-10-15: live mode closes with a market order; shadow mode's `FakeBroker`
+    has no market to fill one against, so it keeps the position and logs the error."""
+    cfg = _tradeable_config(config, tmp_path)
+    cfg = cfg.model_copy(
+        update={"intraday": cfg.intraday.model_copy(update={"shadow_mode": shadow_mode})}
+    )
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, time_stop_minutes=90)
+    broker.partial_fill_fraction = 0.0
+    later = NOW + dt.timedelta(minutes=120)
+    client = _sequenced_llm_client(_result_json())
+
+    run_cycle("cycle_1", cfg, broker, ledger, _FakeMarketData(), client, AS_OF, later)
+
+    assert _exit_order_types(broker, ledger) == ([] if shadow_mode else ["market"])
+    no_price_errors = [
+        i
+        for i in ledger.incidents()
+        if i["severity"] == "error" and "no current price" in i["message"]
+    ]
+    assert bool(no_price_errors) is shadow_mode
+    ledger.close()
+
+
 # -- run_eod_review (Phase 9b) ------------------------------------------------------------
 
 

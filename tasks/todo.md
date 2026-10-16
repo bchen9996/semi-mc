@@ -2762,6 +2762,31 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       stop leg found by `client_order_id`, and cancel timing (the 5-second wait is a
       guess). The brief sets no promotion rule for Stage 3; decide from the 2 weeks'
       results.
+  - [x] **2026-10-15, day 1: real orders worked; not a clean day (3 errors).** Preflight
+        passed live, so PA33HJGNHLI7 is the account the keys open (equity at open
+        $100,000.00). The Researcher listed 5 candidates (option A's first day: TSM, TXN,
+        ADI, MU, NVDA). Opened TSM and NVDA at 10:01 CT and added to TSM at 11:01, which
+        spent the half budget's 3 new positions; the NVDA add was rejected for it, and
+        MU's trigger fired at 11:30 and 13:30 with no slot left (MU rose about 6% off its
+        low). Both closed on time stops at 13:30: gross +$0.74, -$6.05 after modeled
+        cost. Placebo: 3 trades (MU, ADI, NVDA at about $12,000 each, against the
+        agent's $1,700-3,400), +$1,101.79 net. **Both unverified Alpaca behaviors
+        worked**: each OTO stop leg came back with its own id, was canceled, and the
+        exits filled within a second, with no incident. **The 3 errors**: every quote
+        went about 4 minutes stale at the 12:00 CT cycle and missing at 12:30 and 13:00
+        (the 12:30 session data repeats 12:00's prices, so bars stalled too; no Alpaca
+        status notice found), so the monitor couldn't price the due time stops: NVDA's
+        (from its second tranche's 10:30 fill, due 12:01) and TSM's (due 13:01). They
+        closed at 13:30, one hour and 30 minutes late, resting stops in place
+        throughout. **Owner chose option A (2026-10-15)**: on the real account, a due
+        time stop or carry close with no current price now goes out as a market order,
+        only while the broker's clock says the market is open, never for an entry
+        (`monitor.py`, `jobs.py::run_carry`, `orders.py::build_close_order`). Shadow
+        and placebo `FakeBroker`s keep the old behavior. Not chosen: a 5-minute-bar
+        fallback (B; the bars stalled too) and leaving it (C). Still open, not fixed:
+        `run_carry` never checks the clock, and GitHub's late copy of `carry` lands
+        around 17:40 CT every day; on a day a position is still open then, its limit
+        close would wait at Alpaca for the next open.
 - [ ] Stage 3 -- equities, full budget.
 - [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded). **Built
       ahead of turn, 2026-09-26**: schema/config/gates (Phase 12a) and the real Alpaca
