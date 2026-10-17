@@ -2377,6 +2377,9 @@ def intraday_readiness(
     passed = sum(1 for c in report.checks if c.passed)
     typer.echo(f"Wrote {out_path}")
     typer.echo(f"Evidence checks passed: {passed}/{len(report.checks)}")
+    if report.stage_3_checks:
+        passed_3 = sum(1 for c in report.stage_3_checks if c.passed)
+        typer.echo(f"Stage 3 rule: {passed_3}/{len(report.stage_3_checks)} passed")
 
 
 # -- S4's playbook: human accept/reject/retire actions (BRIEF_INTRADAY.md's

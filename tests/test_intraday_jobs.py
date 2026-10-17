@@ -28,6 +28,7 @@ from semimc.intraday.jobs import (
     current_prices,
     mark_broker_to_market,
     market_panel,
+    reconcile_positions,
     run_carry,
     run_cycle,
     run_eod_review,
@@ -2753,7 +2754,56 @@ def test_run_eod_review_records_a_carry_close_that_filled_after_carry(config, tm
     [reflection] = ledger.reflections_for(AS_OF)
     assert reflection["content"]["close_reason"] == "carry"
     assert reflection["content"]["avg_exit_price"] == pytest.approx(189.0)
+    # Reconciled after the sync: the carry close took the account flat, as the ledger says.
+    assert ledger.latest_reconciliation()["status"] == "ok"
     paper_ledger.close()
+    ledger.close()
+
+
+# -- reconciliation (added 2026-10-16) --------------------------------------------------------
+
+
+def test_reconcile_positions_is_ok_when_the_ledger_and_the_broker_agree(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg)
+
+    assert reconcile_positions(broker, ledger, AS_OF) == []
+
+    latest = ledger.latest_reconciliation()
+    assert (latest["status"], latest["discrepancies"]) == ("ok", [])
+    assert not any(i["severity"] == "error" for i in ledger.incidents())
+    ledger.close()
+
+
+def test_reconcile_positions_flags_a_position_the_ledger_does_not_know(config, tmp_path):
+    """Before 2026-10-16 nothing compared S4's ledger with the account, so preflight's
+    "yesterday reconciled" check passed without anything ever being reconciled."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg)
+    broker.submit_order(  # a trade placed outside S4, e.g. by hand
+        OrderRequest(
+            symbol="AMD",
+            side="buy",
+            type="limit",
+            time_in_force="day",
+            client_order_id="manual-1",
+            qty=3.0,
+            limit_price=150.0,
+        )
+    )
+
+    discrepancies = reconcile_positions(broker, ledger, AS_OF)
+
+    assert discrepancies == [{"symbol": "AMD", "expected": 0.0, "actual": 3.0}]
+    assert ledger.latest_reconciliation()["status"] == "discrepancy"
+    assert any(
+        i["severity"] == "error" and "reconciliation mismatch" in i["message"]
+        for i in ledger.incidents()
+    )
     ledger.close()
 
 

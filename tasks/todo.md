@@ -2760,8 +2760,8 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       size. The placebo keeps running on its own shadow ledger. After the first real
       trade, check incidents for the two Alpaca behaviors no test could pin: the OTO
       stop leg found by `client_order_id`, and cancel timing (the 5-second wait is a
-      guess). The brief sets no promotion rule for Stage 3; decide from the 2 weeks'
-      results.
+      guess). The brief sets no promotion rule for Stage 3; the owner set one on
+      2026-10-16, under the Stage 3 entry below.
   - [x] **2026-10-15, day 1: real orders worked; not a clean day (3 errors).** Preflight
         passed live, so PA33HJGNHLI7 is the account the keys open (equity at open
         $100,000.00). The Researcher listed 5 candidates (option A's first day: TSM, TXN,
@@ -2839,7 +2839,27 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         -$32.39. Alpaca's own account figures were never affected. Report files already
         written (eod.md for 10-06, 10-15, 10-16; this week's weekly_review.md) keep the
         old numbers.
-- [ ] Stage 3 -- equities, full budget.
+- [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
+      results (owner chose option A of three):** promote once (1) Stage 2 has run 10
+      sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so
+      10-28 at the earliest), (2) the ledger matched the account at every close since
+      reconciliation began, (3) the latest clean-day streak is at least 3 days and
+      includes accepted trades (a day lost to an outside data outage may be excluded,
+      as 10-06 was), (4) at least 8 closed trades since Stage 2 began
+      (`stage_3_min_closed_trades`), (5) each main exit path has worked on the real
+      account: a stop and a time stop (both seen), plus carry or a Trader close (owner
+      may waive: 90-minute time stops rarely leave anything for either), and (6) no day
+      at the daily hard-loss limit. P&L is not a criterion. If not all met on 10-28,
+      Stage 2 continues day by day. Not chosen: calendar only (B; could promote on 3-5
+      trades) and 20 trades plus 5 clean days (C; likely early November at half
+      budget). The readiness report has a "Stage 3 rule" section checking these.
+      **Built with it: S4 reconciliation.** Nothing in S4 ever recorded one, so
+      preflight's "yesterday reconciled" check (the brief's) passed vacuously, on the
+      real account too. `jobs.py::reconcile_positions` compares the ledger's net fills
+      per symbol with the broker's positions; `run_eod_review` runs it after its sync,
+      every run. A mismatch is an error incident and fails the next preflight; an
+      unreachable broker is a warning and leaves the day unreconciled. First real run:
+      eod-review on 2026-10-19.
 - [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded). **Built
       ahead of turn, 2026-09-26**: schema/config/gates (Phase 12a) and the real Alpaca
       options market-data fetch plus `jobs.py` wiring (Phase 12b) are both done -- Stage 4

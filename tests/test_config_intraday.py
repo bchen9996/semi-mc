@@ -122,6 +122,9 @@ def test_paper_yaml_loads_intraday_at_rollout_stage_2():
     assert risk.overnight_gross_cap_pct == pytest.approx(defaults.overnight_gross_cap_pct / 2)
     assert risk.risk_per_trade_pct == pytest.approx(defaults.risk_per_trade_pct)
     assert risk.single_name_cap_pct == pytest.approx(defaults.single_name_cap_pct)
+    # The Stage 2 -> 3 rule's start date (owner decision 2026-10-16).
+    assert str(cfg.intraday.readiness.stage_2_started) == "2026-10-15"
+    assert load_config().intraday.readiness.stage_2_started is None
     assert cfg.intraday.models.trader_max_thinking_tokens == 1500
     assert cfg.intraday.schedule.cycle_interval_minutes == 30
     assert cfg.intraday.readiness.max_cycle_gap_minutes == pytest.approx(45.0)

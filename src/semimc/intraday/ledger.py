@@ -704,6 +704,17 @@ class IntradayLedger:
         self._conn.commit()
         return int(cursor.lastrowid)
 
+    def reconciliations(self) -> list[dict[str, Any]]:
+        """Every reconciliation recorded, oldest first, with ``discrepancies`` decoded:
+        what `intraday/readiness.py`'s Stage 3 check reads."""
+        rows = self._conn.execute("SELECT * FROM reconciliations ORDER BY id").fetchall()
+        out = []
+        for row in rows:
+            data = dict(row)
+            data["discrepancies"] = json.loads(data.pop("discrepancies_json"))
+            out.append(data)
+        return out
+
     def latest_reconciliation(self) -> dict[str, Any] | None:
         row = self._conn.execute(
             "SELECT * FROM reconciliations ORDER BY id DESC LIMIT 1"

@@ -37,6 +37,13 @@ overnight with nothing in the clean-day check to show it). Session edges are
 the regular 09:30-16:00 New York hours; a half-day session will fail the coverage check,
 which the owner judges by eye (no market calendar here, same as below).
 
+**The Stage 3 rule** (owner decision 2026-10-16, `IntradayReadinessConfig.stage_2_started`
+and the `stage_3_*` fields) gets its own section once Stage 2 has a start date: the
+sessions run, reconciliation against the broker at every close, the latest clean-day
+streak, closed trades since Stage 2 began, each main exit path seen on the real account,
+and no day at the daily hard-loss limit. The exit-path check may be waived by the owner:
+90-minute time stops rarely leave anything for carry or a Trader close.
+
 **Missed days are inferred, not known.** The ledger records activity, not the
 schedule, and this module has no market calendar (no broker dependency, same as
 `weekly_summary`). A weekday with no activity at all is reported as "no activity
@@ -152,6 +159,8 @@ class StageReadiness:
     # and how many proposals were accepted across them.
     clean_streak: list[str] = field(default_factory=list)
     clean_streak_accepted: int = 0
+    # Empty unless `readiness.stage_2_started` is set and within the window.
+    stage_3_checks: list[EvidenceCheck] = field(default_factory=list)
 
 
 def _sleeve_result(reflections: list[dict[str, Any]]) -> SleeveResult:
@@ -389,7 +398,121 @@ def stage_readiness(
         clean_streak_accepted=sum(d.proposals_accepted for d in streak),
     )
     report.checks.extend(_evidence_checks(report, config))
+    report.stage_3_checks.extend(_stage_3_checks(report, ledger, config))
     return report
+
+
+# The main ways a real position ends, by reflection `close_reason`: a stop (resting at the
+# broker or the monitor's), a time stop, and carry or the Trader's own close or trim.
+_EXIT_PATHS = (
+    ("a stop", ("invalidation",)),
+    ("a time stop", ("time_stop",)),
+    ("carry or a Trader close", ("carry", "trader_close", "trader_trim")),
+)
+
+
+def _stage_3_checks(
+    report: StageReadiness, ledger: IntradayLedger, config: IntradayConfig
+) -> list[EvidenceCheck]:
+    """The owner's Stage 2 -> 3 rule (`IntradayReadinessConfig`), over the days from
+    `stage_2_started` to the report's `as_of`."""
+    rules = config.readiness
+    if rules.stage_2_started is None:
+        return []
+    start = pd.Timestamp(rules.stage_2_started)
+    if start > report.as_of:
+        return []
+    stage_days = [d for d in report.days if pd.Timestamp(d.date) >= start]
+    sessions = [d for d in stage_days if d.any_activity]
+
+    checks = [
+        EvidenceCheck(
+            f"Stage 2 has run {rules.stage_3_sessions} sessions",
+            len(sessions) >= rules.stage_3_sessions,
+            f"{len(sessions)} since {start.date()}",
+        )
+    ]
+
+    by_day: dict[str, dict[str, Any]] = {}
+    for row in ledger.reconciliations():
+        day = str(pd.Timestamp(row["as_of"]).date())
+        if day >= str(start.date()):
+            by_day[day] = row  # the day's latest
+    if not by_day:
+        checks.append(
+            EvidenceCheck(
+                "The ledger matched the account at every close", False, "no reconciliation yet"
+            )
+        )
+    else:
+        first = min(by_day)
+        due = [d.date for d in sessions if d.date >= first]
+        missing = [day for day in due if day not in by_day]
+        mismatched = [day for day in due if day in by_day and by_day[day]["status"] != "ok"]
+        problems = [f"{day} not reconciled" for day in missing] + [
+            f"{day} {by_day[day]['status']}" for day in mismatched
+        ]
+        checks.append(
+            EvidenceCheck(
+                "The ledger matched the account at every close",
+                not problems,
+                "; ".join(problems) or f"{len(due)} day(s) ok since {first}",
+            )
+        )
+
+    streak, accepted = len(report.clean_streak), report.clean_streak_accepted
+    checks.append(
+        EvidenceCheck(
+            f"The last {rules.clean_days_required} days are clean and include accepted trades",
+            streak >= rules.clean_days_required and accepted > 0,
+            f"{streak} consecutive clean day(s), {accepted} accepted trade proposal(s)",
+        )
+    )
+
+    reflections = [
+        r for r in ledger.all_reflections() if _in_window(r["as_of"], start, report.as_of)
+    ]
+    checks.append(
+        EvidenceCheck(
+            f"At least {rules.stage_3_min_closed_trades} closed trades since Stage 2 began",
+            len(reflections) >= rules.stage_3_min_closed_trades,
+            f"{len(reflections)} closed",
+        )
+    )
+
+    reasons = Counter(r["content"].get("close_reason") for r in reflections)
+    seen = {label: sum(reasons[r] for r in keys) for label, keys in _EXIT_PATHS}
+    checks.append(
+        EvidenceCheck(
+            "Each main exit path has worked on the real account (the last may be waived)",
+            all(seen.values()),
+            ", ".join(f"{label}: {n}" for label, n in seen.items()),
+        )
+    )
+
+    hard = config.risk.daily_loss_hard_pct
+    breaches: list[str] = []
+    for d in stage_days:
+        day = pd.Timestamp(d.date)
+        realized = sum(
+            r["content"].get("pnl_gross") or 0.0
+            for r in reflections
+            if _in_window(r["as_of"], day, day)
+        )
+        equity = ledger.session_open_equity(day)
+        rejected = any(
+            "daily_loss_hard_pct" in str(p.get("reason") or "") for p in ledger.proposals_for(day)
+        )
+        if rejected or (equity and realized / equity <= -hard):
+            breaches.append(d.date)
+    checks.append(
+        EvidenceCheck(
+            f"No day reached the daily hard-loss limit ({hard:.0%})",
+            not breaches,
+            ", ".join(breaches) or "none",
+        )
+    )
+    return checks
 
 
 def _evidence_checks(report: StageReadiness, config: IntradayConfig) -> list[EvidenceCheck]:
@@ -493,6 +616,15 @@ def render_stage_readiness_markdown(report: StageReadiness) -> str:
     for check in report.checks:
         mark = "PASS" if check.passed else "FAIL"
         lines.append(f"- **{mark}** {check.name} -- {check.detail}")
+
+    if report.stage_3_checks:
+        lines += ["", "## Stage 3 rule (owner decision 2026-10-16)", ""]
+        passed_3 = sum(1 for c in report.stage_3_checks if c.passed)
+        lines.append(f"{passed_3}/{len(report.stage_3_checks)} passed.")
+        lines.append("")
+        for check in report.stage_3_checks:
+            mark = "PASS" if check.passed else "FAIL"
+            lines.append(f"- **{mark}** {check.name} -- {check.detail}")
 
     lines += ["", "## Stage 2 clean days", ""]
     lines.append(
