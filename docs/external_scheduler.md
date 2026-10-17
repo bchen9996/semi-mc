@@ -122,6 +122,14 @@ evening, and even a 5-hour delay lands before the next open, which is all it req
 Market holidays need nothing special. Every job's pretrade check declines on a closed
 market, the same as it does today.
 
+Early closes (13:00 ET, 12:00 CT) need nothing special either, since 2026-10-16. The
+`carry` at 14:45 CT comes after the bell and does nothing on a closed market, so the
+last `cycle` whose successor would land less than 15 minutes before the close (the
+11:30 one) runs carry itself instead of calling the Trader (`jobs.py::
+early_close_before_next_cycle`, from Alpaca's calendar). The owner also added one-off
+`carry` runs at 11:45 CT on 2026-11-27 and 2026-12-24 as a backstop; those also close
+the placebo's positions, which the cycle's carry doesn't.
+
 ## Step 4 -- verify on the first trading day
 
 - **During the session:** the Actions tab should show `workflow_dispatch` runs at the

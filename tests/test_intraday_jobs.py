@@ -19,7 +19,7 @@ import pandas as pd
 import pytest
 from fixtures.injection_corpus import INJECTION_CORPUS
 
-from semimc.execution.broker import BrokerError, OrderRequest
+from semimc.execution.broker import BrokerError, CalendarDay, OrderRequest
 from semimc.execution.fake_broker import FakeBroker
 from semimc.execution.market_data import OptionMarketQuote
 from semimc.intraday.context import TRADER_SECTIONS
@@ -1848,6 +1848,115 @@ def test_run_carry_does_nothing_while_the_market_is_closed(config, tmp_path, hor
     assert incident["severity"] == severity
     if severity == "error":
         assert "NVDA" in incident["message"]
+    ledger.close()
+
+
+# -- early closes (added 2026-10-16) ----------------------------------------------------------
+
+
+class _ClosesAt(FakeBroker):
+    """A `FakeBroker` whose calendar closes today at `close_ny` (New York time), the way
+    Alpaca's calendar reports an early close."""
+
+    def __init__(self, close_ny: dt.time, **kwargs):
+        super().__init__(**kwargs)
+        self.close_ny = close_ny
+
+    def get_calendar(self, start, end):
+        return [CalendarDay(date=start, open=dt.time(9, 30), close=self.close_ny)]
+
+
+def _counting_llm_client(calls: list[int]) -> ClaudeCliClient:
+    def run(argv, stdin_text, timeout_seconds, env):
+        calls.append(1)
+        return _completed(_result_json())
+
+    return ClaudeCliClient(run=run)
+
+
+# 2026-09-21 is EDT: New York is UTC-4.
+@pytest.mark.parametrize(
+    ("close_ny", "now_utc", "runs_carry"),
+    [
+        (dt.time(13, 0), dt.datetime(2026, 9, 21, 16, 31), True),  # 12:31 ET, next 13:01
+        (dt.time(13, 0), dt.datetime(2026, 9, 21, 16, 14), False),  # next 12:44, in time
+        (dt.time(13, 0), dt.datetime(2026, 9, 21, 16, 16), True),  # next 12:46, too late
+        (dt.time(16, 0), dt.datetime(2026, 9, 21, 19, 31), False),  # regular day: 14:45 CT carry
+    ],
+)
+def test_the_last_cycle_before_an_early_close_runs_carry_instead_of_the_trader(
+    config, tmp_path, close_ny, now_utc, runs_carry
+):
+    """NYSE closes at 13:00 ET on 2026-11-27 and 2026-12-24, before the scheduled 14:45
+    CT carry. The cycle whose successor would land less than 15 minutes before the bell
+    (carry's lead on a regular day) closes intraday positions itself."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = _ClosesAt(close_ny, now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday", time_stop_minutes=1000)
+    _seed_open_position(
+        broker,
+        ledger,
+        cfg,
+        symbol="AMD",
+        price=150.0,
+        invalidation_price=140.0,
+        horizon="multi-day",
+        time_stop_minutes=1000,
+    )
+    market_data = _FakeMarketData(
+        quotes={"NVDA": _quote(190.0, at=now_utc), "AMD": _quote(150.0, at=now_utc)}
+    )
+    calls: list[int] = []
+
+    result = run_cycle(
+        "cycle_1", cfg, broker, ledger, market_data, _counting_llm_client(calls), AS_OF, now_utc
+    )
+
+    held = {p.symbol for p in broker.list_positions()}
+    carry_notes = [
+        i for i in ledger.incidents() if "ran carry instead of the Trader" in i["message"]
+    ]
+    if runs_carry:
+        assert calls == []
+        assert held == {"AMD"}  # the multi-day position is carried, as at 14:45
+        assert "early close at 13:00 New York" in result.skipped_reason
+        [note] = carry_notes
+        assert note["severity"] == "info"
+        assert "closed: NVDA" in note["message"]
+    else:
+        assert calls != []
+        assert held == {"NVDA", "AMD"}
+        assert carry_notes == []
+    ledger.close()
+
+
+def test_an_unreadable_calendar_counts_as_a_regular_day(config, tmp_path):
+    class _NoCalendar(FakeBroker):
+        def get_calendar(self, start, end):
+            raise BrokerError("calendar endpoint unreachable")
+
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = _NoCalendar(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday", time_stop_minutes=1000)
+    calls: list[int] = []
+    now_utc = dt.datetime(2026, 9, 21, 16, 31)
+
+    result = run_cycle(
+        "cycle_1",
+        cfg,
+        broker,
+        ledger,
+        _FakeMarketData(quotes={"NVDA": _quote(190.0, at=now_utc)}),
+        _counting_llm_client(calls),
+        AS_OF,
+        now_utc,
+    )
+
+    assert result.skipped_reason is None
+    assert calls != []
+    assert any("market calendar unavailable" in i["message"] for i in ledger.incidents())
     ledger.close()
 
 
