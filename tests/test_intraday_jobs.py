@@ -1793,30 +1793,25 @@ def _exit_order_types(broker: FakeBroker, ledger: IntradayLedger) -> list[str]:
     ]
 
 
-@pytest.mark.parametrize(
-    ("market_exit", "market_open", "closes"),
-    [(True, True, True), (True, False, False), (False, True, False)],
-)
+@pytest.mark.parametrize("market_exit", [True, False])
 def test_run_carry_with_no_price_closes_with_a_market_order_only_on_the_real_account(
-    config, tmp_path, market_exit, market_open, closes
+    config, tmp_path, market_exit
 ):
     """Added 2026-10-15. Only `cli.py` sets `market_exit_without_price`, for the real
     account; the placebo runs `run_carry` against a `FakeBroker` under the same config and
-    keeps the default. With the market closed, a market order would wait for the next
-    open."""
+    keeps the default. (With the market closed carry does nothing at all: next test.)"""
     cfg = _tradeable_config(config, tmp_path)
     ledger = _ledger(tmp_path)
     broker = FakeBroker(now=NOW)
     _seed_open_position(broker, ledger, cfg, horizon="intraday")
     broker.partial_fill_fraction = 0.0  # a real market order fills a moment after it's sent
-    broker.market_open = market_open
 
     result = run_carry(
         cfg, broker, ledger, _FakeMarketData(), AS_OF, NOW, market_exit_without_price=market_exit
     )
 
     errors = [i for i in ledger.incidents() if i["severity"] == "error"]
-    if closes:
+    if market_exit:
         assert result.closed == ["NVDA"]
         assert _exit_order_types(broker, ledger) == ["market"]
         assert errors == []
@@ -1824,6 +1819,35 @@ def test_run_carry_with_no_price_closes_with_a_market_order_only_on_the_real_acc
         assert result.carried == ["NVDA"]
         assert _exit_order_types(broker, ledger) == []
         assert any("carry could not price a close" in i["message"] for i in errors)
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("horizon", "severity"), [(None, "info"), ("intraday", "error"), ("multi-day", "info")]
+)
+def test_run_carry_does_nothing_while_the_market_is_closed(config, tmp_path, horizon, severity):
+    """Added 2026-10-16: GitHub's late copy of `carry` lands around 17:40 CT every day, and
+    on the real account an order sent then would wait at Alpaca and fill at the next open,
+    priced off whatever traded after hours. A position that should have been closed is an
+    error incident naming it; one carried on a multi-day thesis, or none, is routine."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    if horizon is not None:
+        _seed_open_position(broker, ledger, cfg, horizon=horizon)
+    broker.market_open = False
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+
+    result = run_carry(cfg, broker, ledger, market_data, AS_OF, NOW, market_exit_without_price=True)
+
+    assert result.skipped_reason == "market is closed"
+    assert (result.closed, result.carried, result.closed_for_cap) == ([], [], [])
+    assert len(broker.list_positions()) == (0 if horizon is None else 1)
+    assert ledger.open_orders_for("NVDA", leg="exit") == []
+    [incident] = [i for i in ledger.incidents() if "carry skipped" in i["message"]]
+    assert incident["severity"] == severity
+    if severity == "error":
+        assert "NVDA" in incident["message"]
     ledger.close()
 
 

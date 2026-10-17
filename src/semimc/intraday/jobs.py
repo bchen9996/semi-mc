@@ -1491,6 +1491,7 @@ class CarryResult:
     closed: list[str] = field(default_factory=list)
     carried: list[str] = field(default_factory=list)
     closed_for_cap: list[str] = field(default_factory=list)
+    skipped_reason: str | None = None
 
 
 def run_carry(
@@ -1513,18 +1514,44 @@ def run_carry(
     sizing decision) until back under cap. Every close here records a mechanical
     reflection tagged `"carry"` (`reflect.py`, Phase 9a).
 
+    Does nothing while the broker's clock says the market is closed (added 2026-10-16):
+    an order sent then waits at Alpaca and fills at the next open, priced off whatever
+    traded after hours, and GitHub's late copy of `carry` lands around 17:40 CT every
+    day. The next session's monitor closes a position that should have gone, at a current
+    price. Finding one still held is an error incident naming it (something failed to
+    close before the bell); otherwise an info line, as for `run_cycle`'s own decline. A
+    placebo `FakeBroker` has no real clock and always reads open.
+
     A close with no current price is skipped (carried) by default. With
-    `market_exit_without_price` it goes out as a market order while the market is open,
-    the same fallback as `monitor.py`'s time stop (added 2026-10-15). Only the real
-    account's caller (`cli.py`) sets it: the placebo runs this same function against a
-    `FakeBroker` under the same config.
+    `market_exit_without_price` it goes out as a market order instead, the same fallback
+    as `monitor.py`'s time stop (added 2026-10-15). Only the real account's caller
+    (`cli.py`) sets it: the placebo runs this same function against a `FakeBroker` under
+    the same config.
     """
     result = CarryResult()
     intraday = config.intraday
+    if not market_is_open(broker):
+        result.skipped_reason = "market is closed"
+        unclosed = [
+            p.symbol
+            for p in broker.list_positions()
+            if (_original_proposal_payload(ledger, p.symbol) or {}).get("horizon")
+            not in ("multi-day", "multi-week")
+        ]
+        if unclosed:
+            ledger.record_incident(
+                "error",
+                f"carry skipped: market is closed with {', '.join(unclosed)} still held and "
+                "no multi-day thesis -- needs attention",
+            )
+        else:
+            ledger.record_incident("info", "carry skipped: market is closed")
+        return result
+
     sync_open_orders(broker, ledger, intraday, as_of, now)
     positions = broker.list_positions()
     account = broker.get_account()
-    market_exit = market_exit_without_price and market_is_open(broker)
+    market_exit = market_exit_without_price
 
     carried_candidates: list[tuple[Position, dict[str, Any]]] = []
     for position in positions:

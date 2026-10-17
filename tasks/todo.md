@@ -2783,10 +2783,22 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         only while the broker's clock says the market is open, never for an entry
         (`monitor.py`, `jobs.py::run_carry`, `orders.py::build_close_order`). Shadow
         and placebo `FakeBroker`s keep the old behavior. Not chosen: a 5-minute-bar
-        fallback (B; the bars stalled too) and leaving it (C). Still open, not fixed:
-        `run_carry` never checks the clock, and GitHub's late copy of `carry` lands
-        around 17:40 CT every day; on a day a position is still open then, its limit
-        close would wait at Alpaca for the next open.
+        fallback (B; the bars stalled too) and leaving it (C).
+  - [x] **2026-10-16 (owner's go): `run_carry` does nothing while the market is
+        closed.** It never checked the clock, and GitHub's late copy of `carry` lands
+        around 17:40 CT every day: on a day a position was still open then, its limit
+        close would have waited at Alpaca and filled at the next open, priced off
+        after-hours trades. Now it sends nothing; the next session's monitor closes the
+        position at a current price. A held position with no multi-day thesis is an
+        error incident naming it, anything else an info line. The placebo's
+        `FakeBroker` has no real clock and always reads open, so it is unchanged.
+  - [ ] **Early closes: nothing closes intraday positions before a 12:00 CT bell.**
+        NYSE closes at 13:00 ET (12:00 CT) on 2026-11-27 and 2026-12-24, but `carry` is
+        scheduled at 14:45 CT and nothing shifts it (`docs/external_scheduler.md`). On
+        those days a position still open at 12:00 would be held overnight, now with the
+        error incident above as the alarm. Decide before 2026-11-27: a one-off
+        cron-job.org `carry` at 11:45 CT on each date, or code that runs carry from
+        the last cycle before the broker's `next_close`.
 - [ ] Stage 3 -- equities, full budget.
 - [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded). **Built
       ahead of turn, 2026-09-26**: schema/config/gates (Phase 12a) and the real Alpaca

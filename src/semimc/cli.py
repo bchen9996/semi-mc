@@ -2220,6 +2220,9 @@ def intraday_carry(
     finally:
         ledger.close()
 
+    if result.skipped_reason is not None:
+        typer.echo(f"Carry skipped: {result.skipped_reason}")
+        return
     closed_str = ", ".join(result.closed) if result.closed else "(none)"
     carried_str = ", ".join(result.carried) if result.carried else "(none)"
     typer.echo(f"Closed (no multi-day thesis): {closed_str}")
