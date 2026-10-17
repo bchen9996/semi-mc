@@ -2806,6 +2806,21 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         carried. Not covered: the placebo (its `FakeBroker` calendar always closes at
         16:00) and shadow mode, which rely on the scheduled carry, and so on the
         owner's one-off runs for these two dates.
+  - [x] **2026-10-16: the Researcher may list stocks outside the universe (owner
+        decision).** Owner asked why the real account traded only TSM and NVDA (10-15
+        TSM/NVDA, 10-16 NVDA, stopped out at Alpaca about 10:10 CT for -$29.86 net: the
+        first broker-side stop-out, and the cooldown recorded). No code restricts names;
+        the funnel does: the Researcher's 2-5 names a day (MU 11 of 17 days, NVDA 7;
+        QCOM and KLAC never), the same long-breakout trigger on nearly every name
+        (opening-range high + VWAP + relative volume) in a sector down about eight
+        sessions in a row, the half budget's 3 slots (the 10-15 TSM add took MU's), and
+        the Trader passing on poor risk/reward. Checking that, nothing kept the
+        watchlist to the 14 either (SMCI 09-25, JBL 09-30, both from the news). The owner
+        chose to keep it open: the Researcher prompt now says outside names are allowed
+        when the news makes a case, that its news, pre-market moves, earnings and
+        volatility inputs cover the universe only (an outside name arrives via an
+        article about a universe stock), and that the spread/quote-age gate applies each
+        cycle. `test_run_cycle_trades_a_watchlist_name_outside_the_universe` pins it.
 - [ ] Stage 3 -- equities, full budget.
 - [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded). **Built
       ahead of turn, 2026-09-26**: schema/config/gates (Phase 12a) and the real Alpaca

@@ -2569,6 +2569,36 @@ def test_run_cycle_rejects_an_open_in_a_panel_name_that_is_not_on_the_watchlist(
     ledger.close()
 
 
+def test_run_cycle_trades_a_watchlist_name_outside_the_universe(config, tmp_path):
+    """Owner decision 2026-10-16: the Researcher may list stocks outside the 14-name
+    universe (it listed SMCI on 09-25 and JBL on 09-30, both from the news), and they
+    trade like any other watchlist name, with session data fetched for them."""
+    cfg = _tradeable_config(config, tmp_path)
+    assert "JBL" not in cfg.universe.tickers
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "JBL", thesis="supplier read-through")
+    market_data = _FakeMarketData(quotes={"JBL": _quote(150.0)})
+    proposal = {
+        "action": "open",
+        "symbol": "JBL",
+        "side": "buy",
+        "size_pct": 0.02,
+        "limit_price": 150.0,
+        "thesis": "supplier read-through",
+        "invalidation_price": 147.0,
+        "time_stop_minutes": 60,
+    }
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
+    broker = FakeBroker(now=NOW)
+
+    result = run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+
+    assert result.proposals_accepted == 1
+    assert [p.symbol for p in broker.list_positions()] == ["JBL"]
+    assert "JBL" in market_data.bar_requests[0]["symbols"]
+    ledger.close()
+
+
 def test_run_cycle_still_runs_when_session_bars_are_unavailable(config, tmp_path):
     cfg = _tradeable_config(config, tmp_path)
     ledger = _ledger(tmp_path)
