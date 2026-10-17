@@ -324,6 +324,18 @@ def test_carry_runs_cleanly_in_shadow_mode_without_a_real_broker(
     assert "Carried: (none)" in result.output
 
 
+def test_carry_declines_on_the_real_clock_after_the_close(tmp_path, fake_intraday_shadow_env):
+    """2026-10-16: GitHub's late copy of `carry` lands around 17:40 CT every day. It now
+    reads the closed market, sends nothing, and does not fail the job."""
+    _market_data, _news_client, real_account = fake_intraday_shadow_env
+    real_account.is_open = False
+
+    result = runner.invoke(app, ["intraday", "carry"] + _shadow_tradeable_overrides(tmp_path))
+
+    assert result.exit_code == 0, result.output
+    assert "Carry skipped: market is closed" in result.output
+
+
 def test_monitor_runs_cleanly_in_shadow_mode_without_a_real_broker(
     tmp_path, fake_intraday_shadow_env
 ):
