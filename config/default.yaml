@@ -315,6 +315,10 @@ intraday:
     clean_days_if_sparse: 5    # ... if it doesn't
     excluded_days:             # market holidays and owner-excused outages: neither count nor reset
       - 2026-10-06  # API credits ran out; Trader down from 13:20 CT (owner decision 2026-10-07)
+    # Stage 2 -> 3 rule, owner decision 2026-10-16 (config.py)
+    stage_2_started: null
+    stage_3_sessions: 10            # the brief's "2 weeks"
+    stage_3_min_closed_trades: 8
   kill_switch_path: runs/intraday/KILL_SWITCH
   ledger_path: ledger/intraday.sqlite3
   shadow_ledger_path: ledger/intraday_shadow.sqlite3

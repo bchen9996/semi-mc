@@ -1694,6 +1694,46 @@ def _carry_close(
         )
 
 
+# -- reconciliation (added 2026-10-16) ----------------------------------------------------
+
+_POSITION_TOLERANCE_SHARES = 1e-6
+
+
+def reconcile_positions(
+    broker: Broker, ledger: IntradayLedger, as_of: pd.Timestamp
+) -> list[dict[str, Any]]:
+    """Compares the position in every symbol the ledger's fills imply with what the
+    broker holds, records the result (`ledger.record_reconciliation`: ``"ok"`` or
+    ``"discrepancy"``) and returns the discrepancies. A discrepancy is also an error
+    incident, and the next morning's preflight fails on it (`run_preflight`).
+
+    Added 2026-10-16. The brief's preflight checks "yesterday reconciled", and
+    `run_preflight` reads `latest_reconciliation`, but nothing in S4 ever recorded one, so
+    that check passed vacuously every day, including on the real account from Stage 2. A
+    missed fill, a stray order or a manual trade in the S4 account would have gone
+    unnoticed. `run_eod_review` runs this after the close, once `sync_open_orders` has
+    recorded every fill. The ledger's fills include Stage 1's shadow trades, which all
+    closed, so they net to zero. The same comparison `live/mark.py` makes for s0/s3, with
+    whole-share tolerance."""
+    expected: dict[str, float] = {}
+    for fill in ledger.fills_with_orders():
+        signed = fill["qty"] if fill["side"] == "buy" else -fill["qty"]
+        expected[fill["symbol"]] = expected.get(fill["symbol"], 0.0) + signed
+    actual = {p.symbol: p.qty for p in broker.list_positions()}
+    discrepancies = [
+        {"symbol": symbol, "expected": expected.get(symbol, 0.0), "actual": actual.get(symbol, 0.0)}
+        for symbol in sorted(set(expected) | set(actual))
+        if abs(expected.get(symbol, 0.0) - actual.get(symbol, 0.0)) > _POSITION_TOLERANCE_SHARES
+    ]
+    status = "discrepancy" if discrepancies else "ok"
+    ledger.record_reconciliation(as_of, status, discrepancies)
+    if discrepancies:
+        ledger.record_incident(
+            "error", f"position reconciliation mismatch with the broker: {discrepancies}"
+        )
+    return discrepancies
+
+
 # -- eod_review (Phase 9b) ----------------------------------------------------------------
 
 
@@ -1750,10 +1790,17 @@ def run_eod_review(
     `broker` (2026-10-03), when given, is synced first (`sync_open_orders`): carry's
     closes go out at 14:45 and fill seconds later, after the last cycle, so on the real
     account nothing else would record those fills or their reflections before this
-    report reads them.
+    report reads them. Then the ledger is reconciled against it (`reconcile_positions`,
+    2026-10-16), on every run, including one that finds the review already done.
     """
     if broker is not None:
         sync_open_orders(broker, ledger, config.intraday, as_of, now)
+        try:
+            reconcile_positions(broker, ledger, as_of)
+        except Exception as exc:  # noqa: BLE001 - never lose the day's report over this
+            # No reconciliation is recorded, so the Stage 3 check reports the day as
+            # not reconciled.
+            ledger.record_incident("warning", f"reconciliation unavailable ({exc})")
     proposals_today = ledger.proposals_for(as_of)
     reflections_today = ledger.reflections_for(as_of)
     nothing_to_grade = not proposals_today and not reflections_today

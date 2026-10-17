@@ -499,3 +499,110 @@ def test_a_carried_intraday_position_fails_only_the_day_it_was_carried(two_ledge
 
     assert not monday.clean
     assert tuesday.clean, tuesday.clean_failures
+
+
+# -- the Stage 3 rule (owner decision 2026-10-16) -------------------------------------------
+
+
+STAGE_2 = list(pd.bdate_range("2026-10-15", "2026-10-28"))  # ten sessions
+
+
+def _stage_3_config(**overrides) -> IntradayConfig:
+    readiness = IntradayConfig().readiness.model_copy(
+        update={"stage_2_started": STAGE_2[0].date(), **overrides}
+    )
+    return IntradayConfig().model_copy(update={"readiness": readiness})
+
+
+def _stage_3_check(report, prefix: str):
+    return next(c for c in report.stage_3_checks if c.name.startswith(prefix))
+
+
+def _closed_trade(ledger, day, close_reason, pnl_gross=0.0):
+    ledger.record_reflection(
+        day, "NVDA", {"close_reason": close_reason, "pnl_gross": pnl_gross, "pnl_net": pnl_gross}
+    )
+
+
+def _full_stage_2(ledger, placebo, reports, pinned_clock):
+    """Ten clean, reconciled sessions with a trade a day, every exit path used."""
+    reasons = ["invalidation", "time_stop", "carry"] + ["time_stop"] * 7
+    for day, reason in zip(STAGE_2, reasons, strict=True):
+        _clean_day(ledger, placebo, day, reports, pinned_clock, accepted=1)
+        ledger.record_session_open_equity(day, 100_000.0)
+        _closed_trade(ledger, day, reason, pnl_gross=-10.0)
+        ledger.record_reconciliation(day, "ok", [])
+
+
+def test_no_stage_3_section_without_a_stage_2_start_date(two_ledgers, pinned_clock):
+    ledger, placebo, reports = two_ledgers
+    _clean_day(ledger, placebo, MON, reports, pinned_clock)
+    report = stage_readiness(ledger, placebo, IntradayConfig(), reports, MON, MON)
+    assert report.stage_3_checks == []
+    assert "Stage 3 rule" not in render_stage_readiness_markdown(report)
+
+
+def test_a_full_stage_2_meets_the_stage_3_rule(two_ledgers, pinned_clock):
+    ledger, placebo, reports = two_ledgers
+    _full_stage_2(ledger, placebo, reports, pinned_clock)
+
+    report = stage_readiness(ledger, placebo, _stage_3_config(), reports, STAGE_2[0], STAGE_2[-1])
+
+    assert [c.passed for c in report.stage_3_checks] == [True] * 6, report.stage_3_checks
+    assert "## Stage 3 rule" in render_stage_readiness_markdown(report)
+
+
+def test_stage_3_waits_for_the_sessions_and_the_trades(two_ledgers, pinned_clock):
+    ledger, placebo, reports = two_ledgers
+    _full_stage_2(ledger, placebo, reports, pinned_clock)
+
+    report = stage_readiness(ledger, placebo, _stage_3_config(), reports, STAGE_2[0], STAGE_2[6])
+
+    assert not _stage_3_check(report, "Stage 2 has run 10 sessions").passed
+    assert _stage_3_check(report, "Stage 2 has run").detail == "7 since 2026-10-15"
+    assert not _stage_3_check(report, "At least 8 closed trades").passed
+
+
+@pytest.mark.parametrize("problem", ["missing", "discrepancy"])
+def test_an_unreconciled_or_mismatched_close_fails_stage_3(two_ledgers, pinned_clock, problem):
+    ledger, placebo, reports = two_ledgers
+    for day in STAGE_2[:3]:
+        _clean_day(ledger, placebo, day, reports, pinned_clock, accepted=1)
+    ledger.record_reconciliation(STAGE_2[0], "ok", [])
+    if problem == "discrepancy":
+        ledger.record_reconciliation(STAGE_2[1], "discrepancy", [{"symbol": "AMD"}])
+    ledger.record_reconciliation(STAGE_2[2], "ok", [])
+
+    report = stage_readiness(ledger, placebo, _stage_3_config(), reports, STAGE_2[0], STAGE_2[2])
+
+    check = _stage_3_check(report, "The ledger matched the account")
+    assert not check.passed
+    expected = "not reconciled" if problem == "missing" else "discrepancy"
+    assert check.detail == f"{STAGE_2[1].date()} {expected}"
+
+
+def test_reconciliation_counts_from_its_first_day_not_from_stage_2s(two_ledgers, pinned_clock):
+    """Reconciliation started on Stage 2's third day (2026-10-16 was the build)."""
+    ledger, placebo, reports = two_ledgers
+    for day in STAGE_2[:3]:
+        _clean_day(ledger, placebo, day, reports, pinned_clock, accepted=1)
+    ledger.record_reconciliation(STAGE_2[2], "ok", [])
+
+    report = stage_readiness(ledger, placebo, _stage_3_config(), reports, STAGE_2[0], STAGE_2[2])
+
+    assert _stage_3_check(report, "The ledger matched the account").passed
+
+
+def test_stage_3_needs_every_exit_path_and_no_day_at_the_hard_loss_limit(two_ledgers, pinned_clock):
+    ledger, placebo, reports = two_ledgers
+    _clean_day(ledger, placebo, STAGE_2[0], reports, pinned_clock, accepted=1)
+    ledger.record_session_open_equity(STAGE_2[0], 100_000.0)
+    _closed_trade(ledger, STAGE_2[0], "invalidation", pnl_gross=-3_000.0)  # 3% of equity
+
+    report = stage_readiness(ledger, placebo, _stage_3_config(), reports, STAGE_2[0], STAGE_2[0])
+
+    paths = _stage_3_check(report, "Each main exit path")
+    assert not paths.passed
+    assert paths.detail == "a stop: 1, a time stop: 0, carry or a Trader close: 0"
+    loss = _stage_3_check(report, "No day reached the daily hard-loss limit")
+    assert (loss.passed, loss.detail) == (False, str(STAGE_2[0].date()))

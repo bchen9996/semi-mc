@@ -635,6 +635,16 @@ class IntradayReadinessConfig(_Base):
     clean_days_required: int = Field(3, ge=1)
     clean_days_if_sparse: int = Field(5, ge=1)
     excluded_days: list[dt.date] = Field(default_factory=list)
+    # Stage 2 -> Stage 3 (owner decision 2026-10-16, option A of three): promote once Stage
+    # 2 has run `stage_3_sessions` sessions, the ledger has matched the account at every
+    # close since reconciliation began, the latest clean-day streak is at least
+    # `clean_days_required` long and includes accepted trades, there are
+    # `stage_3_min_closed_trades` closed trades since `stage_2_started`, each main exit path
+    # has worked on the real account, and no day reached the daily hard-loss limit. P&L is
+    # not a criterion. `stage_2_started` unset leaves the Stage 3 checks out of the report.
+    stage_2_started: dt.date | None = None
+    stage_3_sessions: int = Field(10, ge=1)
+    stage_3_min_closed_trades: int = Field(8, ge=0)
 
 
 class IntradayConfig(_Base):
