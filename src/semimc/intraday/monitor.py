@@ -46,6 +46,19 @@ class MonitorResult:
     gap_seconds: float | None = None
 
 
+def _first_fill_of_proposal(ledger: IntradayLedger, entry: dict) -> dt.datetime | None:
+    """The earliest fill of any entry order (every tranche) of `entry`'s proposal, aware
+    UTC; `None` if none has filled. A naive time is read as UTC -- the same fallback as
+    `intraday/pretrade.py::check_spread_gate`: a real Order's fill time comes back aware
+    UTC (`execution/market_data.py`), but a naive one must not raise."""
+    times = []
+    for order in ledger.orders_for_proposal(entry["proposal_id"], leg="entry"):
+        for fill in ledger.fills_for_order(order["client_order_id"]):
+            filled_at = dt.datetime.fromisoformat(fill["filled_at"])
+            times.append(filled_at if filled_at.tzinfo else filled_at.replace(tzinfo=dt.UTC))
+    return min(times, default=None)
+
+
 def check_invalidation_and_time_stops(
     config: IntradayConfig,
     broker: Broker,
@@ -62,8 +75,15 @@ def check_invalidation_and_time_stops(
     order's own `proposal_id` via `ledger.get_proposal`) and closes it
     (`orders.py::submit_exit`, which cancels the stops, waits for the cancels, and
     re-places a stop if the close doesn't go out) if the current price has crossed the recorded
-    `invalidation_price`, or `time_stop_minutes` has elapsed since the entry's first
-    fill (`ledger.fills_for_order`).
+    `invalidation_price`, or `time_stop_minutes` has elapsed since that proposal's first
+    fill, across all its tranches (:func:`_first_fill_of_proposal`).
+
+    **A later tranche doesn't restart the clock** (owner decision 2026-10-16, option A
+    of three). It used to count from the latest entry order's fill, and an entry goes in
+    as tranches a cycle apart, so a 90-minute time stop ran about 120: on 2026-10-15
+    NVDA's first tranche filled at 10:01 CT and its second at 10:30, and the time stop
+    came due at 12:01 rather than 11:31. Tranching is an execution technique, not a new
+    decision. An `add` is one, with its own time stop, so it still restarts the clock.
 
     A position with no traceable entry/proposal is left alone and logged as an incident
     rather than guessed at -- the same "never act on incomplete information" caution
@@ -120,15 +140,8 @@ def check_invalidation_and_time_stops(
             stopped_out = long_stopped_out or short_stopped_out
 
         if not stopped_out and time_stop_minutes is not None:
-            fills = ledger.fills_for_order(entry["client_order_id"])
-            if fills:
-                filled_at = dt.datetime.fromisoformat(fills[0]["filled_at"])
-                # filled_at/now may each be naive or aware -- same "assume UTC" fallback
-                # as intraday/pretrade.py::check_spread_gate, for the same reason (a real
-                # Order's submitted_at/filled_at come back aware UTC per
-                # execution/market_data.py's docstring; a naive value here would raise).
-                if filled_at.tzinfo is None:
-                    filled_at = filled_at.replace(tzinfo=dt.UTC)
+            filled_at = _first_fill_of_proposal(ledger, entry)
+            if filled_at is not None:
                 aware_now = now if now.tzinfo is not None else now.replace(tzinfo=dt.UTC)
                 elapsed_minutes = (aware_now - filled_at).total_seconds() / 60.0
                 if elapsed_minutes >= time_stop_minutes:

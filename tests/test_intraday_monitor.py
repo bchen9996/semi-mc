@@ -390,3 +390,98 @@ def test_a_close_records_why_it_was_sent(tmp_path, price, reason):
     [exit_row] = [row for row in ledger.orders_for_proposal(1) if row["leg"] == "exit"]
     assert exit_row["exit_reason"] == reason
     ledger.close()
+
+
+# -- the time stop counts from the proposal's first fill (owner decision 2026-10-16) --------
+
+
+def test_a_later_tranche_does_not_restart_the_time_stop(tmp_path):
+    """2026-10-15: NVDA's tranches filled at 10:01 and 10:30 CT, and its 90-minute time
+    stop came due at 12:01 instead of 11:31."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    proposal_id = _open_position(
+        broker, ledger, time_stop_minutes=90, filled_at=NOW - dt.timedelta(minutes=95)
+    )
+    tranche_2 = broker.submit_order(
+        OrderRequest(
+            symbol="NVDA",
+            side="buy",
+            type="limit",
+            time_in_force="day",
+            client_order_id="entry-NVDA-t2",
+            qty=10.0,
+            limit_price=190.0,
+        )
+    )
+    ledger.record_order(
+        tranche_2.client_order_id,
+        "NVDA",
+        "buy",
+        status=tranche_2.status,
+        qty=10.0,
+        broker_order_id=tranche_2.id,
+        proposal_id=proposal_id,
+        leg="entry",
+        tranche_index=2,
+        tranche_total=2,
+    )
+    ledger.record_fill(
+        tranche_2.client_order_id, qty=10.0, price=190.0, filled_at=NOW - dt.timedelta(minutes=65)
+    )
+
+    result = check_invalidation_and_time_stops(
+        IntradayConfig(), broker, ledger, {"NVDA": 190.0}, AS_OF, CYCLE, NOW
+    )
+
+    assert result.closed == ["NVDA"]  # 95 minutes since the first tranche, not 65
+    ledger.close()
+
+
+def test_an_add_restarts_the_time_stop(tmp_path):
+    """An add is a new decision with its own time stop."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    _open_position(broker, ledger, time_stop_minutes=90, filled_at=NOW - dt.timedelta(minutes=95))
+    add = TradeProposal(
+        action="add",
+        symbol="NVDA",
+        side="buy",
+        size_pct=0.02,
+        limit_price=190.0,
+        thesis="adding on strength",
+        invalidation_price=185.0,
+        time_stop_minutes=90,
+    )
+    add_id = ledger.record_proposal(AS_OF, "cycle_2", "NVDA", "add", "accepted", add.model_dump())
+    order = broker.submit_order(
+        OrderRequest(
+            symbol="NVDA",
+            side="buy",
+            type="limit",
+            time_in_force="day",
+            client_order_id="add-NVDA",
+            qty=4.0,
+            limit_price=190.0,
+        )
+    )
+    ledger.record_order(
+        order.client_order_id,
+        "NVDA",
+        "buy",
+        status=order.status,
+        qty=4.0,
+        broker_order_id=order.id,
+        proposal_id=add_id,
+        leg="entry",
+    )
+    ledger.record_fill(
+        order.client_order_id, qty=4.0, price=190.0, filled_at=NOW - dt.timedelta(minutes=30)
+    )
+
+    result = check_invalidation_and_time_stops(
+        IntradayConfig(), broker, ledger, {"NVDA": 190.0}, AS_OF, CYCLE, NOW
+    )
+
+    assert result.still_open == ["NVDA"]  # 30 minutes since the add's fill
+    ledger.close()

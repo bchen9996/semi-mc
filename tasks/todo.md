@@ -2839,6 +2839,17 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         -$32.39. Alpaca's own account figures were never affected. Report files already
         written (eod.md for 10-06, 10-15, 10-16; this week's weekly_review.md) keep the
         old numbers.
+  - [x] **2026-10-16: a later tranche no longer restarts the time stop (owner chose
+        option A of three).** The monitor measured `time_stop_minutes` from the latest
+        entry order's fill, and an entry goes in as tranches a cycle apart, so every
+        90-minute time stop ran about 120 (10-15 NVDA: tranches at 10:01 and 10:30 CT,
+        due 12:01 instead of 11:31; it would have closed in the 12:00 cycle, which still
+        had a price, instead of 13:30). Now it counts from the first fill of the latest
+        proposal, across all its tranches (`monitor.py::_first_fill_of_proposal`); an add
+        is a new decision with its own time stop and still restarts it. Not chosen: from
+        the position's first fill, adds included (B), and leaving it (C). Remaining
+        lateness is the cadence: time stops are checked only at cycles, every 30
+        minutes, so one fires up to 30 minutes after it is due.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so
