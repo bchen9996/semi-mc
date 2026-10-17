@@ -677,11 +677,13 @@ def sync_open_orders(
       doesn't know as canceled.
     - A lookup that raises is skipped and asked again next time; it never stops the job.
     - Reflections (`IntradayLedger.unreflected_exits`): an exit gets one under the
-      `exit_reason` it was sent with; a stop leg under ``"invalidation"``, plus the
-      ``"stopout:{symbol}"`` incident the cooldown rule reads
-      (`IntradayLedger.last_stopout_times`), timed when this sync notices the fill, so
-      the cooldown can only run long, never short. The reflection is dated `as_of`, the
-      day of the sync that noticed the fill.
+      `exit_reason` it was sent with. A symbol's filled stop legs get one between them,
+      under ``"invalidation"``: one stop-out is one trade, however many tranches and
+      adds each brought their own stop (2026-10-16: one NVDA stop-out, three legs, had
+      been counted as three trades). Plus one ``"stopout:{symbol}"`` incident, which the
+      cooldown rule reads (`IntradayLedger.last_stopout_times`), timed when this sync
+      notices the fill, so the cooldown can only run long, never short. The reflection
+      is dated `as_of`, the day of the sync that noticed the fill.
     """
     updated: list[str] = []
     filled: list[str] = []
@@ -707,15 +709,22 @@ def sync_open_orders(
             updated.append(client_order_id)
 
     reflected: list[str] = []
+    stops_by_symbol: dict[str, list[str]] = {}
     for row in ledger.unreflected_exits():
-        is_stop = row["leg"] == "stop"
-        reason = "invalidation" if is_stop else row["exit_reason"]
+        if row["leg"] == "stop":
+            stops_by_symbol.setdefault(row["symbol"], []).append(row["client_order_id"])
+            continue
         written = record_mechanical_reflection(
-            row["symbol"], row["client_order_id"], reason, ledger, config, as_of
+            row["symbol"], row["client_order_id"], row["exit_reason"], ledger, config, as_of
+        )
+        if written is not None:
+            reflected.append(row["client_order_id"])
+    for symbol, (first, *others) in stops_by_symbol.items():
+        written = record_mechanical_reflection(
+            symbol, first, "invalidation", ledger, config, as_of, also_closed_by=others
         )
         if written is None:
             continue
-        reflected.append(row["client_order_id"])
-        if is_stop:
-            ledger.record_incident("warning", f"stopout:{row['symbol']}")
+        reflected.extend([first, *others])
+        ledger.record_incident("warning", f"stopout:{symbol}")
     return OrderSync(updated=updated, filled=filled, reflected=reflected)

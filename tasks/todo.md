@@ -2821,6 +2821,24 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         volatility inputs cover the universe only (an outside name arrives via an
         article about a universe stock), and that the spread/quote-age gate applies each
         cycle. `test_run_cycle_trades_a_watchlist_name_outside_the_universe` pins it.
+  - [x] **2026-10-16: reflections miscounted trades and misstated P&L (fixed; owner's
+        go).** Found by the Reviewer's weekly note ("three lots of one position").
+        Reflections are what every closed-trade count reads (readiness, eod report,
+        calibration, the playbook's 20-trade threshold). Two bugs in `reflect.py`:
+        (1) the entry price came from the latest entry's proposal alone, so an open
+        plus an add was priced at the add's fills (10-16 NVDA: $217.33 against a true
+        $217.49; 10-15 TSM; 10-05/06 TSM); (2) `sync_open_orders` wrote one reflection
+        per filled stop leg, and each tranche and add carries its own, so the 10-16 NVDA
+        stop-out was three trades. Now a position is every entry since the symbol was
+        last flat (`_position_entries` walks the fills), one sync's stop legs for a
+        symbol make one reflection (`also_closed_by`, listed in `client_order_ids`, which
+        `unreflected_exits` also reads) with one `stopout:` incident, and the modeled
+        cost covers the exited shares on both sides (a trim used to charge the whole
+        entry again). The ledger's 9 reflections were recomputed from the fills and the
+        10-16 legs merged (one-off script, kept ids 1-7): 7 trades, gross -$29.09 ->
+        -$32.39. Alpaca's own account figures were never affected. Report files already
+        written (eod.md for 10-06, 10-15, 10-16; this week's weekly_review.md) keep the
+        old numbers.
 - [ ] Stage 3 -- equities, full budget.
 - [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded). **Built
       ahead of turn, 2026-09-26**: schema/config/gates (Phase 12a) and the real Alpaca

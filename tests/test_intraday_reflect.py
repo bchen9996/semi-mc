@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as dt
 
 import pandas as pd
+import pytest
 
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.reflect import record_mechanical_reflection
@@ -345,4 +346,120 @@ def test_returns_none_when_the_close_order_has_no_fill_yet(config, tmp_path):
 
     assert result is None
     assert ledger.reflections_for(AS_OF) == []
+    ledger.close()
+
+
+# -- a position is every entry since the symbol was last flat (fixed 2026-10-16) -----------
+
+
+def _seed_entry(ledger, client_order_id, proposal_id, qty, price, minutes, symbol="NVDA"):
+    _seed_fill_order(
+        ledger,
+        client_order_id=client_order_id,
+        symbol=symbol,
+        side="buy",
+        proposal_id=proposal_id,
+        leg="entry",
+        qty=qty,
+        price=price,
+        filled_at=NOW + dt.timedelta(minutes=minutes),
+    )
+
+
+def _seed_exit(ledger, client_order_id, qty, price, minutes, leg="exit", symbol="NVDA"):
+    _seed_fill_order(
+        ledger,
+        client_order_id=client_order_id,
+        symbol=symbol,
+        side="sell",
+        proposal_id=None,
+        leg=leg,
+        qty=qty,
+        price=price,
+        filled_at=NOW + dt.timedelta(minutes=minutes),
+    )
+
+
+def test_prices_a_position_built_from_an_open_and_an_add_from_every_entry(config, tmp_path):
+    """2026-10-16: NVDA's open (two tranches) and its add are separate proposals, and the
+    entry price came from the add's fills alone: $217.33 against a true $217.49."""
+    ledger = _ledger(tmp_path)
+    open_id = _seed_proposal(ledger, "NVDA", "buy", invalidation_price=216.5)
+    add_id = _seed_proposal(ledger, "NVDA", "buy", invalidation_price=216.5)
+    _seed_entry(ledger, "open-t1", open_id, 9, 217.61, 0)
+    _seed_entry(ledger, "open-t2", open_id, 9, 217.43, 29)
+    _seed_entry(ledger, "add-t1", add_id, 4, 217.33, 30)
+    _seed_exit(ledger, "exit-1", 22, 216.25, 39)
+
+    record_mechanical_reflection("NVDA", "exit-1", "trader_close", ledger, config.intraday, AS_OF)
+
+    content = ledger.reflections_for(AS_OF)[0]["content"]
+    entry_notional = 9 * 217.61 + 9 * 217.43 + 4 * 217.33
+    assert content["avg_entry_price"] == pytest.approx(entry_notional / 22)
+    assert content["pnl_gross"] == pytest.approx(22 * 216.25 - entry_notional)
+    assert content["time_in_trade_minutes"] == 39.0  # from the first tranche, not the add
+    assert content["client_order_ids"] == ["exit-1"]
+    ledger.close()
+
+
+def test_an_earlier_closed_position_in_the_symbol_is_not_part_of_the_next(config, tmp_path):
+    ledger = _ledger(tmp_path)
+    first_id = _seed_proposal(ledger, "NVDA", "buy", invalidation_price=95.0)
+    _seed_entry(ledger, "entry-1", first_id, 10, 100.0, 0)
+    _seed_exit(ledger, "exit-1", 10, 105.0, 10)
+    second_id = _seed_proposal(ledger, "NVDA", "buy", invalidation_price=115.0)
+    _seed_entry(ledger, "entry-2", second_id, 5, 120.0, 20)
+    _seed_exit(ledger, "exit-2", 5, 118.0, 30)
+
+    record_mechanical_reflection("NVDA", "exit-2", "trader_close", ledger, config.intraday, AS_OF)
+
+    content = ledger.reflections_for(AS_OF)[0]["content"]
+    assert content["avg_entry_price"] == 120.0
+    assert content["pnl_gross"] == pytest.approx(-10.0)
+    assert content["time_in_trade_minutes"] == 10.0
+    ledger.close()
+
+
+def test_a_trims_modeled_cost_covers_only_the_trimmed_shares(config, tmp_path):
+    """The entry side of the cost used to be the whole position's, so every trim charged
+    it again."""
+    ledger = _ledger(tmp_path)
+    proposal_id = _seed_proposal(ledger, "NVDA", "buy", invalidation_price=95.0)
+    _seed_entry(ledger, "entry-1", proposal_id, 10, 100.0, 0)
+    _seed_exit(ledger, "trim-1", 4, 110.0, 10)
+
+    record_mechanical_reflection("NVDA", "trim-1", "trader_trim", ledger, config.intraday, AS_OF)
+
+    content = ledger.reflections_for(AS_OF)[0]["content"]
+    assert content["qty"] == 4.0
+    assert content["pnl_gross"] == pytest.approx(40.0)
+    assert content["pnl_net"] == pytest.approx(40.0 - 0.0008 * (400.0 + 440.0))
+    ledger.close()
+
+
+def test_one_reflection_can_cover_several_stop_legs(config, tmp_path):
+    ledger = _ledger(tmp_path)
+    proposal_id = _seed_proposal(ledger, "NVDA", "buy", invalidation_price=95.0)
+    _seed_entry(ledger, "entry-t1", proposal_id, 5, 100.0, 0)
+    _seed_entry(ledger, "entry-t2", proposal_id, 5, 100.0, 1)
+    _seed_exit(ledger, "entry-t1::stop", 5, 95.0, 20, leg="stop")
+    _seed_exit(ledger, "entry-t2::stop", 5, 94.0, 20, leg="stop")
+
+    record_mechanical_reflection(
+        "NVDA",
+        "entry-t1::stop",
+        "invalidation",
+        ledger,
+        config.intraday,
+        AS_OF,
+        also_closed_by=["entry-t2::stop"],
+    )
+
+    [reflection] = ledger.reflections_for(AS_OF)
+    content = reflection["content"]
+    assert content["qty"] == 10.0
+    assert content["avg_exit_price"] == pytest.approx(94.5)
+    assert content["pnl_gross"] == pytest.approx(-55.0)
+    assert content["client_order_ids"] == ["entry-t1::stop", "entry-t2::stop"]
+    assert ledger.unreflected_exits() == []  # both legs count as reflected
     ledger.close()

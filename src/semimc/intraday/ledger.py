@@ -523,7 +523,9 @@ class IntradayLedger:
         reflections for once a fill arrives after submission. Only exits that carry an
         ``exit_reason`` count, so exits recorded before that column existed (2026-10-03)
         are never reflected a second time. A stop leg needs none: it only ever fires at
-        the invalidation price."""
+        the invalidation price. An order counts as reflected if a reflection names it in
+        its `client_order_ids`, as well as in its own `client_order_id` column (one
+        stop-out's several legs share one reflection, since 2026-10-16)."""
         placeholders = ",".join("?" * len(_OPEN_ORDER_STATUSES))
         rows = self._conn.execute(
             f"""
@@ -532,7 +534,9 @@ class IntradayLedger:
               AND o.status NOT IN ({placeholders})
               AND EXISTS (SELECT 1 FROM fills AS f WHERE f.client_order_id = o.client_order_id)
               AND NOT EXISTS (
-                  SELECT 1 FROM reflections AS r WHERE r.client_order_id = o.client_order_id
+                  SELECT 1 FROM reflections AS r
+                  WHERE r.client_order_id = o.client_order_id
+                     OR instr(r.content_json, '"' || o.client_order_id || '"') > 0
               )
             ORDER BY o.id
             """,
