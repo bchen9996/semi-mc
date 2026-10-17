@@ -1005,6 +1005,43 @@ def run_preopen(
 # -- open_batch / cycle (shared implementation) ------------------------------------------
 
 
+_REGULAR_CLOSE_NY = dt.time(16, 0)
+# How far ahead of the bell `carry` runs on a regular day: 14:45 CT for a 15:00 CT close
+# (docs/external_scheduler.md).
+_CARRY_LEAD = pd.Timedelta(minutes=15)
+
+
+def early_close_before_next_cycle(
+    broker: Broker, ledger: IntradayLedger, now: dt.datetime, cycle_interval_minutes: int
+) -> pd.Timestamp | None:
+    """Today's close, in New York time, if it is an early close (before 16:00) that the
+    next cycle would arrive less than `_CARRY_LEAD` ahead of, or already after; `None`
+    otherwise. Then this cycle is the last chance to close intraday positions, because
+    the scheduled `carry` (14:45 CT) comes after the bell. Added 2026-10-16, for the
+    13:00 ET closes on 2026-11-27 and 2026-12-24.
+
+    Read from the broker's own calendar, which for Alpaca carries its holidays and early
+    closes. A calendar that can't be read is a warning and counts as a regular day.
+    `FakeBroker`'s calendar always closes at 16:00, so the shadow book and the placebo
+    never see an early close and rely on the scheduled `carry`."""
+    now_utc = pd.Timestamp(now if now.tzinfo else now.replace(tzinfo=dt.UTC))
+    now_ny = now_utc.tz_convert("America/New_York")
+    today = now_ny.date()
+    try:
+        days = broker.get_calendar(today, today)
+    except Exception as exc:  # noqa: BLE001 - never fail a cycle over this check
+        ledger.record_incident("warning", f"market calendar unavailable ({exc})")
+        return None
+    day = next((d for d in days if d.date == today), None)
+    if day is None or day.close >= _REGULAR_CLOSE_NY:
+        return None
+    close_at = pd.Timestamp(dt.datetime.combine(today, day.close)).tz_localize("America/New_York")
+    next_cycle = now_ny + pd.Timedelta(minutes=cycle_interval_minutes)
+    if now_ny < close_at and next_cycle > close_at - _CARRY_LEAD:
+        return close_at
+    return None
+
+
 @dataclass
 class CycleResult:
     proposals_seen: int = 0
@@ -1142,6 +1179,32 @@ def run_cycle(
     )
     if monitor_result.closed:
         positions = broker.list_positions()
+
+    # The last cycle before an early close runs carry instead of the Trader: the
+    # scheduled carry comes after the bell, and an intraday entry made now would only
+    # be closed again minutes later.
+    early_close = early_close_before_next_cycle(
+        broker, ledger, now, intraday.schedule.cycle_interval_minutes
+    )
+    if early_close is not None:
+        carry = run_carry(
+            config,
+            broker,
+            ledger,
+            market_data,
+            as_of,
+            now,
+            market_exit_without_price=not intraday.shadow_mode,
+        )
+        closed = carry.closed + carry.closed_for_cap
+        summary = (
+            f"early close at {early_close:%H:%M} New York, before the next cycle: ran carry "
+            f"instead of the Trader (closed: {', '.join(closed) or 'none'}; carried: "
+            f"{', '.join(carry.carried) or 'none'})"
+        )
+        ledger.record_incident("info", f"{cycle}: {summary}")
+        result.skipped_reason = summary
+        return result
 
     # Tranche continuation: submit the next piece of any partially-tranched-in entry
     # (no new model call -- the original accepted proposal already justified the full

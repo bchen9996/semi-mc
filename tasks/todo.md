@@ -2792,13 +2792,20 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         position at a current price. A held position with no multi-day thesis is an
         error incident naming it, anything else an info line. The placebo's
         `FakeBroker` has no real clock and always reads open, so it is unchanged.
-  - [ ] **Early closes: nothing closes intraday positions before a 12:00 CT bell.**
-        NYSE closes at 13:00 ET (12:00 CT) on 2026-11-27 and 2026-12-24, but `carry` is
-        scheduled at 14:45 CT and nothing shifts it (`docs/external_scheduler.md`). On
-        those days a position still open at 12:00 would be held overnight, now with the
-        error incident above as the alarm. Decide before 2026-11-27: a one-off
-        cron-job.org `carry` at 11:45 CT on each date, or code that runs carry from
-        the last cycle before the broker's `next_close`.
+  - [x] **Early closes: the last cycle before the bell runs carry (2026-10-16, owner
+        chose both options).** NYSE closes at 13:00 ET (12:00 CT) on 2026-11-27 and
+        2026-12-24, but `carry` is scheduled at 14:45 CT, after the bell, so a position
+        still open at 12:00 would have been held overnight (over the weekend on 11-27).
+        The owner added one-off cron-job.org `carry` runs at 11:45 CT on both dates.
+        In code, `run_cycle` reads Alpaca's calendar each cycle
+        (`early_close_before_next_cycle`): on an early-close day, the cycle whose
+        successor would land less than 15 minutes before the bell (carry's lead on a
+        regular day) runs `run_carry` after the monitor and skips the Trader, since an
+        intraday entry then would only be closed again minutes later. With a 30-minute
+        cadence that is the 11:30 CT cycle. An info incident records what it closed and
+        carried. Not covered: the placebo (its `FakeBroker` calendar always closes at
+        16:00) and shadow mode, which rely on the scheduled carry, and so on the
+        owner's one-off runs for these two dates.
 - [ ] Stage 3 -- equities, full budget.
 - [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded). **Built
       ahead of turn, 2026-09-26**: schema/config/gates (Phase 12a) and the real Alpaca
