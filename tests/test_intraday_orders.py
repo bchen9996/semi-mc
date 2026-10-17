@@ -816,6 +816,52 @@ def test_sync_records_a_stop_that_fired_between_cycles(tmp_path):
     ledger.close()
 
 
+def test_sync_reflects_one_stop_out_once_however_many_legs_fired(tmp_path):
+    """2026-10-16: NVDA's open (two tranches) and its add each carried a stop. All three
+    fired together and the stop-out was recorded as three trades, each priced off the
+    add's entry alone. It is one trade, priced from every entry."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    open_id = ledger.record_proposal(
+        AS_OF, CYCLE, "NVDA", "open", "accepted", payload=_proposal().model_dump()
+    )
+    add_id = ledger.record_proposal(
+        AS_OF, "cycle_2", "NVDA", "add", "accepted", payload=_proposal(action="add").model_dump()
+    )
+    entries = [
+        ("entry-t1", 9.0, 217.61, open_id, 216.19),
+        ("entry-t2", 9.0, 217.43, open_id, 216.20),
+        ("entry-add", 4.0, 217.33, add_id, 216.46),
+    ]
+    for client_order_id, qty, price, proposal_id, _stop_fill in entries:
+        submit_order_with_fault_isolation(
+            _order(client_order_id=client_order_id, qty=qty, limit_price=price),
+            broker,
+            ledger,
+            NOW,
+            proposal_id=proposal_id,
+        )
+    for client_order_id, _qty, _price, _proposal_id, stop_fill in entries:
+        broker.trigger_stop(f"{client_order_id}::stop", stop_fill)
+
+    synced = _sync(broker, ledger)
+
+    legs = [f"{client_order_id}::stop" for client_order_id, *_ in entries]
+    assert sorted(synced.reflected) == sorted(legs)
+    [reflection] = ledger.reflections_for(AS_OF)
+    content = reflection["content"]
+    entry_notional = sum(qty * price for _, qty, price, _, _ in entries)
+    exit_notional = sum(qty * stop_fill for _, qty, _, _, stop_fill in entries)
+    assert content["qty"] == 22.0
+    assert content["avg_entry_price"] == pytest.approx(entry_notional / 22.0)
+    assert content["pnl_gross"] == pytest.approx(exit_notional - entry_notional)
+    assert sorted(content["client_order_ids"]) == sorted(legs)
+    assert _incidents(ledger, "warning") == ["stopout:NVDA"]
+    assert ledger.unreflected_exits() == []
+    assert _sync(broker, ledger).reflected == []  # once only
+    ledger.close()
+
+
 class _LookupFails(FakeBroker):
     def get_order_by_client_id(self, client_order_id: str):
         raise BrokerError("simulated outage")

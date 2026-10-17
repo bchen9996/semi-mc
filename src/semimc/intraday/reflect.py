@@ -17,17 +17,27 @@ confirmed. `category`/`process_grade`/`lesson` are left `None`; Phase 9b's `eod_
 fills them in.
 
 A `trim` (partial exit) gets its own reflection too, scoped to just the trimmed qty --
-not only a full close. The P&L math already generalizes correctly: `avg_entry_price` is
-always the position's whole-entry average (constant across however many trims it takes
-to close), while `pnl_gross`/`pnl_net` multiply by `exit_qty`, the qty this specific
-event actually exited -- so a trim's reflection reports the realized P&L on the slice
-just sold, and the remaining position gets its own, separate reflection whenever it
-eventually closes.
+not only a full close. `avg_entry_price` is the position's whole-entry average (constant
+across however many trims it takes to close), while `pnl_gross`/`pnl_net` and the
+modeled cost scale with `exit_qty`, the qty this specific event exited -- so a trim's
+reflection reports the realized P&L on the slice just sold, and the remaining position
+gets its own, separate reflection whenever it eventually closes.
+
+**A position is every entry since the symbol was last flat** (fixed 2026-10-16): its
+opening tranches and any later `add`, each of which is its own proposal. The entry price
+used to come from the most recent entry's proposal alone, so a position built from an
+open plus an add was priced at the add's fills: on 2026-10-16 NVDA's 22 shares were
+reported at an entry of $217.33 against a true $217.49, and gross P&L of -$23.97 against
+-$27.41. And one exit event may take several orders: a stop-out fires the stop that each
+tranche and add carries, and `orders.py::sync_open_orders` now reflects them together, as
+one trade, rather than one reflection per leg (the same stop-out had been counted as
+three trades). Every order a reflection covers is listed in its `client_order_ids`.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Sequence
 from typing import Any
 
 import pandas as pd
@@ -84,6 +94,76 @@ def _summed_fills(
     return qty, notional, earliest, latest
 
 
+def _position_entries(
+    ledger: IntradayLedger, symbol: str, close_order_ids: Sequence[str]
+) -> tuple[float, float, dt.datetime | None]:
+    """Qty, notional and first fill time of the entries that built the position
+    `close_order_ids` exit: every entry fill since `symbol` was last flat, before the
+    first of those orders' own fills. Fills are walked in fill-time order, signed by side
+    (buy +, sell -); each return to zero starts a new position. All zeros if no entry is
+    found, e.g. a ledger whose history doesn't net out."""
+    closing = set(close_order_ids)
+    fills = [fill for fill in ledger.fills_with_orders() if fill["symbol"] == symbol]
+    fills.sort(key=lambda fill: _aware(dt.datetime.fromisoformat(fill["filled_at"])))
+    running = 0.0
+    entries: list[dict[str, Any]] = []
+    for fill in fills:
+        if fill["client_order_id"] in closing:
+            break
+        running += fill["qty"] if fill["side"] == "buy" else -fill["qty"]
+        if fill["leg"] == "entry":
+            entries.append(fill)
+        if abs(running) < 1e-9:
+            entries = []
+    qty = sum(fill["qty"] for fill in entries)
+    notional = sum(fill["qty"] * fill["price"] for fill in entries)
+    first = min(
+        (_aware(dt.datetime.fromisoformat(fill["filled_at"])) for fill in entries), default=None
+    )
+    return qty, notional, first
+
+
+def trade_figures(
+    ledger: IntradayLedger,
+    symbol: str,
+    close_order_ids: Sequence[str],
+    side: str,
+    cost_bps_per_side: float,
+    fallback_entry_ids: Sequence[str] = (),
+) -> dict[str, Any] | None:
+    """The price-derived fields of a reflection for the exit made by `close_order_ids`:
+    `qty`, `avg_entry_price`, `avg_exit_price`, `pnl_gross`, `pnl_net` (of modeled cost
+    on the exited qty, both sides) and `time_in_trade_minutes`, plus `client_order_ids`.
+    The entries are the position's (:func:`_position_entries`), or `fallback_entry_ids`'
+    fills if none are found. `None` without an entry fill or an exit fill."""
+    entry_qty, entry_notional, entry_filled_at = _position_entries(ledger, symbol, close_order_ids)
+    if entry_qty <= 0 and fallback_entry_ids:
+        entry_qty, entry_notional, entry_filled_at, _ = _summed_fills(
+            ledger, list(fallback_entry_ids)
+        )
+    if entry_qty <= 0 or entry_filled_at is None:
+        return None
+
+    exit_qty, exit_notional, _, exit_filled_at = _summed_fills(ledger, list(close_order_ids))
+    if exit_qty <= 0 or exit_filled_at is None:
+        return None
+
+    avg_entry_price = entry_notional / entry_qty
+    avg_exit_price = exit_notional / exit_qty
+    sign = 1.0 if side == "buy" else -1.0
+    pnl_gross = sign * (avg_exit_price - avg_entry_price) * exit_qty
+    modeled_cost = (cost_bps_per_side / 10_000) * (avg_entry_price * exit_qty + exit_notional)
+    return {
+        "qty": exit_qty,
+        "avg_entry_price": avg_entry_price,
+        "avg_exit_price": avg_exit_price,
+        "pnl_gross": pnl_gross,
+        "pnl_net": pnl_gross - modeled_cost,
+        "time_in_trade_minutes": (exit_filled_at - entry_filled_at).total_seconds() / 60.0,
+        "client_order_ids": list(close_order_ids),
+    }
+
+
 def record_mechanical_reflection(
     symbol: str,
     close_order_id: str,
@@ -91,12 +171,15 @@ def record_mechanical_reflection(
     ledger: IntradayLedger,
     config: IntradayConfig,
     as_of: pd.Timestamp,
+    *,
+    also_closed_by: Sequence[str] = (),
 ) -> int | None:
     """Computes and stores everything a reflection needs that doesn't require model
     judgment. `close_reason` is supplied by the caller (e.g. `"invalidation"`,
     `"time_stop"`, `"trader_close"`, `"trader_trim"`, `"carry"`) -- each call site
     already knows exactly why it's closing, so this is threaded through, not inferred
-    after the fact.
+    after the fact. `also_closed_by` names further orders that made the same exit (the
+    other stop legs of one stop-out); their fills are summed into this one reflection.
 
     Returns `None` (recording nothing) if no traceable entry or no exit fill exists yet --
     a stray or malformed close must never crash the job that's closing a position, the
@@ -109,27 +192,20 @@ def record_mechanical_reflection(
     entry, proposal = found
 
     entry_orders = ledger.orders_for_proposal(entry["proposal_id"], leg="entry")
-    entry_qty, entry_notional, entry_filled_at, _ = _summed_fills(
-        ledger, [o["client_order_id"] for o in entry_orders]
+    side = entry["side"]
+    figures = trade_figures(
+        ledger,
+        symbol,
+        [close_order_id, *also_closed_by],
+        side,
+        config.risk.equity_cost_bps_per_side,
+        fallback_entry_ids=[o["client_order_id"] for o in entry_orders],
     )
-    if entry_qty <= 0 or entry_filled_at is None:
+    if figures is None:
         return None
-
-    exit_qty, exit_notional, _, exit_filled_at = _summed_fills(ledger, [close_order_id])
-    if exit_qty <= 0 or exit_filled_at is None:
-        return None
-
-    avg_entry_price = entry_notional / entry_qty
-    avg_exit_price = exit_notional / exit_qty
+    avg_exit_price = figures["avg_exit_price"]
 
     payload = proposal["payload"]
-    side = entry["side"]
-    sign = 1.0 if side == "buy" else -1.0
-    pnl_gross = sign * (avg_exit_price - avg_entry_price) * exit_qty
-
-    cost_bps = config.risk.equity_cost_bps_per_side
-    modeled_cost = (cost_bps / 10_000) * (entry_notional + exit_notional)
-    pnl_net = pnl_gross - modeled_cost
 
     invalidation_price = payload.get("invalidation_price")
     invalidation_respected = None
@@ -151,8 +227,6 @@ def record_mechanical_reflection(
                 else avg_exit_price <= invalidation_price
             )
 
-    time_in_trade_minutes = (exit_filled_at - entry_filled_at).total_seconds() / 60.0
-
     content = {
         "thesis": payload.get("thesis"),
         "confidence": payload.get("confidence"),
@@ -164,13 +238,14 @@ def record_mechanical_reflection(
         # this (times `avg_entry_price`) for the exited slice's own signed exposure --
         # not derivable after the fact from `pnl_gross` alone (division by a possibly-
         # zero price move), so it's stored here at the one point it's known unambiguously.
-        "qty": exit_qty,
-        "avg_entry_price": avg_entry_price,
+        "qty": figures["qty"],
+        "avg_entry_price": figures["avg_entry_price"],
         "avg_exit_price": avg_exit_price,
-        "pnl_gross": pnl_gross,
-        "pnl_net": pnl_net,
+        "pnl_gross": figures["pnl_gross"],
+        "pnl_net": figures["pnl_net"],
         "invalidation_respected": invalidation_respected,
-        "time_in_trade_minutes": time_in_trade_minutes,
+        "time_in_trade_minutes": figures["time_in_trade_minutes"],
+        "client_order_ids": figures["client_order_ids"],
         # Filled in by Phase 9b's eod_review, batched into its one daily Reviewer call.
         "category": None,
         "process_grade": None,
