@@ -148,6 +148,24 @@ def test_rejected_proposals_do_not_count_against_the_budget(tmp_path):
     ledger.close()
 
 
+def test_an_add_uses_a_round_trip_but_not_a_new_position(tmp_path):
+    """Owner decision 2026-10-17 (option C): on 2026-10-15 TSM's add spent the half
+    budget's last slot and NVDA's add was rejected for it."""
+    config = IntradayConfig(risk={"new_positions_per_day": 2, "round_trips_per_symbol_per_day": 2})
+    ledger = _ledger(tmp_path)
+    ledger.record_proposal(AS_OF, "cycle_1", "TSM", "open", "accepted", payload={})
+    ledger.record_proposal(AS_OF, "cycle_1", "NVDA", "open", "accepted", payload={})
+    ledger.record_proposal(AS_OF, "cycle_2", "TSM", "add", "accepted", payload={})
+    context = _context(tmp_path, ledger=ledger, config=config)
+
+    assert not any("budget" in f for f in validate_proposal(_open(action="add"), context))
+    assert any("new_positions_per_day" in f for f in validate_proposal(_open(symbol="MU"), context))
+    tsm_add = validate_proposal(_open(action="add", symbol="TSM"), context)
+    assert any("round_trips_per_symbol_per_day" in f for f in tsm_add)
+    assert not any("new_positions_per_day" in f for f in tsm_add)
+    ledger.close()
+
+
 # -- validator: per-trade risk and concentration -------------------------------------------
 
 

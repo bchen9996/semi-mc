@@ -91,6 +91,22 @@ def test_build_trader_context_reflects_todays_accepted_proposals_in_remaining_bu
     ledger.close()
 
 
+def test_an_add_spends_a_round_trip_but_not_a_new_position(tmp_path):
+    ledger = _ledger(tmp_path)
+    config = IntradayConfig(risk={"new_positions_per_day": 3, "round_trips_per_symbol_per_day": 2})
+    ledger.record_proposal(AS_OF, "cycle_1", "NVDA", "open", "accepted", payload={})
+    ledger.record_proposal(AS_OF, "cycle_2", "NVDA", "add", "accepted", payload={})
+
+    bundle = build_trader_context(
+        AS_OF, "cycle_3", config, ledger, watchlist=[], positions={}, prices={}
+    )
+
+    remaining = bundle.payload["sections"]["budget_remaining"]
+    assert remaining["new_positions_per_day"] == 2
+    assert remaining["round_trips_per_symbol_per_day"] == {"NVDA": 0}
+    ledger.close()
+
+
 def test_build_trader_context_includes_rejected_proposals_with_reasons(tmp_path):
     ledger = _ledger(tmp_path)
     config = IntradayConfig()

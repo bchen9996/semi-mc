@@ -50,6 +50,18 @@ def test_process_scorecard_computes_rejection_rate_and_reasons(tmp_path):
     ledger.close()
 
 
+def test_process_scorecard_counts_an_add_as_a_round_trip_not_a_new_position(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_proposal(AS_OF, "cycle_1", "AVGO", "open", "accepted", payload={})
+    ledger.record_proposal(AS_OF, "cycle_2", "AVGO", "add", "accepted", payload={})
+
+    scorecard = process_scorecard(ledger, IntradayConfig(), AS_OF)
+
+    assert scorecard["new_positions_used"] == 1
+    assert scorecard["round_trips_by_symbol"] == {"AVGO": 2}
+    ledger.close()
+
+
 def test_process_scorecard_is_zero_rejection_rate_with_no_proposals(tmp_path):
     ledger = _ledger(tmp_path)
     scorecard = process_scorecard(ledger, IntradayConfig(), AS_OF)
@@ -68,6 +80,7 @@ def test_process_scorecard_computes_budget_discipline_against_configured_caps(tm
 
     assert scorecard["new_positions_used"] == 1
     assert scorecard["new_positions_cap"] == 6
+    assert scorecard["round_trips_by_symbol"] == {"NVDA": 1}
     assert scorecard["turnover_usd"] == pytest.approx(0.05 * 100_000.0)
     assert scorecard["turnover_cap_usd"] == pytest.approx(1.5 * 100_000.0)
     ledger.close()
