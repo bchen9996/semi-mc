@@ -279,6 +279,25 @@ def test_run_placebo_carry_closes_every_placebo_position(tmp_path, config):
     shadow_ledger.close()
 
 
+def test_placebo_carry_mid_session_does_nothing_when_asked_to_wait_for_the_close(tmp_path, config):
+    """`cli.py` passes `near_close_only` for the placebo too, so a carry dispatched at the
+    wrong time leaves the placebo's book alone, as it does the real one's."""
+    cfg = _placebo_config(config, tmp_path)
+    shadow_ledger = _ledger(tmp_path, "shadow.sqlite3")
+    broker = FakeBroker(now=NOW)
+    _seed_open_shadow_position(broker, shadow_ledger, cfg, symbol="NVDA")
+    now_utc = dt.datetime(2026, 9, 21, 16, 45)  # 12:45 ET
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0, at=now_utc)})
+
+    result = run_placebo_carry(
+        cfg, broker, shadow_ledger, market_data, AS_OF, now_utc, near_close_only=True
+    )
+
+    assert result.skipped_reason is not None
+    assert [p.symbol for p in broker.list_positions()] == ["NVDA"]
+    shadow_ledger.close()
+
+
 def test_placebo_open_batch_runs_once_per_day_like_the_real_agents(tmp_path, config):
     cfg = _placebo_config(config, tmp_path)
     real_ledger = _ledger(tmp_path, "real.sqlite3")

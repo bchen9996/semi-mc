@@ -12,6 +12,7 @@ from semimc.intraday.eod_report import (
     DayBenchmarks,
     MonitorCadence,
     build_eod_report,
+    open_to_close_return,
     render_eod_markdown,
     s0_day_return,
 )
@@ -163,3 +164,49 @@ def test_s0_day_return_is_none_with_no_snapshot_today():
             return [{"as_of": "2026-09-19", "equity": 100_000.0}]
 
     assert s0_day_return(_FakeLedger(), AS_OF) is None
+
+
+# -- open_to_close_return (added 2026-10-19) ----------------------------------------------
+
+
+class _Cache:
+    def __init__(self, ohlc):
+        self.ohlc = ohlc
+
+
+def _bars(opens: list[float], closes: list[float]) -> dict[str, pd.DataFrame]:
+    index = pd.bdate_range(end=AS_OF, periods=len(opens))
+    return {
+        "open": pd.DataFrame({"SOXX": opens}, index=index),
+        "close": pd.DataFrame({"SOXX": closes}, index=index),
+    }
+
+
+def test_open_to_close_return_reads_todays_bar_alone():
+    """2026-10-19: SOXX opened 511.30 and closed 501.93 (-1.83%), after a +3.63% gap."""
+    cache = _Cache(_bars([490.0, 511.30], [493.39, 501.93]))
+    assert open_to_close_return(cache, "SOXX", AS_OF) == pytest.approx(501.93 / 511.30 - 1)
+
+
+def test_open_to_close_return_is_none_without_todays_bar_or_ohlc():
+    assert (
+        open_to_close_return(_Cache(_bars([490.0], [493.39])), "SOXX", AS_OF + pd.Timedelta(days=1))
+        is None
+    )
+    assert open_to_close_return(_Cache({}), "SOXX", AS_OF) is None
+    assert open_to_close_return(_Cache(_bars([490.0], [493.39])), "SMH", AS_OF) is None
+
+
+def test_the_report_shows_soxx_from_the_prior_close_and_from_the_open(tmp_path):
+    ledger = IntradayLedger(tmp_path / "intraday.sqlite3")
+    report = build_eod_report(
+        ledger,
+        AS_OF,
+        benchmarks=DayBenchmarks(soxx_return=0.0173, soxx_open_to_close=-0.0183),
+    )
+
+    text = render_eod_markdown(report)
+
+    assert "- SOXX buy-and-hold, prior close to now: +1.73%" in text
+    assert "- SOXX open to close (the session an intraday book can trade): -1.83%" in text
+    ledger.close()

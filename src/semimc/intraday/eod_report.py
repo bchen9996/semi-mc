@@ -41,10 +41,13 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class DayBenchmarks:
+    # Prior close to now (`jobs.py::run_eod_review`), and today's open to its close
+    # (`open_to_close_return`): the gap between them is overnight, which S4 never holds.
     soxx_return: float | None = None
     s0_return: float | None = None
     placebo_pnl: float | None = None
     do_nothing_return: float | None = None
+    soxx_open_to_close: float | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,26 @@ class EodReport:
     # -- rendered in place of each Reviewer-only section, so the report says why a
     # section is empty instead of the "not yet built" placeholder, which would be false.
     reviewer_note: str | None = None
+
+
+def open_to_close_return(market_data_pit: Any, ticker: str, as_of: pd.Timestamp) -> float | None:
+    """`ticker`'s return from `as_of`'s open to its close, from the price cache's daily
+    bar (added 2026-10-19). `run_eod_review`'s own `semimc fetch` runs after the bell, so
+    the bar is today's. Adjusted open and close share one adjustment factor, so their
+    ratio is the day's own. `None` without OHLC in the cache, or with no bar dated
+    `as_of`."""
+    frames = market_data_pit.ohlc
+    if not frames or "open" not in frames or "close" not in frames:
+        return None
+    day = pd.Timestamp(as_of).normalize()
+    try:
+        opened = frames["open"].loc[day, ticker]
+        closed = frames["close"].loc[day, ticker]
+    except KeyError:
+        return None
+    if pd.isna(opened) or pd.isna(closed) or opened <= 0:
+        return None
+    return float(closed / opened - 1.0)
 
 
 def s0_day_return(paper_ledger: Any, as_of: pd.Timestamp) -> float | None:
@@ -259,7 +282,11 @@ def render_eod_markdown(report: EodReport) -> str:
 
     lines.append("")
     lines.append("## Benchmarks for the day")
-    lines.append(f"- SOXX buy-and-hold: {_pct(report.benchmarks.soxx_return)}")
+    lines.append(f"- SOXX buy-and-hold, prior close to now: {_pct(report.benchmarks.soxx_return)}")
+    lines.append(
+        "- SOXX open to close (the session an intraday book can trade): "
+        f"{_pct(report.benchmarks.soxx_open_to_close)}"
+    )
     lines.append(f"- S0 control sleeve: {_pct(report.benchmarks.s0_return)}")
     placebo = report.benchmarks.placebo_pnl
     placebo_line = f"{placebo:,.2f}" if placebo is not None else "not available"

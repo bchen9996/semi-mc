@@ -932,6 +932,17 @@ class IntradayLedger:
         day = pd.Timestamp(as_of).normalize()
         return [row for row in self.incidents() if trading_day(row["created_at"]) == day]
 
+    def skipped_tranche_proposals(self) -> set[int]:
+        """Proposal ids whose remaining tranches `jobs.py::run_cycle` decided not to send
+        (added 2026-10-19), from its ``"tranche_skipped:{proposal_id}"`` incidents -- the
+        same incident-as-record shape as :meth:`last_stopout_times`. Read so a skipped
+        tranche stays skipped instead of going in at a later cycle."""
+        return {
+            int(row["message"].split(":", 1)[1].split(" ", 1)[0])
+            for row in self.incidents()
+            if row["message"].startswith("tranche_skipped:")
+        }
+
     def last_stopout_times(self) -> dict[str, dt.datetime]:
         """symbol -> most recent invalidation-triggered stop-out time (S4, Phase 5),
         derived from `intraday/monitor.py`'s own incident log (message prefixed

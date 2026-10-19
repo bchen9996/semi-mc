@@ -99,6 +99,9 @@ class _FakePitMarketData:
     def spot(self, tickers, as_of=None):
         return pd.Series(dtype=float)
 
+    def before(self, date):
+        return self
+
     def has_ohlc(self, ticker):
         return False
 
@@ -230,10 +233,35 @@ def test_cycle_runs_cleanly_with_no_proposals(tmp_path, fake_intraday_env):
     assert "Proposals: 0 seen" in result.output
 
 
-def test_carry_runs_cleanly_with_no_positions(tmp_path, fake_intraday_env):
+@pytest.fixture
+def at_carry_time(monkeypatch):
+    """`carry` acts only in the last hour before the close (2026-10-19), and the CLI reads
+    the wall clock, so pin it: 14:45 CT on a weekday, the scheduled run's time. Returns a
+    setter for a test that needs another time (naive UTC, `_intraday_now`'s convention)."""
+
+    def at(now: dt.datetime) -> None:
+        monkeypatch.setattr("semimc.cli._intraday_now", lambda: now)
+
+    at(dt.datetime(2026, 9, 21, 19, 45))
+    return at
+
+
+def test_carry_runs_cleanly_with_no_positions(tmp_path, fake_intraday_env, at_carry_time):
     result = runner.invoke(app, ["intraday", "carry"] + _tradeable_overrides(tmp_path))
     assert result.exit_code == 0, result.output
     assert "Carried: (none)" in result.output
+
+
+def test_carry_dispatched_mid_session_does_nothing(tmp_path, fake_intraday_env, at_carry_time):
+    """2026-10-19: an 11:45 CT carry on a regular day closed AVGO three hours early."""
+    at_carry_time(dt.datetime(2026, 9, 21, 16, 45))
+
+    result = runner.invoke(app, ["intraday", "carry"] + _tradeable_overrides(tmp_path))
+
+    assert result.exit_code == 0, result.output
+    assert "Carry skipped: the close (16:00 New York) is more than 60 minutes away" in (
+        result.output
+    )
 
 
 # -- shadow mode (Phase 11, Rollout Stage 1) -----------------------------------------------
@@ -317,7 +345,7 @@ def test_cycle_runs_cleanly_in_shadow_mode_without_a_real_broker(
 
 
 def test_carry_runs_cleanly_in_shadow_mode_without_a_real_broker(
-    tmp_path, fake_intraday_shadow_env
+    tmp_path, fake_intraday_shadow_env, at_carry_time
 ):
     result = runner.invoke(app, ["intraday", "carry"] + _shadow_tradeable_overrides(tmp_path))
     assert result.exit_code == 0, result.output
@@ -751,10 +779,21 @@ def test_placebo_cycle_runs_cleanly_with_an_empty_watchlist(tmp_path, fake_place
     assert "Skipped" in result.output
 
 
-def test_placebo_carry_runs_cleanly_with_no_positions(tmp_path, fake_placebo_env):
+def test_placebo_carry_runs_cleanly_with_no_positions(tmp_path, fake_placebo_env, at_carry_time):
     result = runner.invoke(app, ["intraday", "placebo", "carry"] + _intraday_overrides(tmp_path))
     assert result.exit_code == 0, result.output
     assert "Carried: (none)" in result.output
+
+
+def test_placebo_carry_dispatched_mid_session_does_nothing(
+    tmp_path, fake_placebo_env, at_carry_time
+):
+    at_carry_time(dt.datetime(2026, 9, 21, 16, 45))
+
+    result = runner.invoke(app, ["intraday", "placebo", "carry"] + _intraday_overrides(tmp_path))
+
+    assert result.exit_code == 0, result.output
+    assert "Carry skipped: the close (16:00 New York)" in result.output
 
 
 def test_intraday_now_is_naive_utc_the_convention_every_timezone_boundary_assumes():

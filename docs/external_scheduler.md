@@ -127,8 +127,15 @@ Early closes (13:00 ET, 12:00 CT) need nothing special either, since 2026-10-16.
 last `cycle` whose successor would land less than 15 minutes before the close (the
 11:30 one) runs carry itself instead of calling the Trader (`jobs.py::
 early_close_before_next_cycle`, from Alpaca's calendar). The owner also added one-off
-`carry` runs at 11:45 CT on 2026-11-27 and 2026-12-24 as a backstop; those also close
-the placebo's positions, which the cycle's carry doesn't.
+`carry` runs at 11:45 CT on 2026-11-27 and 2026-12-24 as a backstop for the real account.
+
+**A `carry` dispatched more than 60 minutes before the close does nothing** (since
+2026-10-19; `run_carry`'s `near_close_only`): a warning incident, no orders. On
+2026-10-19 one of the 11:45 CT backstops fired on a regular day and closed AVGO more
+than three hours early. So a mistimed carry job is now harmless, but it is still worth
+fixing, since each mistimed run logs a warning. The placebo reads its own fake calendar,
+which always closes at 16:00 ET, so on an early close its positions close at the 14:45 CT
+run, after the bell.
 
 ## Step 4 -- verify on the first trading day
 

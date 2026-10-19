@@ -2861,6 +2861,41 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         cap allows at most one add per name per day. Applies to the placebo too (same
         `validate_proposal`). Not chosen: keep both (A); adds count toward neither (B),
         which leaves adds bounded only by the single-name cap.
+  - [x] **2026-10-19, day 3: one trade, AVGO, -$10.12 gross (-$14.45 net); S3 made
+        +$1,070.** All of the day's gain was overnight: SOXX gapped +3.63% and fell 1.83%
+        from the open to the close, and all 14 names gapped up and fell during the
+        session. S4 holds nothing overnight and was about 2.7% invested at its peak, for
+        74 minutes. The trade: an opening-range breakout on weak volume (0.69) at 10:31
+        CT, an add at 11:01, a failed break by 11:30. **An 11:45 CT carry closed it** at
+        337.65: one of the owner's cron-job.org early-close backstops fired on a regular
+        day. The stops (336.60/336.90) would have filled by 12:30, about $7 worse. Placebo
+        -$442. Stage 2 so far: S4 -$50 net, S3 -$1,166. First live reconciliation ok;
+        one reflection for the 4 entry fills; the Researcher stayed in the universe.
+  - [x] **2026-10-19: a mistimed carry does nothing.** `run_carry(near_close_only=True)`
+        skips, with a warning incident, while the close (broker calendar) is more than
+        60 minutes away; both `carry` commands set it, and the early-close handover in
+        `run_cycle` doesn't need it. An unreadable calendar is a warning and carry goes
+        ahead. The placebo's fake calendar always closes at 16:00 ET, so on an early
+        close its positions close at the 14:45 run (docs/external_scheduler.md).
+        **Owner to check** the two cron-job.org backstops' schedules.
+  - [x] **2026-10-19: no further tranche once a trade is halfway to its stop (owner chose
+        option B of three).** Tranche continuation sent the next piece regardless; on
+        10-19 AVGO's add bought its second half at 337.77 after the breakout failed (339.10
+        paid, stop 336.90). Now `run_cycle` skips the rest of a proposal's tranches when
+        the price has moved against it by more than half the distance from the average
+        paid so far to the invalidation price, and records `tranche_skipped:{id}` (info),
+        which keeps it skipped (`ledger.skipped_tranche_proposals`). In Stage 2 so far it
+        would have skipped 1 of 6 second tranches (+$0.24). Not chosen: always send (A);
+        skip on any move below the first fill (C), which would have skipped 5 of 6 and
+        in practice halved most positions.
+  - [x] **2026-10-19: the eod report's SOXX benchmark was about 0% every day from
+        10-01.** eod-review's own `semimc fetch` runs after the bell, so the cache's
+        "prior close" was already today's close, and the benchmark measured today's close
+        to an after-hours quote (+0.03% on 10-19, a +1.73% day). It now measures from the
+        last close before today (`MarketData.before`), and the report adds SOXX open to
+        close (`eod_report.py::open_to_close_return`), so the overnight gap shows. The
+        day's attribution now uses the open-to-close move: S4 holds nothing overnight.
+        Reports from 10-01 to 10-19 keep their wrong SOXX line and sector split.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so

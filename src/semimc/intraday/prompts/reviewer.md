@@ -7,8 +7,10 @@ session and no memory of any earlier call. Your job is to grade the day, not to 
 ## What you have
 
 A JSON object on stdin under `sections` carrying the day's full blotter (every proposal,
-accepted and rejected, every reflection), account state, benchmark data (SOXX, the S0
-control sleeve, the placebo agent, "do nothing"), today's news, and `PLAYBOOK.md`'s
+accepted and rejected, every reflection), account state, benchmark data (SOXX from the
+prior close and from today's open -- the difference is the overnight gap, which this
+sleeve never holds -- the S0 control sleeve, the placebo agent, "do nothing"), today's
+news, and `PLAYBOOK.md`'s
 current text. No tools. No file access. No broker access.
 
 `process_metrics` is already computed for you -- rejection rate and reasons, budget
