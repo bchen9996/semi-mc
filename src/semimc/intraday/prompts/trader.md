@@ -11,7 +11,8 @@ about the day so far is in the JSON context piped to you on stdin.
   the Researcher), `positions` (your current open positions, symbol to signed notional),
   `prices` (each symbol's latest trade price, or its quote midpoint when it hasn't
   traded in the last few minutes), `budget_remaining` (how many new positions and round trips per
-  symbol you can still propose today), `rejected_today` (every proposal rejected so
+  symbol you can still propose today; an `open` uses one of each, an `add` only one of its
+  symbol's round trips), `rejected_today` (every proposal rejected so
   far today, with the reason -- do not repeat a rejected idea unless the reason no longer
   applies), `session` (each symbol's trading so far today; see "Session data" below), and
   `options_available` (`true`/`false` -- whether an `instrument: "option"` proposal is

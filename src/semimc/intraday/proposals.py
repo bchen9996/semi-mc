@@ -251,8 +251,11 @@ def validate_proposal(proposal: TradeProposal, context: ValidationContext) -> li
                 )
 
     accepted = _accepted_proposals(context)
-    accepted_opens = [row for row in accepted if row["action"] in OPEN_OR_ADD_ACTIONS]
-    if len(accepted_opens) >= risk.new_positions_per_day:
+    # An add uses one of its symbol's round trips but not a new-position slot (owner
+    # decision 2026-10-17, option C of three). Counting it as both spent the half budget's
+    # 3 slots on two names on 2026-10-15; the per-symbol cap still bounds adds.
+    accepted_opens = [row for row in accepted if row["action"] == "open"]
+    if proposal.action == "open" and len(accepted_opens) >= risk.new_positions_per_day:
         failures.append(
             f"new_positions_per_day budget ({risk.new_positions_per_day}) already spent today"
         )

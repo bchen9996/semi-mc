@@ -2850,6 +2850,17 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         the position's first fill, adds included (B), and leaving it (C). Remaining
         lateness is the cadence: time stops are checked only at cycles, every 30
         minutes, so one fires up to 30 minutes after it is due.
+  - [x] **2026-10-17: an add no longer uses a new-position slot (owner chose option C of
+        three; in effect from 2026-10-20).** An add counted as a new position and as one
+        of its symbol's round trips. On 10-15 TSM's add spent the half budget's last
+        slot, so NVDA's add was rejected and MU's trigger at 11:30 found no slot; on
+        10-16 NVDA's open and add spent both its round trips, so it could not re-enter
+        after the stop-out. Now `new_positions_per_day` counts and gates opens only
+        (`proposals.py`, mirrored in `context.py`'s `budget_remaining` and
+        `review.py`'s scorecard), and an add still uses a round trip, so the per-symbol
+        cap allows at most one add per name per day. Applies to the placebo too (same
+        `validate_proposal`). Not chosen: keep both (A); adds count toward neither (B),
+        which leaves adds bounded only by the single-name cap.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so

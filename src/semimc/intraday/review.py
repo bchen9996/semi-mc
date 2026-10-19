@@ -80,12 +80,14 @@ def process_scorecard(
     """
     todays = ledger.proposals_for(as_of)
     accepted = [row for row in todays if row["status"] == "accepted"]
-    accepted_opens = [row for row in accepted if row["action"] in OPEN_OR_ADD_ACTIONS]
+    # An add counts toward its symbol's round trips, not new positions (proposals.py).
+    accepted_opens = [row for row in accepted if row["action"] == "open"]
     rejected = [row for row in todays if row["status"] == "rejected"]
 
     round_trips_by_symbol: dict[str, int] = {}
-    for row in accepted_opens:
-        round_trips_by_symbol[row["symbol"]] = round_trips_by_symbol.get(row["symbol"], 0) + 1
+    for row in accepted:
+        if row["action"] in OPEN_OR_ADD_ACTIONS:
+            round_trips_by_symbol[row["symbol"]] = round_trips_by_symbol.get(row["symbol"], 0) + 1
 
     equity = ledger.session_open_equity(as_of)
     risk = config.risk
