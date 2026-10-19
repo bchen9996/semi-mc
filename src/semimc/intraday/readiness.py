@@ -80,9 +80,12 @@ _SYMBOL_PREFIX = re.compile(r"^[A-Z][A-Z.\-]{0,9}: ")
 
 def incident_kind(message: str) -> str:
     """Groups incident messages by failure mode: strips a leading ``"SYMBOL: "`` and
-    collapses ``"stopout:SYMBOL"`` to ``"stopout"``."""
+    collapses ``"stopout:SYMBOL"`` to ``"stopout"`` and ``"tranche_skipped:ID ..."`` to
+    ``"tranche_skipped"``."""
     if message.startswith("stopout:"):
         return "stopout"
+    if message.startswith("tranche_skipped:"):
+        return "tranche_skipped"
     return _SYMBOL_PREFIX.sub("", message)
 
 

@@ -228,13 +228,24 @@ def run_placebo_carry(
     market_data: AlpacaMarketDataClient,
     as_of: pd.Timestamp,
     now: dt.datetime,
+    *,
+    near_close_only: bool = False,
 ) -> CarryResult:
     """Mark-to-market, then `jobs.py::run_carry` unmodified against the shadow
     broker/ledger. Every placebo proposal leaves `horizon` unset, so `run_carry`'s own
     "no written multi-day thesis -> safe default, close it" already makes every placebo
-    position intraday-only -- no placebo-specific carry rule needed.
+    position intraday-only -- no placebo-specific carry rule needed. `near_close_only` is
+    passed straight through (`cli.py` sets it, as for the real carry).
     """
     mark_broker_to_market(
         shadow_broker, shadow_ledger, market_data, config.intraday.placebo.starting_equity, now
     )
-    return run_carry(config, shadow_broker, shadow_ledger, market_data, as_of, now)
+    return run_carry(
+        config,
+        shadow_broker,
+        shadow_ledger,
+        market_data,
+        as_of,
+        now,
+        near_close_only=near_close_only,
+    )

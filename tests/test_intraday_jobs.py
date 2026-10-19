@@ -24,6 +24,7 @@ from semimc.execution.fake_broker import FakeBroker
 from semimc.execution.market_data import OptionMarketQuote
 from semimc.intraday.context import TRADER_SECTIONS
 from semimc.intraday.jobs import (
+    _past_halfway_to_stop,
     _protect_unguarded_positions,
     current_prices,
     mark_broker_to_market,
@@ -999,6 +1000,84 @@ def test_run_cycle_submits_the_next_tranche_on_a_later_call(config, tmp_path):
     ledger.close()
 
 
+# -- tranches stop once a trade is halfway to its stop (owner decision 2026-10-19) ----------
+
+
+@pytest.mark.parametrize(("price", "sent"), [(189.0, True), (187.0, False)])
+def test_the_next_tranche_is_not_sent_once_the_trade_is_halfway_to_its_stop(
+    config, tmp_path, price, sent
+):
+    """2026-10-19: AVGO's add bought its second half at 337.77, after the breakout had
+    failed, with 339.10 paid and the stop at 336.90. Here about 190 is paid and the stop
+    is 185, so halfway is about 187.5."""
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=2)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    proposal = {
+        "action": "open",
+        "symbol": "NVDA",
+        "side": "buy",
+        "size_pct": 0.05,
+        "limit_price": 190.0,
+        "thesis": "AI capex",
+        "invalidation_price": 185.0,
+        "time_stop_minutes": 1000,
+    }
+    broker = FakeBroker(now=NOW)
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [proposal]}),
+        _result_json(structured_output={"proposals": []}),
+        _result_json(structured_output={"proposals": []}),
+    )
+    run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+    later = NOW + dt.timedelta(minutes=30)
+    market_data.quotes["NVDA"] = _quote(price, at=later)
+
+    result = run_cycle("cycle_2", cfg, broker, ledger, market_data, client, AS_OF, later)
+
+    skips = [i for i in ledger.incidents() if i["message"].startswith("tranche_skipped:")]
+    if sent:
+        assert len(result.orders_submitted) == 1
+        assert skips == []
+    else:
+        assert result.orders_submitted == []
+        [note] = skips
+        assert note["severity"] == "info"
+        assert "NVDA: tranche 2 of 2 not sent" in note["message"]
+        # A recovery later doesn't bring the skipped tranche back.
+        latest = later + dt.timedelta(minutes=30)
+        market_data.quotes["NVDA"] = _quote(190.0, at=latest)
+        result = run_cycle("cycle_3", cfg, broker, ledger, market_data, client, AS_OF, latest)
+        assert result.orders_submitted == []
+        assert [p.symbol for p in broker.list_positions()] == ["NVDA"]
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("side", "stop", "price", "past"),
+    [
+        ("buy", 98.0, 99.1, False),  # 0.9 of the 2.0 to the stop
+        ("buy", 98.0, 98.9, True),  # 1.1 of it
+        ("buy", 98.0, 101.0, False),  # moving the right way
+        ("sell", 102.0, 100.9, False),
+        ("sell", 102.0, 101.1, True),
+    ],
+)
+def test_past_halfway_to_stop_works_for_both_sides(side, stop, price, past):
+    proposal = TradeProposal(
+        action="open",
+        symbol="NVDA",
+        side=side,
+        size_pct=0.02,
+        limit_price=100.0,
+        thesis="test",
+        invalidation_price=stop,
+        time_stop_minutes=60,
+    )
+    assert _past_halfway_to_stop(proposal, 100.0, price) is past
+
+
 def _expensive_open(size_pct: float, price: float = 1000.0) -> dict:
     return {
         "action": "open",
@@ -1932,6 +2011,93 @@ def test_the_last_cycle_before_an_early_close_runs_carry_instead_of_the_trader(
     ledger.close()
 
 
+# 2026-09-21 is EDT: New York is UTC-4.
+@pytest.mark.parametrize(
+    ("close_ny", "now_utc", "closes"),
+    [
+        (dt.time(16, 0), dt.datetime(2026, 9, 21, 16, 45), False),  # 10-19's stray 11:45 CT
+        (dt.time(16, 0), dt.datetime(2026, 9, 21, 18, 59), False),  # 61 minutes before
+        (dt.time(16, 0), dt.datetime(2026, 9, 21, 19, 0), True),  # 60 minutes before
+        (dt.time(16, 0), dt.datetime(2026, 9, 21, 19, 45), True),  # the scheduled 14:45 CT
+        (dt.time(13, 0), dt.datetime(2026, 9, 21, 16, 45), True),  # an early close's 11:45
+    ],
+)
+def test_carry_acts_only_in_the_last_hour_before_the_close(
+    config, tmp_path, close_ny, now_utc, closes
+):
+    """2026-10-19: the owner's 11:45 CT backstop for the early closes fired on a regular
+    day and closed AVGO more than three hours before the bell."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = _ClosesAt(close_ny, now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0, at=now_utc)})
+
+    result = run_carry(cfg, broker, ledger, market_data, AS_OF, now_utc, near_close_only=True)
+
+    skips = [i for i in ledger.incidents() if "carry skipped" in i["message"]]
+    if closes:
+        assert result.closed == ["NVDA"]
+        assert broker.list_positions() == []
+        assert skips == []
+    else:
+        assert [p.symbol for p in broker.list_positions()] == ["NVDA"]
+        assert result.skipped_reason == "the close (16:00 New York) is more than 60 minutes away"
+        [note] = skips
+        assert note["severity"] == "warning"
+    ledger.close()
+
+
+def test_carry_without_near_close_only_closes_at_any_time(config, tmp_path):
+    """The early-close handover calls carry without it: it checked the calendar itself."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday")
+    now_utc = dt.datetime(2026, 9, 21, 16, 45)
+
+    result = run_carry(
+        cfg,
+        broker,
+        ledger,
+        _FakeMarketData(quotes={"NVDA": _quote(190.0, at=now_utc)}),
+        AS_OF,
+        now_utc,
+    )
+
+    assert result.closed == ["NVDA"]
+    ledger.close()
+
+
+def test_carry_goes_ahead_when_the_calendar_cannot_be_read(config, tmp_path):
+    """Refusing would leave positions overnight if the scheduled run hit it."""
+
+    class _NoCalendar(FakeBroker):
+        def get_calendar(self, start, end):
+            raise BrokerError("calendar endpoint unreachable")
+
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = _NoCalendar(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday")
+    now_utc = dt.datetime(2026, 9, 21, 16, 45)
+
+    result = run_carry(
+        cfg,
+        broker,
+        ledger,
+        _FakeMarketData(quotes={"NVDA": _quote(190.0, at=now_utc)}),
+        AS_OF,
+        now_utc,
+        near_close_only=True,
+    )
+
+    assert result.closed == ["NVDA"]
+    [note] = [i for i in ledger.incidents() if "market calendar unavailable" in i["message"]]
+    assert note["severity"] == "warning"
+    ledger.close()
+
+
 def test_an_unreadable_calendar_counts_as_a_regular_day(config, tmp_path):
     class _NoCalendar(FakeBroker):
         def get_calendar(self, start, end):
@@ -2065,6 +2231,45 @@ def test_run_eod_review_on_a_quiet_day_writes_the_mechanical_report_without_a_mo
     assert "Placebo (T6 control)" in text
     assert "No Reviewer narration today: nothing to grade today" in text
     assert "Not yet built" not in text
+    paper_ledger.close()
+    ledger.close()
+
+
+def test_run_eod_review_measures_soxx_from_the_prior_close_and_from_the_open(
+    config, tmp_path, market
+):
+    """2026-10-19: this job's own fetch runs after the bell, so the cache's latest row is
+    already today's. The benchmark measured today's close to an after-hours quote and read
+    about 0% every day from 2026-10-01 (+0.03% on a +1.7% day)."""
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+    _calls, client = _recording_llm_client(_result_json())
+    today = market.last_date
+    soxx = market.prices["SOXX"]
+    prior_close = float(soxx.loc[soxx.index < today].dropna().iloc[-1])
+    today_open = float(market.ohlc["open"].loc[today, "SOXX"])
+    today_close = float(market.ohlc["close"].loc[today, "SOXX"])
+    now = (today + pd.Timedelta(hours=20, minutes=15)).to_pydatetime()
+    market_data = _FakeMarketData(quotes={"SOXX": _quote(today_close, spread=0.0, at=now)})
+
+    result = run_eod_review(
+        cfg,
+        market_data,
+        _FakeNewsClient(),
+        market,
+        paper_ledger,
+        None,
+        ledger,
+        client,
+        today,
+        "eod_review",
+        now,
+    )
+
+    text = Path(result.report_path).read_text(encoding="utf-8")
+    assert f"prior close to now: {today_close / prior_close - 1:+.2%}" in text
+    assert f"can trade): {today_close / today_open - 1:+.2%}" in text
     paper_ledger.close()
     ledger.close()
 

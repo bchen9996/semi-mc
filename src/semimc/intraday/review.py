@@ -126,8 +126,10 @@ def day_attribution(
     """A day-level sector/stock-specific split, not a fitted regression (see module
     docstring). `sector` sums each closed position's signed entry-cost-basis notional
     (`content["qty"] * content["avg_entry_price"]`, the qty *this reflection's own event*
-    exited -- correct for a trim too, not just a full close) times SOXX's whole-day
-    return -- a beta-of-1 approximation. `stock_specific` is the residual (today's total
+    exited -- correct for a trim too, not just a full close) times `soxx_return` -- a
+    beta-of-1 approximation. `run_eod_review` passes SOXX's open-to-close move (since
+    2026-10-19; before, the whole day's): S4 holds nothing overnight, so a gap is no part
+    of its sector exposure. `stock_specific` is the residual (today's total
     `pnl_net` minus `sector`), folding selection and timing into one bucket rather than
     fabricating a further split neither the ledger nor a market-data feed supports yet
     (no intraday SOXX price history is retained). `options` is always 0.0 -- options

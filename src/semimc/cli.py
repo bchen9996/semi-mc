@@ -2214,6 +2214,8 @@ def intraday_carry(
             as_of_ts,
             now,
             market_exit_without_price=not cfg.intraday.shadow_mode,
+            # A dispatch at the wrong time of day does nothing (2026-10-19).
+            near_close_only=True,
         )
         if cfg.intraday.shadow_mode:
             ledger.save_shadow_broker_state(broker.to_state())
@@ -2614,11 +2616,16 @@ def placebo_carry(
     market_data = _intraday_market_data()
     shadow_broker = _load_shadow_broker(cfg, shadow_ledger, now)
     try:
-        result = run_placebo_carry(cfg, shadow_broker, shadow_ledger, market_data, as_of_ts, now)
+        result = run_placebo_carry(
+            cfg, shadow_broker, shadow_ledger, market_data, as_of_ts, now, near_close_only=True
+        )
         shadow_ledger.save_shadow_broker_state(shadow_broker.to_state())
     finally:
         shadow_ledger.close()
 
+    if result.skipped_reason is not None:
+        typer.echo(f"Carry skipped: {result.skipped_reason}")
+        return
     closed_str = ", ".join(result.closed) if result.closed else "(none)"
     carried_str = ", ".join(result.carried) if result.carried else "(none)"
     typer.echo(f"Closed (no multi-day thesis): {closed_str}")

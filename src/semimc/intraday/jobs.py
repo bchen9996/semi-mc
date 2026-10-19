@@ -85,7 +85,7 @@ from .proposals import (
     validate_proposal,
     whole_shares,
 )
-from .reflect import _entry_and_proposal, record_mechanical_reflection
+from .reflect import _entry_and_proposal, _summed_fills, record_mechanical_reflection
 from .security import sanitize_and_log
 from .session import SESSION_FIELDS, session_snapshot
 
@@ -1009,6 +1009,25 @@ _REGULAR_CLOSE_NY = dt.time(16, 0)
 # How far ahead of the bell `carry` runs on a regular day: 14:45 CT for a 15:00 CT close
 # (docs/external_scheduler.md).
 _CARRY_LEAD = pd.Timedelta(minutes=15)
+# How near the bell `carry` must be when its caller asks (`run_carry`'s
+# `near_close_only`; added 2026-10-19). That day the owner's one-off 11:45 CT backstop for
+# the early closes fired on a regular day and closed AVGO over three hours before the
+# close. The window covers the scheduled run (15 minutes ahead) with room for a late
+# dispatch; the early-close handover below doesn't ask, since it checked already.
+_CARRY_WINDOW = pd.Timedelta(minutes=60)
+
+
+def _todays_close_ny(broker: Broker, now: dt.datetime) -> pd.Timestamp | None:
+    """Today's close, aware New York time, from the broker's calendar; `None` if today
+    isn't a session. Raises whatever reading the calendar raises."""
+    now_ny = pd.Timestamp(now if now.tzinfo else now.replace(tzinfo=dt.UTC)).tz_convert(
+        "America/New_York"
+    )
+    today = now_ny.date()
+    day = next((d for d in broker.get_calendar(today, today) if d.date == today), None)
+    if day is None:
+        return None
+    return pd.Timestamp(dt.datetime.combine(today, day.close)).tz_localize("America/New_York")
 
 
 def early_close_before_next_cycle(
@@ -1024,22 +1043,44 @@ def early_close_before_next_cycle(
     closes. A calendar that can't be read is a warning and counts as a regular day.
     `FakeBroker`'s calendar always closes at 16:00, so the shadow book and the placebo
     never see an early close and rely on the scheduled `carry`."""
-    now_utc = pd.Timestamp(now if now.tzinfo else now.replace(tzinfo=dt.UTC))
-    now_ny = now_utc.tz_convert("America/New_York")
-    today = now_ny.date()
+    now_ny = pd.Timestamp(now if now.tzinfo else now.replace(tzinfo=dt.UTC)).tz_convert(
+        "America/New_York"
+    )
     try:
-        days = broker.get_calendar(today, today)
+        close_at = _todays_close_ny(broker, now)
     except Exception as exc:  # noqa: BLE001 - never fail a cycle over this check
         ledger.record_incident("warning", f"market calendar unavailable ({exc})")
         return None
-    day = next((d for d in days if d.date == today), None)
-    if day is None or day.close >= _REGULAR_CLOSE_NY:
+    if close_at is None or close_at.time() >= _REGULAR_CLOSE_NY:
         return None
-    close_at = pd.Timestamp(dt.datetime.combine(today, day.close)).tz_localize("America/New_York")
     next_cycle = now_ny + pd.Timedelta(minutes=cycle_interval_minutes)
     if now_ny < close_at and next_cycle > close_at - _CARRY_LEAD:
         return close_at
     return None
+
+
+def _entry_price_so_far(ledger: IntradayLedger, proposal_id: int) -> float | None:
+    """Average fill price of `proposal_id`'s entry tranches filled so far (with the
+    default two, the first fill); `None` before any has filled."""
+    orders = ledger.orders_for_proposal(proposal_id, leg="entry")
+    qty, notional, _first, _last = _summed_fills(ledger, [o["client_order_id"] for o in orders])
+    return notional / qty if qty else None
+
+
+def _past_halfway_to_stop(proposal: TradeProposal, paid: float, price: float) -> bool:
+    """Whether `price` has moved against the position by more than half the distance from
+    `paid` to the proposal's invalidation price; then `run_cycle` sends no further tranche
+    (owner decision 2026-10-19, option B of three). The brief's tranches exist "so a bad
+    first print isn't the whole trade", and the second used to go in regardless: on
+    2026-10-19 AVGO's add bought its second half at 337.77, after the breakout had failed,
+    with 339.10 paid and the stop at 336.90. Normal noise still gets the averaging the
+    brief asks for. Not chosen: always send (A), and skip on any move below the first
+    fill (C), which would have skipped 5 of Stage 2's first 6 second tranches."""
+    stop = proposal.invalidation_price
+    if stop is None or stop == paid:
+        return False
+    adverse = paid - price if proposal.side == "buy" else price - paid
+    return adverse > abs(paid - stop) / 2
 
 
 @dataclass
@@ -1208,15 +1249,18 @@ def run_cycle(
 
     # Tranche continuation: submit the next piece of any partially-tranched-in entry
     # (no new model call -- the original accepted proposal already justified the full
-    # size; splitting is an execution technique, not a re-decision).
+    # size; splitting is an execution technique, not a re-decision). Unless the trade is
+    # already more than halfway to its stop (`_past_halfway_to_stop`, owner decision
+    # 2026-10-19): then the rest is never sent.
     exiting = set(monitor_result.closed) | set(monitor_result.exits_failed)
+    skipped_tranches = ledger.skipped_tranche_proposals()
     for position in list(positions):
         if position.symbol in exiting:
             # Meant to be closed; never add to it. On the real account a close's fill lands
             # a few seconds after submission, so the position can still be listed here.
             continue
         pending = ledger.pending_tranche_for(position.symbol)
-        if pending is None:
+        if pending is None or pending["proposal_id"] in skipped_tranches:
             continue
         proposal_row = None
         if pending["proposal_id"] is not None:
@@ -1229,6 +1273,16 @@ def run_cycle(
         except ValidationError:
             continue
         next_tranche = pending["tranche_index"] + 1
+        paid = _entry_price_so_far(ledger, pending["proposal_id"])
+        if paid is not None and _past_halfway_to_stop(original_proposal, paid, price):
+            ledger.record_incident(
+                "info",
+                f"tranche_skipped:{pending['proposal_id']} {position.symbol}: tranche "
+                f"{next_tranche} of {pending['tranche_total']} not sent -- {price:.2f} is "
+                f"more than halfway from the {paid:.2f} paid so far to the "
+                f"{original_proposal.invalidation_price:.2f} stop",
+            )
+            continue
         per_tranche = original_proposal.model_copy(
             update={"size_pct": original_proposal.size_pct / pending["tranche_total"]}
         )
@@ -1566,6 +1620,7 @@ def run_carry(
     now: dt.datetime,
     *,
     market_exit_without_price: bool = False,
+    near_close_only: bool = False,
 ) -> CarryResult:
     """At 14:45: closes every position whose opening proposal's `horizon` is
     `"intraday"` or untraceable (a safe default -- never carry something with no
@@ -1590,6 +1645,15 @@ def run_carry(
     as `monitor.py`'s time stop (added 2026-10-15). Only the real account's caller
     (`cli.py`) sets it: the placebo runs this same function against a `FakeBroker` under
     the same config.
+
+    With `near_close_only` it also does nothing while today's close, from the broker's
+    calendar, is more than `_CARRY_WINDOW` away (added 2026-10-19): a warning incident,
+    since a dispatch at the wrong time is a scheduler fault to fix. The `carry` commands
+    (`cli.py`) set it, both the real one and the placebo's; the early-close handover in
+    `run_cycle` doesn't. An unreadable calendar is a warning and carry goes ahead, since
+    refusing would leave positions overnight when the scheduled run hits it. A placebo
+    `FakeBroker`'s calendar always closes at 16:00 ET, so on an early-close day its
+    positions close at the 14:45 CT run, after the bell, as before 2026-10-16.
     """
     result = CarryResult()
     intraday = config.intraday
@@ -1610,6 +1674,30 @@ def run_carry(
         else:
             ledger.record_incident("info", "carry skipped: market is closed")
         return result
+
+    if near_close_only:
+        try:
+            close_at = _todays_close_ny(broker, now)
+        except Exception as exc:  # noqa: BLE001 - never strand a position over this check
+            ledger.record_incident(
+                "warning", f"carry: market calendar unavailable ({exc}) -- going ahead"
+            )
+            close_at = None
+        now_ny = pd.Timestamp(now if now.tzinfo else now.replace(tzinfo=dt.UTC)).tz_convert(
+            "America/New_York"
+        )
+        if close_at is not None and close_at - now_ny > _CARRY_WINDOW:
+            window = int(_CARRY_WINDOW.total_seconds() // 60)
+            result.skipped_reason = (
+                f"the close ({close_at:%H:%M} New York) is more than {window} minutes away"
+            )
+            ledger.record_incident(
+                "warning",
+                f"carry skipped at {now_ny:%H:%M} New York: the close is at {close_at:%H:%M}, "
+                f"and carry acts only in the last {window} minutes -- dispatched at the "
+                "wrong time?",
+            )
+            return result
 
     sync_open_orders(broker, ledger, intraday, as_of, now)
     positions = broker.list_positions()
@@ -1821,6 +1909,7 @@ def run_eod_review(
         DayBenchmarks,
         build_eod_report,
         do_nothing_return,
+        open_to_close_return,
         render_eod_markdown,
         s0_day_return,
     )
@@ -1831,12 +1920,21 @@ def run_eod_review(
     research_cfg = intraday.research
     tickers = config.universe.tickers
 
+    # From the last close *before* today (fixed 2026-10-19). This job's own `semimc fetch`
+    # runs after the bell, so the cache's latest row is already today's close, and the
+    # benchmark read about 0% every day from 2026-10-01: today's close to an after-hours
+    # quote. On 2026-10-19 it said +0.03% when SOXX was +1.7%, all of it overnight.
     soxx_return = None
     try:
-        moves = premarket_moves(["SOXX"], market_data_pit, market_data, now)
+        moves = premarket_moves(["SOXX"], market_data_pit.before(as_of), market_data, now)
         soxx_return = moves.get("SOXX")
     except Exception as exc:  # noqa: BLE001 -- a benchmark must never block the report
         ledger.record_incident("warning", f"SOXX benchmark unavailable: {exc}")
+    soxx_open_to_close = None
+    try:
+        soxx_open_to_close = open_to_close_return(market_data_pit, "SOXX", as_of)
+    except Exception as exc:  # noqa: BLE001 -- same reasoning
+        ledger.record_incident("warning", f"SOXX open-to-close benchmark unavailable: {exc}")
 
     s0_return = None
     try:
@@ -1862,10 +1960,12 @@ def run_eod_review(
         s0_return=s0_return,
         placebo_pnl=placebo_pnl,
         do_nothing_return=do_nothing,
+        soxx_open_to_close=soxx_open_to_close,
     )
 
     scorecard = process_scorecard(ledger, intraday, as_of)
-    attribution = day_attribution(reflections_today, soxx_return)
+    # The session's move, not the whole day's: S4 holds nothing overnight (review.py).
+    attribution = day_attribution(reflections_today, soxx_open_to_close)
     out_path = config.path(intraday.reports_dir) / str(pd.Timestamp(as_of).date()) / "eod.md"
 
     def write_mechanical_report(note: str) -> str:
@@ -1931,6 +2031,7 @@ def run_eod_review(
     }
     benchmarks_section = {
         "soxx_return": soxx_return,
+        "soxx_open_to_close": soxx_open_to_close,
         "s0_return": s0_return,
         "placebo_pnl": placebo_pnl,
         "do_nothing_return": do_nothing,
