@@ -2896,6 +2896,15 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         close (`eod_report.py::open_to_close_return`), so the overnight gap shows. The
         day's attribution now uses the open-to-close move: S4 holds nothing overnight.
         Reports from 10-01 to 10-19 keep their wrong SOXX line and sector split.
+  - [x] **2026-10-19: a tranched entry is rounded to whole shares once (owner's go).**
+        Each tranche used to be rounded down on its own, so Stage 2's entries bought 79%
+        of their approved notional; 3 of the first 6 two-tranche entries lost a share to
+        it (AVGO 2 + 2 of 5.9 shares, NVDA 4 + 4 of 9.2). Now `run_cycle` rounds the
+        whole position once and splits its shares, smaller piece first (5 go in as 2 + 3,
+        `jobs.py::_tranche_qty`); the last tranche buys the rest of the whole position
+        at its own price. The odd share goes last so a trade stopped early by the
+        halfway rule holds less. Never more than the approved size, except the existing
+        one share a later tranche buys after a price rise has used up the rest.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so

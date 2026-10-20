@@ -110,6 +110,20 @@ def test_build_entry_order_sizes_to_whole_shares():
     assert order.notional is None
 
 
+def test_build_entry_order_takes_a_share_count_in_place_of_size_pct():
+    """`jobs.py::run_cycle` rounds a tranched entry once and passes each piece's shares."""
+    order = build_entry_order(
+        _proposal(size_pct=0.05),
+        AS_OF,
+        CYCLE,
+        price=190.0,
+        equity=100_000.0,
+        config=IntradayConfig(),
+        qty=13,
+    )
+    assert order.qty == 13
+
+
 def test_build_entry_order_raises_when_size_rounds_to_zero_shares():
     proposal = _proposal(size_pct=0.001)
     with pytest.raises(ValueError, match="too small"):
