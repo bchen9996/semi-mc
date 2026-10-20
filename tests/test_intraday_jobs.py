@@ -27,7 +27,9 @@ from semimc.intraday.jobs import (
     _past_halfway_to_stop,
     _protect_unguarded_positions,
     _tranche_qty,
+    closed_market_note,
     current_prices,
+    early_close_note_prefix,
     mark_broker_to_market,
     market_panel,
     reconcile_positions,
@@ -806,7 +808,7 @@ def test_run_cycle_keeps_every_other_pretrade_finding_an_error_when_the_market_i
     }
     assert result.skipped_reason is not None
     assert severities == {"error"}
-    assert ("info", "cycle_1 skipped: market is closed") in [
+    assert ("info", closed_market_note("cycle_1")) in [
         (i["severity"], i["message"]) for i in ledger.incidents()
     ]
     ledger.close()
@@ -2058,6 +2060,8 @@ def test_the_last_cycle_before_an_early_close_runs_carry_instead_of_the_trader(
         [note] = carry_notes
         assert note["severity"] == "info"
         assert "closed: NVDA" in note["message"]
+        # What the placebo reads to run its own carry (placebo.py).
+        assert note["message"].startswith(early_close_note_prefix("cycle_1"))
     else:
         assert calls != []
         assert held == {"NVDA", "AMD"}

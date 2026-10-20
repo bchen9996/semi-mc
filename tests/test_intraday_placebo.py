@@ -15,8 +15,11 @@ import random
 from dataclasses import dataclass, field
 
 import pandas as pd
+import pytest
 
 from semimc.execution.fake_broker import FakeBroker
+from semimc.intraday import ledger as ledger_module
+from semimc.intraday.jobs import closed_market_note, early_close_note_prefix
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.orders import build_entry_order, submit_order_with_fault_isolation
 from semimc.intraday.placebo import run_placebo_carry, run_placebo_cycle
@@ -326,5 +329,87 @@ def test_placebo_open_batch_runs_once_per_day_like_the_real_agents(tmp_path, con
     assert first.order_submitted is not None
     assert second.skipped_reason == f"open_batch already ran for {AS_OF.date()}"
     assert len(broker.list_positions()) == 1
+    real_ledger.close()
+    shadow_ledger.close()
+
+
+# -- the placebo follows the real cycle on a closed market (added 2026-10-20) -------------
+
+
+@pytest.fixture
+def incidents_on_as_of(monkeypatch):
+    """Incidents are dated by insert time, and the placebo reads only today's: pin it to
+    AS_OF's session (13:05 ET, after a 13:00 early close)."""
+    monkeypatch.setattr(ledger_module, "_now", lambda: "2026-09-21T17:05:00+00:00")
+
+
+def test_the_placebo_declines_when_the_real_cycle_found_the_market_closed(
+    tmp_path, config, incidents_on_as_of
+):
+    """NYSE closes at 13:00 ET on 2026-11-27 and 2026-12-24. The shadow broker always
+    reads the market as open, so the placebo would keep trading on after-hours quotes."""
+    cfg = _placebo_config(config, tmp_path)
+    real_ledger = _ledger(tmp_path, "real.sqlite3")
+    shadow_ledger = _ledger(tmp_path, "shadow.sqlite3")
+    real_ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    real_ledger.record_incident("info", closed_market_note("cycle_1700"))
+    broker = FakeBroker(now=NOW)
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+
+    def cycle(label):
+        return run_placebo_cycle(
+            label,
+            cfg,
+            broker,
+            shadow_ledger,
+            real_ledger,
+            market_data,
+            AS_OF,
+            NOW,
+            random.Random(0),
+        )
+
+    declined = cycle("cycle_1700")
+    assert declined.skipped_reason == "market is closed (the real cycle declined)"
+    assert shadow_ledger.proposals_for(AS_OF) == []
+    # Another cycle's decline says nothing about this one.
+    assert cycle("cycle_1630").proposed_symbol == "NVDA"
+    real_ledger.close()
+    shadow_ledger.close()
+
+
+def test_the_placebo_runs_carry_when_the_real_cycle_did_before_an_early_close(
+    tmp_path, config, incidents_on_as_of
+):
+    """`carry` waits for the last hour before the close on the placebo's fake calendar
+    (16:00), so following the real cycle's handover is what closes its book in time."""
+    cfg = _placebo_config(config, tmp_path)
+    real_ledger = _ledger(tmp_path, "real.sqlite3")
+    shadow_ledger = _ledger(tmp_path, "shadow.sqlite3")
+    real_ledger.record_watchlist_item(AS_OF, "AMD", thesis="test")
+    real_ledger.record_incident(
+        "info",
+        f"{early_close_note_prefix('cycle_1630')}13:00 New York, before the next cycle: ran "
+        "carry instead of the Trader (closed: none; carried: none)",
+    )
+    broker = FakeBroker(now=NOW)
+    _seed_open_shadow_position(broker, shadow_ledger, cfg, symbol="NVDA")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0), "AMD": _quote(150.0)})
+
+    result = run_placebo_cycle(
+        "cycle_1630",
+        cfg,
+        broker,
+        shadow_ledger,
+        real_ledger,
+        market_data,
+        AS_OF,
+        NOW,
+        random.Random(0),
+    )
+
+    assert result.skipped_reason == "early close: ran carry, as the real cycle did (closed: NVDA)"
+    assert result.order_submitted is None
+    assert broker.list_positions() == []
     real_ledger.close()
     shadow_ledger.close()

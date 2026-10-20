@@ -2875,8 +2875,8 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         skips, with a warning incident, while the close (broker calendar) is more than
         60 minutes away; both `carry` commands set it, and the early-close handover in
         `run_cycle` doesn't need it. An unreadable calendar is a warning and carry goes
-        ahead. The placebo's fake calendar always closes at 16:00 ET, so on an early
-        close its positions close at the 14:45 run (docs/external_scheduler.md).
+        ahead. The placebo's fake calendar always closes at 16:00 ET; on an early close
+        it follows the real cycle instead (the 2026-10-20 entry below).
         **Owner to check** the two cron-job.org backstops' schedules.
   - [x] **2026-10-19: no further tranche once a trade is halfway to its stop (owner chose
         option B of three).** Tranche continuation sent the next piece regardless; on
@@ -2905,6 +2905,23 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         at its own price. The odd share goes last so a trade stopped early by the
         halfway rule holds less. Never more than the approved size, except the existing
         one share a later tranche buys after a price rise has used up the rest.
+  - [x] **2026-10-20: "do nothing" holds the day's entries, not the open batch's (owner's
+        go).** It read "not available" in all 14 eod reports to 10-19: the open batch never
+        opened a trade (34 proposals, none an entry), since it runs at 08:32 CT and every
+        trigger waits on the 30-minute opening range. Now every entry accepted today is
+        held untouched from its fill to the after-close quote, the same question (did
+        managing positions during the day help?). 10-19 would have read about -$35 for
+        AVGO held to its 334.59 close, against the -$10 it made.
+  - [x] **2026-10-20: the placebo follows the real cycle on an early close (owner's go).**
+        Its fake broker always reads the market as open, so on 11-27 and 12-24 it would
+        have kept trading after the 13:00 ET close on after-hours quotes, and the carry
+        guard (60 minutes before a 16:00 close, on its fake calendar) would have held its
+        book past the bell. The placebo still never touches the real account: it reads
+        the real ledger, which it already opened for the watchlist. Where the real cycle
+        just declined on a closed market (`jobs.py::closed_market_note`) the placebo
+        declines; where it ran carry before an early close (`early_close_note_prefix`)
+        the placebo runs its own. Holidays already needed nothing (no research, no
+        watchlist).
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so
