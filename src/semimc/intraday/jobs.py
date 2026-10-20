@@ -1030,6 +1030,18 @@ def _todays_close_ny(broker: Broker, now: dt.datetime) -> pd.Timestamp | None:
     return pd.Timestamp(dt.datetime.combine(today, day.close)).tz_localize("America/New_York")
 
 
+def closed_market_note(cycle: str) -> str:
+    """The info incident `run_cycle` records when it declines on a closed market. The
+    placebo (`placebo.py::run_placebo_cycle`) reads it to decline too."""
+    return f"{cycle} skipped: market is closed"
+
+
+def early_close_note_prefix(cycle: str) -> str:
+    """How the info incident starts when `run_cycle` runs carry before an early close.
+    The placebo reads it to run its own carry in the same cycle."""
+    return f"{cycle}: early close at "
+
+
 def early_close_before_next_cycle(
     broker: Broker, ledger: IntradayLedger, now: dt.datetime, cycle_interval_minutes: int
 ) -> pd.Timestamp | None:
@@ -1041,8 +1053,9 @@ def early_close_before_next_cycle(
 
     Read from the broker's own calendar, which for Alpaca carries its holidays and early
     closes. A calendar that can't be read is a warning and counts as a regular day.
-    `FakeBroker`'s calendar always closes at 16:00, so the shadow book and the placebo
-    never see an early close and rely on the scheduled `carry`."""
+    `FakeBroker`'s calendar always closes at 16:00, so the shadow book never sees an
+    early close and relies on the scheduled `carry`; the placebo follows the real
+    cycle's handover note (`early_close_note_prefix`, since 2026-10-20)."""
     now_ny = pd.Timestamp(now if now.tzinfo else now.replace(tzinfo=dt.UTC)).tz_convert(
         "America/New_York"
     )
@@ -1200,7 +1213,7 @@ def run_cycle(
         # fail the day's readiness. Every other finding stays an error.
         for failure in pretrade_failures:
             if failure == _ALWAYS_ROUTINE_PRETRADE_NOTE:
-                ledger.record_incident("info", f"{cycle} skipped: market is closed")
+                ledger.record_incident("info", closed_market_note(cycle))
             else:
                 ledger.record_incident("error", failure)
         result.skipped_reason = "; ".join(pretrade_failures)
@@ -1248,13 +1261,13 @@ def run_cycle(
             market_exit_without_price=not intraday.shadow_mode,
         )
         closed = carry.closed + carry.closed_for_cap
-        summary = (
-            f"early close at {early_close:%H:%M} New York, before the next cycle: ran carry "
-            f"instead of the Trader (closed: {', '.join(closed) or 'none'}; carried: "
-            f"{', '.join(carry.carried) or 'none'})"
+        note = (
+            f"{early_close_note_prefix(cycle)}{early_close:%H:%M} New York, before the next "
+            f"cycle: ran carry instead of the Trader (closed: {', '.join(closed) or 'none'}; "
+            f"carried: {', '.join(carry.carried) or 'none'})"
         )
-        ledger.record_incident("info", f"{cycle}: {summary}")
-        result.skipped_reason = summary
+        ledger.record_incident("info", note)
+        result.skipped_reason = note.removeprefix(f"{cycle}: ")
         return result
 
     # Tranche continuation: submit the next piece of any partially-tranched-in entry
@@ -1671,8 +1684,9 @@ def run_carry(
     (`cli.py`) set it, both the real one and the placebo's; the early-close handover in
     `run_cycle` doesn't. An unreadable calendar is a warning and carry goes ahead, since
     refusing would leave positions overnight when the scheduled run hits it. A placebo
-    `FakeBroker`'s calendar always closes at 16:00 ET, so on an early-close day its
-    positions close at the 14:45 CT run, after the bell, as before 2026-10-16.
+    `FakeBroker`'s calendar always closes at 16:00 ET, so on an early-close day the
+    placebo's book is closed by its cycle instead, following the real cycle's handover
+    (`placebo.py::run_placebo_cycle`).
     """
     result = CarryResult()
     intraday = config.intraday

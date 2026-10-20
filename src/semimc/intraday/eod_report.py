@@ -127,15 +127,20 @@ def s0_day_return(paper_ledger: Any, as_of: pd.Timestamp) -> float | None:
 def do_nothing_return(
     ledger: Any, market_data: Any, as_of: pd.Timestamp, now: dt.datetime
 ) -> float | None:
-    """ "Do nothing" (hold the open batch untouched all day) -- the fourth of the brief's
-    benchmarks for the day, and mechanical like the other three: marks every position the
-    Trader's `open_batch` cycle actually opened today (`proposals.cycle ==
-    "open_batch"`, `status == "accepted"`) to market at `now`'s quote against its own
-    average entry price, ignoring whatever actually happened to it afterward (any
-    trim/close/carry) -- exactly what "untouched all day" means. Expressed as a percent
-    of `ledger.session_open_equity(as_of)`, the same denominator S0's own day return
-    uses. `None` with no open-batch entries, no session-open-equity denominator, or no
-    quote reachable for any of them.
+    """ "Do nothing" -- the fourth of the brief's benchmarks for the day, and mechanical
+    like the other three: every entry accepted today (`open`/`add`, any cycle) held from
+    its own average fill price to `now`'s quote, after the close, ignoring whatever
+    actually happened to it afterward (stop, time stop, trim, close, carry). It asks
+    whether managing a position during the day helped. Expressed as a percent of
+    `ledger.session_open_equity(as_of)`, the same denominator S0's own day return uses.
+    `None` with no filled entry today, no session-open-equity denominator, or no quote
+    reachable for any of them.
+
+    **The day's entries, not the open batch's** (changed 2026-10-20). The brief's
+    wording is "hold the open batch untouched all day", but the open batch never opened
+    a trade (34 proposals to 2026-10-19, none an entry): it runs at 08:32 CT and every
+    trigger waits on the 30-minute opening range, complete at 09:00. So this read "not
+    available" every day.
     """
     from .proposals import OPEN_OR_ADD_ACTIONS
     from .reflect import _summed_fills
@@ -146,9 +151,7 @@ def do_nothing_return(
     entries = [
         row
         for row in ledger.proposals_for(as_of)
-        if row["cycle"] == "open_batch"
-        and row["status"] == "accepted"
-        and row["action"] in OPEN_OR_ADD_ACTIONS
+        if row["status"] == "accepted" and row["action"] in OPEN_OR_ADD_ACTIONS
     ]
     if not entries:
         return None
@@ -292,7 +295,8 @@ def render_eod_markdown(report: EodReport) -> str:
     placebo_line = f"{placebo:,.2f}" if placebo is not None else "not available"
     lines.append(f"- Placebo (T6 control): {placebo_line}")
     lines.append(
-        f'- "Do nothing" (hold the open batch flat): {_pct(report.benchmarks.do_nothing_return)}'
+        '- "Do nothing" (the day\'s entries held untouched to the close): '
+        f"{_pct(report.benchmarks.do_nothing_return)}"
     )
 
     lines.append("")

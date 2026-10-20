@@ -35,7 +35,9 @@ from ..execution.market_data import AlpacaMarketDataClient
 from ..execution.pretrade import KillSwitchActive, check_kill_switch
 from .jobs import (
     CarryResult,
+    closed_market_note,
     current_prices,
+    early_close_note_prefix,
     mark_broker_to_market,
     run_carry,
     turnover_so_far_usd,
@@ -114,6 +116,25 @@ def run_placebo_cycle(
         check_kill_switch(config.path(intraday.kill_switch_path))
     except KillSwitchActive as exc:
         return PlaceboCycleResult(skipped_reason=str(exc))
+
+    # Follows the real cycle that ran just before it under the same label (added
+    # 2026-10-20). The shadow broker always reads the market as open, so after an early
+    # close (13:00 ET on 2026-11-27 and 2026-12-24) the placebo kept trading on
+    # after-hours quotes, and since `carry` waits for the last hour of a 16:00 close on
+    # its fake calendar, its book stayed open past the bell. This path never touches
+    # the real account; the real ledger, already read for the watchlist, says what the
+    # real cycle found. (A market holiday needs nothing: no research, no watchlist.)
+    real_notes = [row["message"] for row in real_ledger.incidents_for(as_of)]
+    if closed_market_note(cycle) in real_notes:
+        return PlaceboCycleResult(skipped_reason="market is closed (the real cycle declined)")
+    if any(note.startswith(early_close_note_prefix(cycle)) for note in real_notes):
+        carry = run_placebo_carry(config, shadow_broker, shadow_ledger, market_data, as_of, now)
+        return PlaceboCycleResult(
+            skipped_reason=(
+                "early close: ran carry, as the real cycle did (closed: "
+                f"{', '.join(carry.closed + carry.closed_for_cap) or 'none'})"
+            )
+        )
 
     # Mirrors `jobs.py::run_cycle`'s once-a-day open-batch guard, so the control group
     # never gets a second opening draw the real agent is denied. The placebo makes no

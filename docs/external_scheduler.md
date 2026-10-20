@@ -133,9 +133,10 @@ early_close_before_next_cycle`, from Alpaca's calendar). The owner also added on
 2026-10-19; `run_carry`'s `near_close_only`): a warning incident, no orders. On
 2026-10-19 one of the 11:45 CT backstops fired on a regular day and closed AVGO more
 than three hours early. So a mistimed carry job is now harmless, but it is still worth
-fixing, since each mistimed run logs a warning. The placebo reads its own fake calendar,
-which always closes at 16:00 ET, so on an early close its positions close at the 14:45 CT
-run, after the bell.
+fixing, since each mistimed run logs a warning. The placebo's fake calendar always closes
+at 16:00 ET, so on an early close it follows the real cycle instead (since 2026-10-20): it
+runs its own carry in the cycle where the real one hands over, and declines afterward,
+when the real cycle finds the market closed.
 
 ## Step 4 -- verify on the first trading day
 

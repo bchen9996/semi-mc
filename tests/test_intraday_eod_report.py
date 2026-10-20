@@ -5,6 +5,8 @@ and confirm rendering never crashes on an empty day.
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pandas as pd
 import pytest
 
@@ -12,6 +14,7 @@ from semimc.intraday.eod_report import (
     DayBenchmarks,
     MonitorCadence,
     build_eod_report,
+    do_nothing_return,
     open_to_close_return,
     render_eod_markdown,
     s0_day_return,
@@ -209,4 +212,70 @@ def test_the_report_shows_soxx_from_the_prior_close_and_from_the_open(tmp_path):
 
     assert "- SOXX buy-and-hold, prior close to now: +1.73%" in text
     assert "- SOXX open to close (the session an intraday book can trade): -1.83%" in text
+    ledger.close()
+
+
+# -- do_nothing_return: the day's entries held to the close (changed 2026-10-20) -----------
+
+
+class _Quote:
+    def __init__(self, mid: float):
+        self.bid_price = mid - 0.01
+        self.ask_price = mid + 0.01
+
+
+class _Quotes:
+    def __init__(self, mids: dict[str, float]):
+        self.mids = mids
+
+    def latest_quote(self, symbol, at):
+        mid = self.mids.get(symbol)
+        return _Quote(mid) if mid is not None else None
+
+
+def _filled_entry(ledger, cycle, action, client_order_id, qty, price, status="accepted"):
+    proposal_id = ledger.record_proposal(
+        AS_OF, cycle, "AVGO", action, status, payload={"side": "buy"}
+    )
+    ledger.record_order(
+        client_order_id,
+        "AVGO",
+        "buy",
+        status="filled",
+        qty=qty,
+        proposal_id=proposal_id,
+        leg="entry",
+    )
+    ledger.record_fill(
+        client_order_id,
+        qty=qty,
+        price=price,
+        filled_at=dt.datetime(2026, 9, 21, 15, 31, tzinfo=dt.UTC),
+    )
+
+
+def test_do_nothing_holds_every_entry_of_the_day_to_the_close(tmp_path):
+    """2026-10-19: AVGO's open and add (8 shares, about 338.92 paid) were closed at 11:45
+    CT for -$10.12. Held to the 334.59 close, untouched, they would have lost about $35.
+    The open batch never trades, so the old open-batch-only version read "not
+    available" every day."""
+    ledger = IntradayLedger(tmp_path / "intraday.sqlite3")
+    ledger.record_session_open_equity(AS_OF, 100_000.0)
+    _filled_entry(ledger, "cycle_1530", "open", "avgo-open", 4.0, 339.395)
+    _filled_entry(ledger, "cycle_1600", "add", "avgo-add", 4.0, 338.435)
+    _filled_entry(ledger, "cycle_1630", "open", "avgo-rejected", 4.0, 1.0, status="rejected")
+
+    result = do_nothing_return(ledger, _Quotes({"AVGO": 334.59}), AS_OF, None)
+
+    expected = ((334.59 - 339.395) * 4 + (334.59 - 338.435) * 4) / 100_000.0
+    assert result == pytest.approx(expected)
+    ledger.close()
+
+
+def test_do_nothing_is_none_with_no_entry_today(tmp_path):
+    ledger = IntradayLedger(tmp_path / "intraday.sqlite3")
+    ledger.record_session_open_equity(AS_OF, 100_000.0)
+    ledger.record_proposal(AS_OF, "open_batch", "AVGO", "no_trade", "accepted", payload={})
+
+    assert do_nothing_return(ledger, _Quotes({"AVGO": 334.59}), AS_OF, None) is None
     ledger.close()
