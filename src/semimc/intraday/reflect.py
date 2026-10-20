@@ -123,6 +123,23 @@ def _position_entries(
     return qty, notional, first
 
 
+def round_trip_count(ledger: IntradayLedger, reflections: Sequence[dict[str, Any]]) -> int:
+    """How many positions, flat to flat, `reflections` exited (added 2026-10-20). One
+    reflection is one exit, and a position can close in steps: on 2026-10-20 AVGO's add
+    was stopped out at 10:12 CT and the rest closed on a time stop at 11:00, two
+    reflections for one trade. Each exit is keyed by its symbol and the first entry fill
+    of the position it exited (`_position_entries`); one whose entries can't be found
+    counts on its own."""
+    keys: set[tuple[str, str]] = set()
+    for row in reflections:
+        close_ids = row["content"].get("client_order_ids") or []
+        first = _position_entries(ledger, row["symbol"], close_ids)[2] if close_ids else None
+        keys.add(
+            (row["symbol"], first.isoformat()) if first is not None else ("id", str(row["id"]))
+        )
+    return len(keys)
+
+
 def trade_figures(
     ledger: IntradayLedger,
     symbol: str,

@@ -40,6 +40,7 @@ from semimc.intraday.jobs import (
     run_preopen,
     run_research,
     run_weekly_review,
+    session_closes,
 )
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.llm import ClaudeCliClient, ClaudeCliError
@@ -2326,7 +2327,7 @@ def test_run_eod_review_measures_soxx_from_the_prior_close_and_from_the_open(
     )
 
     text = Path(result.report_path).read_text(encoding="utf-8")
-    assert f"prior close to now: {today_close / prior_close - 1:+.2%}" in text
+    assert f"prior close to close: {today_close / prior_close - 1:+.2%}" in text
     assert f"can trade): {today_close / today_open - 1:+.2%}" in text
     paper_ledger.close()
     ledger.close()
@@ -3249,3 +3250,48 @@ def test_run_eod_review_writes_its_report_when_the_reviewer_call_fails(config, t
     assert "Semis broadly higher into the close." in report.read_text(encoding="utf-8")
     paper_ledger.close()
     ledger.close()
+
+
+# -- session_closes: the day's closes for "do nothing" (added 2026-10-20) ------------------
+
+
+def _bar_at(utc: dt.datetime, close: float):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        timestamp=utc, open=close, high=close, low=close, close=close, volume=100.0, vwap=None
+    )
+
+
+def test_session_closes_takes_the_last_bar_before_the_bell():
+    """2026-10-20: after the bell IEX had no quote for AVGO, NVDA or LRCX, and its bars run
+    on after hours (SOXX 502.19 at 16:15 ET against a 500.01 close; the 15:55 bar closed
+    500.17). 2026-09-21 is EDT, so 16:00 ET is 20:00 UTC."""
+    market_data = _FakeMarketData(
+        bars_by_symbol={
+            "SOXX": [
+                _bar_at(dt.datetime(2026, 9, 21, 19, 55, tzinfo=dt.UTC), 500.17),
+                _bar_at(dt.datetime(2026, 9, 21, 20, 15, tzinfo=dt.UTC), 502.19),
+            ]
+        }
+    )
+    now = dt.datetime(2026, 9, 21, 20, 15)
+
+    assert session_closes(["SOXX", "AVGO"], market_data, AS_OF, now) == {"SOXX": 500.17}
+    [request] = market_data.bar_requests
+    assert request["end"] == dt.datetime(2026, 9, 21, 20, 0, tzinfo=dt.UTC)
+
+
+def test_session_closes_stops_at_an_early_close_on_the_broker_calendar():
+    market_data = _FakeMarketData(
+        bars_by_symbol={
+            "SOXX": [
+                _bar_at(dt.datetime(2026, 9, 21, 16, 55, tzinfo=dt.UTC), 499.0),
+                _bar_at(dt.datetime(2026, 9, 21, 17, 0, tzinfo=dt.UTC), 501.0),
+            ]
+        }
+    )
+    now = dt.datetime(2026, 9, 21, 20, 15)
+    broker = _ClosesAt(dt.time(13, 0), now=NOW)
+
+    assert session_closes(["SOXX"], market_data, AS_OF, now, broker) == {"SOXX": 499.0}

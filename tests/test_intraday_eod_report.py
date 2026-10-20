@@ -14,6 +14,7 @@ from semimc.intraday.eod_report import (
     DayBenchmarks,
     MonitorCadence,
     build_eod_report,
+    close_to_close_return,
     do_nothing_return,
     open_to_close_return,
     render_eod_markdown,
@@ -210,27 +211,12 @@ def test_the_report_shows_soxx_from_the_prior_close_and_from_the_open(tmp_path):
 
     text = render_eod_markdown(report)
 
-    assert "- SOXX buy-and-hold, prior close to now: +1.73%" in text
+    assert "- SOXX buy-and-hold, prior close to close: +1.73%" in text
     assert "- SOXX open to close (the session an intraday book can trade): -1.83%" in text
     ledger.close()
 
 
 # -- do_nothing_return: the day's entries held to the close (changed 2026-10-20) -----------
-
-
-class _Quote:
-    def __init__(self, mid: float):
-        self.bid_price = mid - 0.01
-        self.ask_price = mid + 0.01
-
-
-class _Quotes:
-    def __init__(self, mids: dict[str, float]):
-        self.mids = mids
-
-    def latest_quote(self, symbol, at):
-        mid = self.mids.get(symbol)
-        return _Quote(mid) if mid is not None else None
 
 
 def _filled_entry(ledger, cycle, action, client_order_id, qty, price, status="accepted"):
@@ -265,7 +251,7 @@ def test_do_nothing_holds_every_entry_of_the_day_to_the_close(tmp_path):
     _filled_entry(ledger, "cycle_1600", "add", "avgo-add", 4.0, 338.435)
     _filled_entry(ledger, "cycle_1630", "open", "avgo-rejected", 4.0, 1.0, status="rejected")
 
-    result = do_nothing_return(ledger, _Quotes({"AVGO": 334.59}), AS_OF, None)
+    result = do_nothing_return(ledger, {"AVGO": 334.59}, AS_OF)
 
     expected = ((334.59 - 339.395) * 4 + (334.59 - 338.435) * 4) / 100_000.0
     assert result == pytest.approx(expected)
@@ -277,5 +263,29 @@ def test_do_nothing_is_none_with_no_entry_today(tmp_path):
     ledger.record_session_open_equity(AS_OF, 100_000.0)
     ledger.record_proposal(AS_OF, "open_batch", "AVGO", "no_trade", "accepted", payload={})
 
-    assert do_nothing_return(ledger, _Quotes({"AVGO": 334.59}), AS_OF, None) is None
+    assert do_nothing_return(ledger, {"AVGO": 334.59}, AS_OF) is None
     ledger.close()
+
+
+def test_do_nothing_is_none_without_a_close_for_any_entry(tmp_path):
+    """2026-10-20: after the bell IEX quoted none of the day's three names."""
+    ledger = IntradayLedger(tmp_path / "intraday.sqlite3")
+    ledger.record_session_open_equity(AS_OF, 100_000.0)
+    _filled_entry(ledger, "cycle_1530", "open", "avgo-open", 4.0, 339.395)
+
+    assert do_nothing_return(ledger, {}, AS_OF) is None
+    ledger.close()
+
+
+def test_close_to_close_return_reads_both_closes_from_the_daily_bars():
+    """2026-10-20: SOXX closed 500.01 after 501.93; IEX quoted it at 501.60/502.15 after
+    hours, and the benchmark, run to that quote, read -0.01%."""
+    cache = _Cache(_bars([511.07, 494.99], [501.93, 500.01]))
+    assert close_to_close_return(cache, "SOXX", AS_OF) == pytest.approx(500.01 / 501.93 - 1)
+
+
+def test_close_to_close_return_is_none_without_todays_bar_or_a_prior_one():
+    assert close_to_close_return(_Cache(_bars([490.0], [493.39])), "SOXX", AS_OF) is None
+    later = AS_OF + pd.Timedelta(days=1)
+    assert close_to_close_return(_Cache(_bars([490.0], [493.39])), "SOXX", later) is None
+    assert close_to_close_return(_Cache({}), "SOXX", AS_OF) is None

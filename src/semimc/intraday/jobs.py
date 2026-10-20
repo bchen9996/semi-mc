@@ -31,6 +31,7 @@ names explicitly.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import math
 from dataclasses import asdict, dataclass, field
@@ -1042,6 +1043,40 @@ def early_close_note_prefix(cycle: str) -> str:
     return f"{cycle}: early close at "
 
 
+def session_closes(
+    symbols: list[str],
+    market_data: AlpacaMarketDataClient,
+    as_of: pd.Timestamp,
+    now: dt.datetime,
+    broker: Broker | None = None,
+) -> dict[str, float]:
+    """Each symbol's last price of `as_of`'s regular session: the close of its last
+    5-minute IEX bar starting before the bell (added 2026-10-20). After the bell IEX
+    often has no quote (AVGO, NVDA and LRCX had none at 15:15 CT on 2026-10-20) or quotes
+    the after-hours market, and its bars run on after hours too. The last regular bar was
+    within 0.03% of the official close for SOXX, AVGO, NVDA and LRCX that day. The bell
+    is from `broker`'s calendar when given (an early close), else 16:00 ET. Any symbol,
+    in the universe or not; one with no bar is absent."""
+    close_at = pd.Timestamp(dt.datetime.combine(pd.Timestamp(as_of).date(), _REGULAR_CLOSE_NY))
+    close_at = close_at.tz_localize("America/New_York")
+    if broker is not None:
+        # An unreadable calendar leaves the regular close, the right default.
+        with contextlib.suppress(Exception):
+            close_at = _todays_close_ny(broker, now) or close_at
+    open_at = close_at.normalize() + pd.Timedelta(hours=9, minutes=30)
+    bars = market_data.bars(
+        symbols,
+        open_at.tz_convert("UTC").to_pydatetime(),
+        close_at.tz_convert("UTC").to_pydatetime(),
+    )
+    closes: dict[str, float] = {}
+    for symbol, rows in bars.items():
+        regular = [bar for bar in rows if pd.Timestamp(bar.timestamp) < close_at]
+        if regular:
+            closes[symbol] = float(regular[-1].close)
+    return closes
+
+
 def early_close_before_next_cycle(
     broker: Broker, ledger: IntradayLedger, now: dt.datetime, cycle_interval_minutes: int
 ) -> pd.Timestamp | None:
@@ -1941,6 +1976,7 @@ def run_eod_review(
     from .eod_report import (
         DayBenchmarks,
         build_eod_report,
+        close_to_close_return,
         do_nothing_return,
         open_to_close_return,
         render_eod_markdown,
@@ -1953,14 +1989,14 @@ def run_eod_review(
     research_cfg = intraday.research
     tickers = config.universe.tickers
 
-    # From the last close *before* today (fixed 2026-10-19). This job's own `semimc fetch`
-    # runs after the bell, so the cache's latest row is already today's close, and the
-    # benchmark read about 0% every day from 2026-10-01: today's close to an after-hours
-    # quote. On 2026-10-19 it said +0.03% when SOXX was +1.7%, all of it overnight.
+    # Both SOXX figures from the price cache's daily bars: this job's own `semimc fetch`
+    # runs after the bell, so today's bar is in. The close-to-close one used to run from
+    # the cache's latest close, already today's, to a live quote: about 0% every day
+    # from 2026-10-01 (fixed 2026-10-19), then -0.01% on a -0.38% day, since after the
+    # bell the quote is the after-hours market (fixed 2026-10-20).
     soxx_return = None
     try:
-        moves = premarket_moves(["SOXX"], market_data_pit.before(as_of), market_data, now)
-        soxx_return = moves.get("SOXX")
+        soxx_return = close_to_close_return(market_data_pit, "SOXX", as_of)
     except Exception as exc:  # noqa: BLE001 -- a benchmark must never block the report
         ledger.record_incident("warning", f"SOXX benchmark unavailable: {exc}")
     soxx_open_to_close = None
@@ -1977,7 +2013,17 @@ def run_eod_review(
 
     do_nothing = None
     try:
-        do_nothing = do_nothing_return(ledger, market_data, as_of, now)
+        entry_symbols = {
+            row["symbol"]
+            for row in ledger.proposals_for(as_of)
+            if row["status"] == "accepted" and row["action"] in OPEN_OR_ADD_ACTIONS
+        }
+        closes = (
+            session_closes(sorted(entry_symbols), market_data, as_of, now, broker)
+            if entry_symbols
+            else {}
+        )
+        do_nothing = do_nothing_return(ledger, closes, as_of)
     except Exception as exc:  # noqa: BLE001 -- same reasoning
         ledger.record_incident("warning", f"'do nothing' benchmark unavailable: {exc}")
 

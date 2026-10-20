@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from semimc.intraday.ledger import IntradayLedger
-from semimc.intraday.reflect import record_mechanical_reflection
+from semimc.intraday.reflect import record_mechanical_reflection, round_trip_count
 
 AS_OF = pd.Timestamp("2026-09-21")
 NOW = dt.datetime(2026, 9, 21, 9, 0, tzinfo=dt.UTC)
@@ -462,4 +462,33 @@ def test_one_reflection_can_cover_several_stop_legs(config, tmp_path):
     assert content["pnl_gross"] == pytest.approx(-55.0)
     assert content["client_order_ids"] == ["entry-t1::stop", "entry-t2::stop"]
     assert ledger.unreflected_exits() == []  # both legs count as reflected
+    ledger.close()
+
+
+# -- round_trip_count: positions closed, not exits (added 2026-10-20) ---------------------
+
+
+def test_a_position_closed_in_two_steps_is_one_trade(tmp_path):
+    """2026-10-20: AVGO's add was stopped out at 10:12 CT and the rest closed on a time
+    stop at 11:00. Two reflections, one trade; Stage 3 needs 8 closed trades."""
+    ledger = _ledger(tmp_path)
+    _seed_entry(ledger, "open-t1", 1, 2.0, 335.96, 0, symbol="AVGO")
+    _seed_entry(ledger, "open-t2", 1, 3.0, 340.61, 29, symbol="AVGO")
+    _seed_entry(ledger, "add-t1", 2, 1.0, 340.29, 30, symbol="AVGO")
+    _seed_entry(ledger, "add-t2", 2, 1.0, 338.09, 59, symbol="AVGO")
+    _seed_exit(ledger, "add-stop-1", 1.0, 335.55, 71, leg="stop", symbol="AVGO")
+    _seed_exit(ledger, "add-stop-2", 1.0, 335.55, 71, leg="stop", symbol="AVGO")
+    _seed_exit(ledger, "time-stop", 5.0, 335.95, 119, symbol="AVGO")
+    # A second AVGO position later the same day is a second trade.
+    _seed_entry(ledger, "reopen", 3, 2.0, 334.0, 150, symbol="AVGO")
+    _seed_exit(ledger, "reclose", 2.0, 335.0, 180, symbol="AVGO")
+    reflections = [
+        {"id": 1, "symbol": "AVGO", "content": {"client_order_ids": ["add-stop-1", "add-stop-2"]}},
+        {"id": 2, "symbol": "AVGO", "content": {"client_order_ids": ["time-stop"]}},
+        {"id": 3, "symbol": "AVGO", "content": {"client_order_ids": ["reclose"]}},
+        # No order ids (a hand-recorded reflection): counted on its own.
+        {"id": 4, "symbol": "NVDA", "content": {}},
+    ]
+
+    assert round_trip_count(ledger, reflections) == 3
     ledger.close()
