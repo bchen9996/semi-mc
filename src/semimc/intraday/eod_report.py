@@ -32,7 +32,6 @@ clearly-labeled interpretation, not a guess dressed up as the real thing.
 
 from __future__ import annotations
 
-import datetime as dt
 from dataclasses import dataclass
 from typing import Any
 
@@ -41,8 +40,8 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class DayBenchmarks:
-    # Prior close to now (`jobs.py::run_eod_review`), and today's open to its close
-    # (`open_to_close_return`): the gap between them is overnight, which S4 never holds.
+    # Prior close to today's close (`close_to_close_return`), and today's open to its
+    # close (`open_to_close_return`): the difference is overnight, which S4 never holds.
     soxx_return: float | None = None
     s0_return: float | None = None
     placebo_pnl: float | None = None
@@ -85,6 +84,24 @@ class EodReport:
     reviewer_note: str | None = None
 
 
+def close_to_close_return(market_data_pit: Any, ticker: str, as_of: pd.Timestamp) -> float | None:
+    """`ticker`'s return from the last close before `as_of` to `as_of`'s close, both from
+    the price cache's daily bars, like :func:`open_to_close_return` (added 2026-10-20).
+    It used to run to a live quote at 15:15 CT, after the bell: on 2026-10-20 IEX quoted
+    SOXX at 501.60/502.15 after hours against a 500.01 close, and the benchmark read
+    -0.01% for a -0.38% day. `None` without the bars."""
+    frames = market_data_pit.ohlc
+    if not frames or "close" not in frames or ticker not in frames["close"].columns:
+        return None
+    closes = frames["close"][ticker].dropna()
+    day = pd.Timestamp(as_of).normalize()
+    today = closes.loc[closes.index == day]
+    prior = closes.loc[closes.index < day]
+    if today.empty or prior.empty or prior.iloc[-1] <= 0:
+        return None
+    return float(today.iloc[-1] / prior.iloc[-1] - 1.0)
+
+
 def open_to_close_return(market_data_pit: Any, ticker: str, as_of: pd.Timestamp) -> float | None:
     """`ticker`'s return from `as_of`'s open to its close, from the price cache's daily
     bar (added 2026-10-19). `run_eod_review`'s own `semimc fetch` runs after the bell, so
@@ -124,17 +141,19 @@ def s0_day_return(paper_ledger: Any, as_of: pd.Timestamp) -> float | None:
     return (latest_today["equity"] - prior["equity"]) / prior["equity"]
 
 
-def do_nothing_return(
-    ledger: Any, market_data: Any, as_of: pd.Timestamp, now: dt.datetime
-) -> float | None:
+def do_nothing_return(ledger: Any, closes: dict[str, float], as_of: pd.Timestamp) -> float | None:
     """ "Do nothing" -- the fourth of the brief's benchmarks for the day, and mechanical
     like the other three: every entry accepted today (`open`/`add`, any cycle) held from
-    its own average fill price to `now`'s quote, after the close, ignoring whatever
-    actually happened to it afterward (stop, time stop, trim, close, carry). It asks
-    whether managing a position during the day helped. Expressed as a percent of
-    `ledger.session_open_equity(as_of)`, the same denominator S0's own day return uses.
-    `None` with no filled entry today, no session-open-equity denominator, or no quote
-    reachable for any of them.
+    its own average fill price to the close (`closes`, `jobs.py::session_closes`),
+    ignoring whatever actually happened to it afterward (stop, time stop, trim, close,
+    carry). It asks whether managing a position during the day helped. Expressed as a
+    percent of `ledger.session_open_equity(as_of)`, the same denominator S0's own day
+    return uses. `None` with no filled entry today, no session-open-equity denominator,
+    or no close for any of them.
+
+    **Priced at the close, not a quote** (2026-10-20): after the bell IEX quoted none of
+    that day's three names, so the first day this had entries it still read "not
+    available".
 
     **The day's entries, not the open batch's** (changed 2026-10-20). The brief's
     wording is "hold the open batch untouched all day", but the open batch never opened
@@ -163,15 +182,12 @@ def do_nothing_return(
         qty, notional, _, _ = _summed_fills(
             ledger, [order["client_order_id"] for order in entry_orders]
         )
-        if qty <= 0:
+        close = closes.get(row["symbol"])
+        if qty <= 0 or close is None:
             continue
-        quote = market_data.latest_quote(row["symbol"], at=now)
-        if quote is None or quote.bid_price is None or quote.ask_price is None:
-            continue
-        mid = (quote.bid_price + quote.ask_price) / 2.0
         avg_entry_price = notional / qty
         sign = 1.0 if row["payload"].get("side") == "buy" else -1.0
-        total_pnl += sign * (mid - avg_entry_price) * qty
+        total_pnl += sign * (close - avg_entry_price) * qty
         any_priced = True
     if not any_priced:
         return None
@@ -285,7 +301,9 @@ def render_eod_markdown(report: EodReport) -> str:
 
     lines.append("")
     lines.append("## Benchmarks for the day")
-    lines.append(f"- SOXX buy-and-hold, prior close to now: {_pct(report.benchmarks.soxx_return)}")
+    lines.append(
+        f"- SOXX buy-and-hold, prior close to close: {_pct(report.benchmarks.soxx_return)}"
+    )
     lines.append(
         "- SOXX open to close (the session an intraday book can trade): "
         f"{_pct(report.benchmarks.soxx_open_to_close)}"

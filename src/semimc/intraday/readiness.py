@@ -64,6 +64,7 @@ import pandas as pd
 
 from ..config import IntradayConfig
 from .ledger import IntradayLedger
+from .reflect import round_trip_count
 
 _EXCHANGE_TZ = "America/New_York"
 _SESSION_OPEN = dt.time(9, 30)
@@ -166,10 +167,12 @@ class StageReadiness:
     stage_3_checks: list[EvidenceCheck] = field(default_factory=list)
 
 
-def _sleeve_result(reflections: list[dict[str, Any]]) -> SleeveResult:
+def _sleeve_result(ledger: IntradayLedger, reflections: list[dict[str, Any]]) -> SleeveResult:
+    """`closed_trades` counts positions closed, flat to flat, not exits (since
+    2026-10-20, `reflect.py::round_trip_count`); the P&L and win rate are per exit."""
     nets = [r["content"].get("pnl_net") or 0.0 for r in reflections]
     return SleeveResult(
-        closed_trades=len(reflections),
+        closed_trades=round_trip_count(ledger, reflections),
         pnl_gross=sum(r["content"].get("pnl_gross") or 0.0 for r in reflections),
         pnl_net=sum(nets),
         win_rate=sum(1 for n in nets if n > 0) / len(nets) if nets else None,
@@ -369,11 +372,12 @@ def stage_readiness(
     agent_reflections = [
         r for r in ledger.all_reflections() if _in_window(r["as_of"], since, as_of)
     ]
-    agent = _sleeve_result(agent_reflections)
+    agent = _sleeve_result(ledger, agent_reflections)
     placebo = None
     if placebo_ledger is not None:
         placebo = _sleeve_result(
-            [r for r in placebo_ledger.all_reflections() if _in_window(r["as_of"], since, as_of)]
+            placebo_ledger,
+            [r for r in placebo_ledger.all_reflections() if _in_window(r["as_of"], since, as_of)],
         )
 
     reasons: Counter[str] = Counter()
@@ -475,11 +479,14 @@ def _stage_3_checks(
     reflections = [
         r for r in ledger.all_reflections() if _in_window(r["as_of"], start, report.as_of)
     ]
+    # Positions closed, not exits: a position closed in two steps is one trade.
+    closed = round_trip_count(ledger, reflections)
+    exits = f" ({len(reflections)} exits)" if len(reflections) != closed else ""
     checks.append(
         EvidenceCheck(
             f"At least {rules.stage_3_min_closed_trades} closed trades since Stage 2 began",
-            len(reflections) >= rules.stage_3_min_closed_trades,
-            f"{len(reflections)} closed",
+            closed >= rules.stage_3_min_closed_trades,
+            f"{closed} closed{exits}",
         )
     )
 

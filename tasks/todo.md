@@ -2922,6 +2922,32 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         declines; where it ran carry before an early close (`early_close_note_prefix`)
         the placebo runs its own. Holidays already needed nothing (no research, no
         watchlist).
+  - [x] **2026-10-20, day 4: three names, -$37.81 gross (-$46.97 net); placebo -$1,013.**
+        AVGO (open 2 + 3 shares, add 1 + 1), NVDA (open 4 + 5, add 2 + 2) and LRCX (2)
+        opened by 09:31 CT, all bought near local highs. LRCX's second tranche was
+        skipped by the halfway rule, and the Trader closed it at 10:01 before its earnings
+        on 10-21. AVGO's add hit its own stop at 10:12 CT and the rest hit the time stop
+        at 11:00; NVDA's time stop at 12:00. The 11:45 CT carry fired again and did
+        nothing ("carry skipped at 12:45 New York"), on both books, with 13 NVDA shares
+        held. Both adds were allowed by the 10-17 budget rule and lost about $8.6 between
+        them. Reconciliation ok, a clean day (third in a row). SOXX -0.38% close to
+        close, +1.01% open to close.
+  - [x] **2026-10-20: two benchmark fixes and the trade count, from day 4.** (1) The
+        SOXX close-to-close figure ran to a live quote at 15:15 CT, which after the bell
+        is the after-hours market (501.60/502.15 against a 500.01 close: -0.01% for a
+        -0.38% day). Both SOXX figures now come from the price cache's daily bars
+        (`eod_report.py::close_to_close_return`). (2) "Do nothing" still read "not
+        available" on its first day with entries: after the bell IEX quoted none of
+        AVGO, NVDA or LRCX. It now prices each at its last 5-minute IEX bar before the
+        bell (`jobs.py::session_closes`; within 0.03% of the official closes that day).
+        10-20 would have read -$62.28 against the -$37.81 gross the managed trades lost.
+        (3) Readiness counted each reflection as a closed trade, and a position can
+        close in steps: AVGO's add stopped out, then the rest on a time stop, two
+        reflections for one trade. The Stage 3 rule would have read 8 closed trades and
+        passed with 7. It now counts positions closed, flat to flat
+        (`reflect.py::round_trip_count`), shown as "7 closed (8 exits)". The playbook's
+        20-trade evidence check counts the same way; P&L, win rate and calibration stay
+        per exit.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so
