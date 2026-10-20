@@ -1059,12 +1059,22 @@ def early_close_before_next_cycle(
     return None
 
 
-def _entry_price_so_far(ledger: IntradayLedger, proposal_id: int) -> float | None:
-    """Average fill price of `proposal_id`'s entry tranches filled so far (with the
-    default two, the first fill); `None` before any has filled."""
+def _entry_fills_so_far(ledger: IntradayLedger, proposal_id: int) -> tuple[float, float]:
+    """Shares and notional filled so far across `proposal_id`'s entry tranches."""
     orders = ledger.orders_for_proposal(proposal_id, leg="entry")
     qty, notional, _first, _last = _summed_fills(ledger, [o["client_order_id"] for o in orders])
-    return notional / qty if qty else None
+    return qty, notional
+
+
+def _tranche_qty(full_shares: int, filled: float, tranches_left: int) -> int:
+    """Shares for the next tranche of an entry worth `full_shares` whole shares, with
+    `filled` bought and `tranches_left` pieces to go, this one included (added
+    2026-10-19). The whole position is rounded once and its shares split, smaller piece
+    first, so the last tranche takes the remainder: 5 shares go in as 2 + 3. Rounding
+    each piece down on its own bought AVGO 2 + 2 of 5.9 on 2026-10-19. Putting the odd
+    share last means a trade that fails early (`_past_halfway_to_stop`) holds less."""
+    remaining = full_shares - round(filled)
+    return remaining if tranches_left <= 1 else remaining // tranches_left
 
 
 def _past_halfway_to_stop(proposal: TradeProposal, paid: float, price: float) -> bool:
@@ -1273,7 +1283,8 @@ def run_cycle(
         except ValidationError:
             continue
         next_tranche = pending["tranche_index"] + 1
-        paid = _entry_price_so_far(ledger, pending["proposal_id"])
+        filled_qty, filled_notional = _entry_fills_so_far(ledger, pending["proposal_id"])
+        paid = filled_notional / filled_qty if filled_qty else None
         if paid is not None and _past_halfway_to_stop(original_proposal, paid, price):
             ledger.record_incident(
                 "info",
@@ -1283,12 +1294,11 @@ def run_cycle(
                 f"{original_proposal.invalidation_price:.2f} stop",
             )
             continue
-        per_tranche = original_proposal.model_copy(
-            update={"size_pct": original_proposal.size_pct / pending["tranche_total"]}
-        )
+        # The rest of the whole position at today's price. A rise since the first tranche
+        # can leave nothing; the piece still buys one share (`at_least_one_share`).
         try:
             entry_request = build_entry_order(
-                per_tranche,
+                original_proposal,
                 as_of,
                 cycle,
                 price,
@@ -1296,6 +1306,11 @@ def run_cycle(
                 intraday,
                 tranche=next_tranche,
                 at_least_one_share=True,
+                qty=_tranche_qty(
+                    whole_shares(original_proposal.size_pct, account.equity, price),
+                    filled_qty,
+                    pending["tranche_total"] - pending["tranche_index"],
+                ),
             )
         except ValueError as exc:
             result.order_failures.append(str(exc))
@@ -1480,12 +1495,16 @@ def run_cycle(
             # none was already rejected by validate_proposal.
             full_shares = whole_shares(proposal.size_pct, account.equity, price)
             tranches = max(1, min(intraday.risk.entry_tranches, full_shares))
-            tranche_proposal = proposal.model_copy(
-                update={"size_pct": proposal.size_pct / tranches}
-            )
             try:
                 entry_request = build_entry_order(
-                    tranche_proposal, as_of, cycle, price, account.equity, intraday, tranche=1
+                    proposal,
+                    as_of,
+                    cycle,
+                    price,
+                    account.equity,
+                    intraday,
+                    tranche=1,
+                    qty=_tranche_qty(full_shares, 0, tranches),
                 )
             except ValueError as exc:
                 result.order_failures.append(str(exc))

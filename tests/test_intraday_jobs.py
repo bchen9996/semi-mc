@@ -26,6 +26,7 @@ from semimc.intraday.context import TRADER_SECTIONS
 from semimc.intraday.jobs import (
     _past_halfway_to_stop,
     _protect_unguarded_positions,
+    _tranche_qty,
     current_prices,
     mark_broker_to_market,
     market_panel,
@@ -1076,6 +1077,59 @@ def test_past_halfway_to_stop_works_for_both_sides(side, stop, price, past):
         time_stop_minutes=60,
     )
     assert _past_halfway_to_stop(proposal, 100.0, price) is past
+
+
+# -- a tranched entry is rounded to whole shares once, as a whole (added 2026-10-19) ---------
+
+
+def test_a_tranched_entry_buys_the_whole_positions_shares_split_smaller_first(config, tmp_path):
+    """2026-10-19: 2% of $100k in AVGO at 339.90 is 5.9 shares. Each half rounded down on
+    its own bought 2 + 2; rounded once, the 5 whole shares go in as 2 + 3."""
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=2)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "AVGO", thesis="test")
+    market_data = _FakeMarketData(quotes={"AVGO": _quote(339.90)})
+    proposal = {
+        "action": "open",
+        "symbol": "AVGO",
+        "side": "buy",
+        "size_pct": 0.02,
+        "limit_price": 339.90,
+        "thesis": "opening-range breakout",
+        "invalidation_price": 336.60,
+        "time_stop_minutes": 1000,
+    }
+    broker = FakeBroker(now=NOW)
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [proposal]}),
+        _result_json(structured_output={"proposals": []}),
+    )
+
+    first = run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+    later = NOW + dt.timedelta(minutes=30)
+    market_data.quotes["AVGO"] = _quote(339.27, at=later)
+    second = run_cycle("cycle_2", cfg, broker, ledger, market_data, client, AS_OF, later)
+
+    assert [ledger.get_order(c)["qty"] for c in first.orders_submitted] == [2]
+    assert [ledger.get_order(c)["qty"] for c in second.orders_submitted] == [3]
+    assert ledger.pending_tranche_for("AVGO") is None
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("full_shares", "filled", "tranches_left", "qty"),
+    [
+        (5, 0, 2, 2),  # the first of two
+        (5, 2, 1, 3),  # the last takes the rest
+        (1, 0, 1, 1),
+        (10, 0, 3, 3),
+        (10, 3, 2, 3),
+        (10, 6, 1, 4),
+        (1, 1, 1, 0),  # a price rise left nothing; build_entry_order then buys one share
+    ],
+)
+def test_tranche_qty_splits_the_whole_positions_shares(full_shares, filled, tranches_left, qty):
+    assert _tranche_qty(full_shares, filled, tranches_left) == qty
 
 
 def _expensive_open(size_pct: float, price: float = 1000.0) -> dict:

@@ -77,6 +77,7 @@ def build_entry_order(
     attempt: int = 0,
     tranche: int = 1,
     at_least_one_share: bool = False,
+    qty: int | None = None,
 ) -> OrderRequest:
     """One `open`/`add` proposal, one order, with a real stop resting at the broker the
     instant it fills -- this is what removes the need for a minute-level monitor process
@@ -93,17 +94,20 @@ def build_entry_order(
     real confirmation of whether an OTO stop-loss leg even accepts a fractional qty
     (unconfirmed anywhere checked -- see `docs/alpaca_notes.md`'s "still to verify" list).
 
-    `tranche` (Phase 5) is passed straight through to `intraday_client_order_id` -- this
-    function doesn't divide `size_pct` itself; a caller building tranche N > 1 passes an
-    already-divided `proposal` (`jobs.py::run_cycle` does this via `proposal.model_copy`)
-    and only uses `tranche` to keep that piece's `client_order_id` distinct.
+    `tranche` (Phase 5) is passed straight through to `intraday_client_order_id`, to keep
+    that piece's `client_order_id` distinct. `qty`, when given, is the share count to buy
+    in place of `size_pct`'s own whole shares (added 2026-10-19): `jobs.py::run_cycle`
+    rounds a tranched entry to whole shares once, as a whole, and splits the shares,
+    since rounding each piece down on its own lost a share in 3 of Stage 2's first 6
+    two-tranche entries.
     """
     if proposal.action not in OPEN_OR_ADD_ACTIONS:
         raise ValueError(f"build_entry_order only builds open/add orders, got {proposal.action!r}")
 
     # side/size_pct/limit_price/invalidation_price are all required for open/add by
     # TradeProposal's own model_validator, so they're never None here.
-    qty = whole_shares(proposal.size_pct, equity, price)
+    if qty is None:
+        qty = whole_shares(proposal.size_pct, equity, price)
     if qty <= 0 and at_least_one_share:
         qty = 1
     if qty <= 0:
