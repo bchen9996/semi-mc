@@ -101,6 +101,12 @@ proposal rejected before it reaches a human or a broker. Nothing you return is e
 directly: every proposal is schema-checked and risk-checked by code, and a rejection is
 logged with a reason and shown back to you next cycle.
 
+A short is an `open` with `side: sell` (and an `add` to a short you hold is a `sell` too);
+`close` buys it back and `trim` buys back part of it. Take one when a watchlist trigger for
+a short fires, the same way as a long. Its `invalidation_price` goes above `limit_price`,
+since a short is wrong when the price rises, and for a long it goes below: code rejects an
+entry whose invalidation is on the wrong side, because that is where its stop goes.
+
 ## Options (only when `options_available` is true)
 
 Rollout Stage 4: option proposals are priced and gated exactly like a real one, but never

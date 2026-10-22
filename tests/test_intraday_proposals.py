@@ -448,3 +448,18 @@ def test_a_close_is_never_held_to_the_tradable_symbols(tmp_path):
     context = _context(tmp_path, tradable_symbols=frozenset(), positions={"NVDA": 9_500.0})
     close = TradeProposal(action="close", symbol="NVDA", thesis="done")
     assert validate_proposal(close, context) == []
+
+
+# -- an entry's stop goes on its losing side (added 2026-10-21) ----------------------------
+
+
+@pytest.mark.parametrize(
+    ("side", "invalidation", "rejected"),
+    [("buy", 185.0, False), ("buy", 195.0, True), ("sell", 195.0, False), ("sell", 185.0, True)],
+)
+def test_an_entrys_invalidation_must_sit_on_its_losing_side(tmp_path, side, invalidation, rejected):
+    """The invalidation price is where the entry's stop rests: below a buy, above a short.
+    The Researcher began writing short setups on 2026-10-21."""
+    proposal = _open(side=side, invalidation_price=invalidation)
+    failures = validate_proposal(proposal, _context(tmp_path))
+    assert any("it is where the stop goes" in f for f in failures) is rejected

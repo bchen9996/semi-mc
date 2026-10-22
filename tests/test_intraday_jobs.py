@@ -12,7 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pandas as pd
@@ -3295,3 +3295,63 @@ def test_session_closes_stops_at_an_early_close_on_the_broker_calendar():
     broker = _ClosesAt(dt.time(13, 0), now=NOW)
 
     assert session_closes(["SOXX"], market_data, AS_OF, now, broker) == {"SOXX": 499.0}
+
+
+# -- shorts, end to end (the Researcher began writing short setups, 2026-10-21) ------------
+
+
+def test_a_short_goes_in_as_a_sell_with_a_buy_stop_and_carry_buys_it_back(config, tmp_path):
+    """The placebo has shorted on its fake book for weeks; this is the real agent's path,
+    which had never been taken."""
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=1)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="short: breakdown below the OR low")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    proposal = {
+        "action": "open",
+        "symbol": "NVDA",
+        "side": "sell",
+        "size_pct": 0.05,
+        "limit_price": 190.0,
+        "thesis": "short below the opening range low",
+        "invalidation_price": 194.0,
+        "time_stop_minutes": 1000,
+    }
+    broker = FakeBroker(now=NOW)
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
+
+    result = run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+
+    assert result.proposals_accepted == 1
+    entry = broker.get_order_by_client_id(result.orders_submitted[0])
+    assert entry.side == "sell"
+    [stop] = entry.legs
+    assert (stop.side, stop.type) == ("buy", "stop")
+    [position] = broker.list_positions()
+    assert position.side == "short"
+    assert reconcile_positions(broker, ledger, AS_OF) == []
+
+    carry = run_carry(cfg, broker, ledger, market_data, AS_OF, NOW)
+
+    assert carry.closed == ["NVDA"]
+    assert broker.list_positions() == []
+    [reflection] = ledger.reflections_for(AS_OF)
+    assert reflection["content"]["side"] == "sell"
+    ledger.close()
+
+
+def test_reconcile_signs_a_short_by_its_side_whatever_sign_the_broker_reports(config, tmp_path):
+    """A broker position says `side` as well as `qty`. Signed from the side, a short
+    reconciles whether its qty comes back negative (the fake broker) or not."""
+
+    class _UnsignedShorts(FakeBroker):
+        def list_positions(self):
+            return [replace(p, qty=abs(p.qty)) for p in super().list_positions()]
+
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = _UnsignedShorts(now=NOW)
+    _seed_open_position(broker, ledger, cfg, side="sell", invalidation_price=195.0)
+
+    assert reconcile_positions(broker, ledger, AS_OF) == []
+    ledger.close()
