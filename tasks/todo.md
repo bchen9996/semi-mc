@@ -2967,9 +2967,12 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         trims, carry and reflections all read the position's side. Added: an equity
         entry's invalidation must sit on its losing side (`validate_proposal`), and
         reconciliation and the risk checks' signed notional sign a position from its
-        side, whatever sign Alpaca reports (`jobs.py::_signed`). Still unverified until
-        the first real short: that PA33HJGNHLI7 allows shorting (a refusal is an order
-        failure, nothing more) and Alpaca's handling of a short OTO's buy stop.
+        side, whatever sign Alpaca reports (`jobs.py::_signed`). Shorting is enabled on
+        PA33HJGNHLI7 (owner, from its settings page, 2026-10-21; the local `.env` keys open
+        the S3 account PA3P3XIM4N7V, so the S4 account can't be read from here). Every
+        universe stock and SOXX is `shortable` and `easy_to_borrow` (asset fields, the
+        same for every account; read 2026-10-21). Still unverified until the first real
+        short: Alpaca's handling of a short OTO's buy stop.
         `reviewer.md` now tells the placebo and "do nothing" apart, which the Reviewer
         had mixed up two days running.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
