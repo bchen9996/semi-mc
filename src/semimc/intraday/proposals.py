@@ -210,6 +210,19 @@ def validate_proposal(proposal: TradeProposal, context: ValidationContext) -> li
     if proposal.action not in OPEN_OR_ADD_ACTIONS:
         return failures
 
+    # The invalidation price is where the entry's stop rests, so it must sit on the losing
+    # side: below a buy, above a short sale (added 2026-10-21, as the Researcher began
+    # writing short setups). The wrong side would put a stop that fires at once, or that
+    # the broker refuses. An option's limit is the contract's own price, not the stock's.
+    if proposal.instrument == "equity":
+        buying = proposal.side == "buy"
+        if (proposal.invalidation_price >= proposal.limit_price) == buying:
+            failures.append(
+                f"invalidation_price {proposal.invalidation_price} must be "
+                f"{'below' if buying else 'above'} limit_price {proposal.limit_price} for "
+                f"{'a buy' if buying else 'a short'}: it is where the stop goes"
+            )
+
     if context.tradable_symbols is not None and proposal.symbol not in context.tradable_symbols:
         failures.append(
             f"{proposal.symbol} is neither on this cycle's tradable watchlist nor held; "

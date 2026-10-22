@@ -2948,6 +2948,30 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         (`reflect.py::round_trip_count`), shown as "7 closed (8 exits)". The playbook's
         20-trade evidence check counts the same way; P&L, win rate and calibration stay
         per exit.
+  - [x] **2026-10-21, day 5: one trade, TXN, +$2.58 gross (-$0.19 net).** 52 of 58
+        Trader answers were no_trade. Every trigger on the watchlist needed a breakout
+        above the opening range on relative volume of 1.1-1.2 or more. SOXX was +2.07%
+        close to close but +0.12% open to close, and NVDA, MU, AMAT and AMD sat inside
+        their ranges at 0.72-1.12 all day; only TXN (1.40-1.48) triggered. The halfway
+        rule skipped its open's second tranche at 11:30 CT; the Trader added at 12:01
+        when the trigger fired again, and the time stop closed all 6 shares at 13:30.
+        Stage 3 rule 5 of 6 (8 closed trades; 5 of 10 sessions).
+  - [x] **2026-10-21: the Researcher writes a mix of setups, shorts included (owner's
+        go).** All 52 watchlist candidates since Stage 1 were long setups, nearly all
+        breakouts on heavy volume, so a quiet or gap-driven session left nothing to trade
+        and all 19 entries were buys. `researcher.md` now asks for a mix (breakouts,
+        pullbacks to VWAP, failed breakouts and fades, shorts) and for volume bars no
+        higher than the setup needs; `trader.md` says how a short is proposed. A short's
+        code path had run only on the placebo's fake book (27 shorts); reviewed for the
+        real account: the entry is an OTO sell with a buy stop, the monitor, closes,
+        trims, carry and reflections all read the position's side. Added: an equity
+        entry's invalidation must sit on its losing side (`validate_proposal`), and
+        reconciliation and the risk checks' signed notional sign a position from its
+        side, whatever sign Alpaca reports (`jobs.py::_signed`). Still unverified until
+        the first real short: that PA33HJGNHLI7 allows shorting (a refusal is an order
+        failure, nothing more) and Alpaca's handling of a short OTO's buy stop.
+        `reviewer.md` now tells the placebo and "do nothing" apart, which the Reviewer
+        had mixed up two days running.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so

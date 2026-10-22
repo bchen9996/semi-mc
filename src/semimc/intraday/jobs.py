@@ -1031,6 +1031,14 @@ def _todays_close_ny(broker: Broker, now: dt.datetime) -> pd.Timestamp | None:
     return pd.Timestamp(dt.datetime.combine(today, day.close)).tz_localize("America/New_York")
 
 
+def _signed(position: Position, value: float) -> float:
+    """`value` (a position's qty or market value) signed by its side: a short negative
+    (added 2026-10-21, before the first real short). The fake broker stores a short's qty
+    and market value negative; a broker position also says `side`, and signing from that
+    is right whichever sign the broker reports the numbers with."""
+    return -abs(value) if position.side == "short" else abs(value)
+
+
 def closed_market_note(cycle: str) -> str:
     """The info incident `run_cycle` records when it declines on a closed market. The
     placebo (`placebo.py::run_placebo_cycle`) reads it to decline too."""
@@ -1383,7 +1391,7 @@ def run_cycle(
     positions = broker.list_positions()
     _cancel_orphaned_stops(broker, ledger, positions, now)
     _protect_unguarded_positions(broker, ledger, positions, prices, as_of, cycle, now)
-    positions_notional = {p.symbol: p.market_value for p in positions}
+    positions_notional = {p.symbol: _signed(p, p.market_value) for p in positions}
 
     watchlist = ledger.watchlist_for(as_of)
     tradable_watchlist, watchlist_prices, _dropped = _apply_spread_gate(
@@ -1875,7 +1883,7 @@ def reconcile_positions(
     for fill in ledger.fills_with_orders():
         signed = fill["qty"] if fill["side"] == "buy" else -fill["qty"]
         expected[fill["symbol"]] = expected.get(fill["symbol"], 0.0) + signed
-    actual = {p.symbol: p.qty for p in broker.list_positions()}
+    actual = {p.symbol: _signed(p, p.qty) for p in broker.list_positions()}
     discrepancies = [
         {"symbol": symbol, "expected": expected.get(symbol, 0.0), "actual": actual.get(symbol, 0.0)}
         for symbol in sorted(set(expected) | set(actual))

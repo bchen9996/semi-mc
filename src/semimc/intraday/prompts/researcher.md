@@ -38,6 +38,24 @@ Two things:
    condition (every one needing the sector green, say), so one market move doesn't rule
    out the whole list at once.
 
+   Mix the kinds of setup for the same reason. A list of breakouts above the opening range
+   on heavy volume waits all day on a quiet session, or on a day whose move came
+   overnight. Kinds worth considering:
+   - a breakout that holds above the opening range high or VWAP;
+   - a pullback to VWAP or the opening range that holds, in a name green on the day;
+   - a failed breakout or a fading gap: back inside the opening range, or below VWAP;
+   - a short: a breakdown below the opening range low or VWAP, or a name red on the day
+     while its peers are green.
+
+   A short is traded like a long, with every budget, cap and stop applied the same way.
+   Say "short" in its thesis and trigger, and put its invalidation above the entry, since
+   a short is wrong when the price rises. Every candidate, long or short, still needs a
+   reason to trade it today, not just a pattern.
+
+   Set volume bars no higher than the setup needs. `relative_volume` is one exchange's
+   slice of the tape, and in recent sessions it has mostly sat between about 0.7 and 1.2:
+   a trigger that needs 1.2 or more waits for an unusually busy session.
+
    Candidates don't have to come from the project's stock universe (the stocks in
    `trader_view.market_panel`). List a stock outside it when the news makes a real case
    for today: a supplier, customer or peer with its own catalyst, say. Your news,

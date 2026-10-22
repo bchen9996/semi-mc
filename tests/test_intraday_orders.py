@@ -893,3 +893,18 @@ def test_sync_leaves_alone_an_order_it_cannot_look_up(tmp_path):
     assert _sync(_LookupFails(), ledger) == OrderSync(updated=[], filled=[], reflected=[])
     assert ledger.get_order("shadow-stop")["status"] == "new"
     ledger.close()
+
+
+def test_a_short_entry_rests_its_stop_above_the_entry():
+    order = build_entry_order(
+        _proposal(side="sell", limit_price=190.0, invalidation_price=194.0),
+        AS_OF,
+        CYCLE,
+        price=190.0,
+        equity=100_000.0,
+        config=IntradayConfig(),
+    )
+    assert order.side == "sell"
+    assert order.order_class == "oto"
+    assert order.stop_loss_price == 194.0
+    assert order.limit_price < 190.0  # a marketable sell, collared below the price
