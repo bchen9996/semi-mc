@@ -2151,6 +2151,8 @@ def _run_intraday_cycle(
         f"Proposals: {result.proposals_seen} seen, {result.proposals_accepted} accepted, "
         f"{result.proposals_rejected} rejected"
     )
+    if result.entries_canceled:
+        typer.echo(f"Unfilled entries canceled: {', '.join(result.entries_canceled)}")
     if result.orders_submitted:
         typer.echo(f"Orders submitted: {', '.join(result.orders_submitted)}")
     if result.order_failures:

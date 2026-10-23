@@ -606,3 +606,7 @@ def test_stage_3_needs_every_exit_path_and_no_day_at_the_hard_loss_limit(two_led
     assert paths.detail == "a stop: 1, a time stop: 0, carry or a Trader close: 0"
     loss = _stage_3_check(report, "No day reached the daily hard-loss limit")
     assert (loss.passed, loss.detail) == (False, str(STAGE_2[0].date()))
+
+
+def test_incident_kind_groups_unfilled_entry_cancels():
+    assert incident_kind("entry_unfilled:614 MU: sell 1 at 885.01 canceled") == "entry_unfilled"

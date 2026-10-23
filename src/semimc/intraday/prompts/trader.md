@@ -84,7 +84,9 @@ A single JSON object: `{"proposals": [...]}`. Each item is one action for one sy
   price reaches your `invalidation_price`, capped by the single-name limit. A tight stop
   makes a large position and a wide stop a small one, so put the invalidation where the
   thesis is wrong, never where it gives the size you want. Entries buy whole shares, and
-  a size worth a single share goes in as one piece rather than two tranches.
+  a size worth a single share goes in as one piece rather than two tranches. An entry
+  that hasn't filled by the next cycle is canceled; if none of it filled, it gives back
+  its new position and its round trip.
 - `thesis`: plain language, 300 characters or fewer.
 - `evidence`: the context items (headline ids, price levels) your thesis rests on.
 - `invalidation_price`: the level at which your thesis is wrong. `time_stop_minutes`: how

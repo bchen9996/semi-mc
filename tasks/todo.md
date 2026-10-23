@@ -3011,6 +3011,24 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         (18:22 CT) ran harmlessly: carry declined (market closed), and eod-review made
         no Reviewer call and reconciled ok a second time. Stage 3 rule 5 of 6 (10 closed
         trades; 6 of 10 sessions).
+  - [x] **2026-10-22: an entry still unfilled at the next cycle is canceled, and gives
+        back its slot (owner chose option A of three).** `orders.py::
+        cancel_unfilled_entries`, called by `run_cycle` after its order sync for every
+        entry sent at least 5 minutes earlier, and by `run_carry` for all of them (one
+        filling after carry would be held overnight). The entry cancels first; its stop
+        leg, found through the broker's record of the order, only once the entry is
+        confirmed canceled with nothing filled, so one that filled meanwhile keeps its
+        stop (the fake broker cancels only the parent of an OTO; whether Alpaca cancels
+        the leg on its own wasn't relied on). A partly filled entry is left alone. Each
+        cancel is an `entry_unfilled:{proposal_id}` info incident, and
+        `IntradayLedger.counted_proposals_for` (read by the validator, the Trader's
+        `budget_remaining`, the Reviewer's process metrics and turnover) leaves out a
+        proposal none of whose entries filled: no new position, round trip or turnover
+        used. A canceled later tranche is sent again at the next cycle's price, as any
+        next tranche is; before this, an unfilled second tranche would have been sent a
+        second time while the first copy still rested. Options not chosen: B, cancel
+        but keep counting the slot; C, no change. On 10-22 under A, MU's 09:31 short is
+        canceled at 10:01 and one slot stays open for the afternoon.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so

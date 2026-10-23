@@ -67,6 +67,7 @@ from .orders import (
     build_replacement_stop_order,
     build_trim_order,
     cancel_resting_stops,
+    cancel_unfilled_entries,
     market_is_open,
     place_protective_stop,
     submit_exit,
@@ -374,8 +375,9 @@ def turnover_so_far_usd(ledger: IntradayLedger, as_of: pd.Timestamp, equity: flo
 
     Not `_`-prefixed (Phase 5-6 had it as `_turnover_so_far_usd`, jobs.py-only) since
     `intraday/placebo.py` (Phase 7) needs the identical computation against its own shadow
-    ledger -- shared utility, not private to this module anymore."""
-    accepted = [row for row in ledger.proposals_for(as_of) if row["status"] == "accepted"]
+    ledger -- shared utility, not private to this module anymore. A proposal whose entries
+    were canceled with nothing filled counts for nothing (2026-10-22)."""
+    accepted = ledger.counted_proposals_for(as_of)
     total = 0.0
     for row in accepted:
         size_pct = row["payload"].get("size_pct")
@@ -1157,7 +1159,14 @@ class CycleResult:
     proposals_rejected: int = 0
     orders_submitted: list[str] = field(default_factory=list)
     order_failures: list[str] = field(default_factory=list)
+    entries_canceled: list[str] = field(default_factory=list)
     skipped_reason: str | None = None
+
+
+# How old an unfilled entry must be before a cycle cancels it: every entry an earlier
+# job sent qualifies (cycles are 30 minutes apart), and none a job re-dispatched seconds
+# earlier sent.
+_UNFILLED_ENTRY_AGE = dt.timedelta(minutes=5)
 
 
 def _price_option_proposal(
@@ -1265,6 +1274,13 @@ def run_cycle(
 
     # Fills that arrived since the last job, before anything reads the ledger's orders.
     sync_open_orders(broker, ledger, intraday, as_of, now)
+    # An entry an earlier job sent that still hasn't filled is canceled, and gives back
+    # its slot if nothing of it filled (owner's option A, 2026-10-22). A canceled later
+    # tranche is sent again below at today's price, as any next tranche is.
+    result.entries_canceled = [
+        row["client_order_id"]
+        for row in cancel_unfilled_entries(broker, ledger, now, older_than=_UNFILLED_ENTRY_AGE)
+    ]
 
     account = broker.get_account()
     ledger.record_session_open_equity(as_of, account.equity)
@@ -1696,6 +1712,7 @@ class CarryResult:
     closed: list[str] = field(default_factory=list)
     carried: list[str] = field(default_factory=list)
     closed_for_cap: list[str] = field(default_factory=list)
+    entries_canceled: list[str] = field(default_factory=list)
     skipped_reason: str | None = None
 
 
@@ -1789,6 +1806,11 @@ def run_carry(
             return result
 
     sync_open_orders(broker, ledger, intraday, as_of, now)
+    # Every entry still unfilled, whatever its age: one that filled after carry would be
+    # held overnight on an intraday thesis (2026-10-22).
+    result.entries_canceled = [
+        row["client_order_id"] for row in cancel_unfilled_entries(broker, ledger, now)
+    ]
     positions = broker.list_positions()
     account = broker.get_account()
     market_exit = market_exit_without_price

@@ -932,6 +932,43 @@ class IntradayLedger:
         day = pd.Timestamp(as_of).normalize()
         return [row for row in self.incidents() if trading_day(row["created_at"]) == day]
 
+    def unfilled_entry_proposals(self) -> set[int]:
+        """Proposal ids whose entries were all canceled with nothing filled (added
+        2026-10-22): from `orders.py::cancel_unfilled_entries`'s
+        ``"entry_unfilled:{proposal_id}"`` incidents, less any proposal with an entry fill
+        (a two-tranche entry whose second piece was canceled still bought its first)."""
+        ids: set[int] = set()
+        for row in self.incidents():
+            if row["message"].startswith("entry_unfilled:"):
+                head = row["message"].split(":", 1)[1].split(" ", 1)[0]
+                if head.isdigit():
+                    ids.add(int(head))
+        return {
+            proposal_id
+            for proposal_id in ids
+            if self._conn.execute(
+                """
+                SELECT 1 FROM fills f JOIN orders o ON o.client_order_id = f.client_order_id
+                WHERE o.proposal_id = ? AND o.leg = 'entry' LIMIT 1
+                """,
+                (proposal_id,),
+            ).fetchone()
+            is None
+        }
+
+    def counted_proposals_for(self, as_of: pd.Timestamp) -> list[dict[str, Any]]:
+        """Today's accepted proposals that count toward the day's budgets (new positions,
+        round trips per symbol, turnover): all of them except those no trade came of,
+        their entries canceled with nothing filled (:meth:`unfilled_entry_proposals`,
+        owner's option A, 2026-10-22). On 2026-10-22 an unfilled MU short used one of
+        the 3 new positions, and the afternoon's short triggers found none left."""
+        void = self.unfilled_entry_proposals()
+        return [
+            row
+            for row in self.proposals_for(as_of)
+            if row["status"] == "accepted" and row["id"] not in void
+        ]
+
     def skipped_tranche_proposals(self) -> set[int]:
         """Proposal ids whose remaining tranches `jobs.py::run_cycle` decided not to send
         (added 2026-10-19), from its ``"tranche_skipped:{proposal_id}"`` incidents -- the
