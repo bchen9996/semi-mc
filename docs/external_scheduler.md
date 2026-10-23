@@ -126,8 +126,15 @@ Early closes (13:00 ET, 12:00 CT) need nothing special either, since 2026-10-16.
 `carry` at 14:45 CT comes after the bell and does nothing on a closed market, so the
 last `cycle` whose successor would land less than 15 minutes before the close (the
 11:30 one) runs carry itself instead of calling the Trader (`jobs.py::
-early_close_before_next_cycle`, from Alpaca's calendar). The owner also added one-off
-`carry` runs at 11:45 CT on 2026-11-27 and 2026-12-24 as a backstop for the real account.
+early_close_before_next_cycle`, from Alpaca's calendar). That handover is the only thing
+that closes positions before an early close's bell. The owner had added a `carry` at
+11:45 CT as a backstop for 2026-11-27 and 2026-12-24, but it fired every day, and on
+2026-10-22 the owner moved it to 14:45 CT. So `carry` is now dispatched twice at 14:45
+CT: the two runs queue one after the other in the ledger-write concurrency group, and
+the second finds the book already flat and does nothing, or acts if the first never
+started. If the 11:30 cycle doesn't run on an early-close day, the 14:45 carry finds
+the market closed and records an error incident naming what is still held, and the next
+session's monitor closes it.
 
 **A `carry` dispatched more than 60 minutes before the close does nothing** (since
 2026-10-19; `run_carry`'s `near_close_only`): a warning incident, no orders. On
