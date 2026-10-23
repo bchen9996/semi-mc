@@ -2975,6 +2975,23 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         short: Alpaca's handling of a short OTO's buy stop.
         `reviewer.md` now tells the placebo and "do nothing" apart, which the Reviewer
         had mixed up two days running.
+  - [x] **2026-10-22: code sizes every stock entry from its stop (owner chose option B
+        of three).** Over Stage 2's 17 entries the Trader's own `size_pct` averaged 2.0%
+        of equity (about $2k), losing about 0.03% of equity at a typical 1.3% stop,
+        while `risk_per_trade_pct` (0.75%) allowed the 15% single-name cap on every
+        one. The average matched the prompt's own example ("0.02 is 2%"), and 21 of 32
+        Researcher size bands said "small". Now `proposals.py::stop_sized_pct` sizes
+        each equity open and add to lose `risk.target_risk_per_trade_pct` (new, 0.001)
+        of equity at its invalidation, capped by the room left under the single-name cap;
+        the Trader's `size_pct` is replaced before validation, and the ledger records the
+        size used. At Stage 2's stops (0.6-3.5%, median 1.3%) that is 3-15%, about 7-8%
+        typical; three positions about 22% gross, and all three stopping out about 0.3%
+        of equity. Options not chosen: A, no change (Stage 3 doubles the count limits
+        only); C, 0.25% at the stop (15%, the cap, nearly every trade). The placebo now
+        sizes by the same rule from its 2% stop (5%, was 15%), so its P&L compares like
+        for like; its figures from before 10-22 are at three times the risk.
+        `trader.md` drops the 2% example and says why the invalidation must not be
+        moved to change the size. Watch: whether the Trader starts tightening stops.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so

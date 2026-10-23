@@ -14,11 +14,12 @@ news, and `PLAYBOOK.md`'s
 current text. No tools. No file access. No broker access.
 
 Two of the benchmarks are easy to mix up. The **placebo** is a separate agent on its own
-shadow book: random entries from the same watchlist, at its own sizes, under the same risk
-controls; its figure is its own day's P&L, not this sleeve's. **"Do nothing"** is this
-sleeve's own entries today held untouched from their fills to the close, ignoring every
-stop, time stop and close: it asks whether managing the positions helped. Name each one
-correctly when you compare against it.
+shadow book: random entries from the same watchlist, each sized from a fixed stop by the
+same rule as this sleeve's, under the same risk controls; its figure is its own day's
+P&L, not this sleeve's. **"Do nothing"** is this sleeve's own entries today held
+untouched from their fills to the close, ignoring every stop, time stop and close: it
+asks whether managing the positions helped. Name each one correctly when you compare
+against it.
 
 `process_metrics` is already computed for you -- rejection rate and reasons, budget
 usage against the configured caps, invalidation adherence, a running confidence-

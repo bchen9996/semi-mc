@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Literal
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..config import IntradayConfig
+from ..config import IntradayConfig, IntradayRiskConfig
 from .ledger import IntradayLedger
 
 if TYPE_CHECKING:
@@ -39,6 +39,32 @@ def whole_shares(size_pct: float, equity: float, price: float) -> int:
     """How many whole shares `size_pct` of `equity` buys at `price` -- the one rounding
     rule validation, tranche-splitting and `orders.py::build_entry_order` all share."""
     return math.floor(size_pct * equity / price)
+
+
+def stop_sized_pct(
+    limit_price: float,
+    invalidation_price: float,
+    risk: IntradayRiskConfig,
+    *,
+    held_fraction: float = 0.0,
+) -> float:
+    """The size of an equity entry, as a fraction of equity: the position that loses
+    `risk.target_risk_per_trade_pct` of equity if the price moves from `limit_price` to
+    `invalidation_price`, capped so the name's whole position (`held_fraction` of equity
+    already, unsigned) stays within `risk.single_name_cap_pct`. A tight stop makes a large
+    position and a wide stop a small one.
+
+    Code sizes every equity open and add this way (added 2026-10-22, owner's option B),
+    in place of the Trader's own `size_pct`, which had averaged 2.0% of equity over
+    Stage 2. Where the name has no room left, or the stop is on the entry, the uncapped
+    size is returned and `validate_proposal` rejects it with its usual reason.
+    """
+    stop_fraction = abs(limit_price - invalidation_price) / limit_price
+    if stop_fraction <= 0:
+        return risk.single_name_cap_pct
+    size = min(risk.target_risk_per_trade_pct / stop_fraction, 1.0)
+    room = risk.single_name_cap_pct - held_fraction
+    return min(size, room) if room > 0 else size
 
 
 class TradeProposal(BaseModel):

@@ -10,7 +10,12 @@ from pydantic import ValidationError
 
 from semimc.config import IntradayConfig
 from semimc.intraday.ledger import IntradayLedger
-from semimc.intraday.proposals import TradeProposal, ValidationContext, validate_proposal
+from semimc.intraday.proposals import (
+    TradeProposal,
+    ValidationContext,
+    stop_sized_pct,
+    validate_proposal,
+)
 
 AS_OF = pd.Timestamp("2026-09-21")
 NOW = dt.datetime(2026, 9, 21, 14, 30, tzinfo=dt.UTC)
@@ -463,3 +468,30 @@ def test_an_entrys_invalidation_must_sit_on_its_losing_side(tmp_path, side, inva
     proposal = _open(side=side, invalidation_price=invalidation)
     failures = validate_proposal(proposal, _context(tmp_path))
     assert any("it is where the stop goes" in f for f in failures) is rejected
+
+
+# -- entries sized from their stops (owner's option B, 2026-10-22) -------------------------
+
+
+@pytest.mark.parametrize(
+    ("invalidation", "held", "size"),
+    [
+        (196.8, 0.0, 0.0625),  # a 1.6% stop
+        (203.2, 0.0, 0.0625),  # a short's stop, above it, the same distance away
+        (199.5, 0.0, 0.15),  # a 0.25% stop would make 40%: the single-name cap holds it
+        (199.5, 0.10, 0.05),  # an add, with 10% held: the room left in the name
+        (196.8, 0.15, 0.0625),  # no room: left uncapped, for validate_proposal to reject
+    ],
+)
+def test_stop_sized_pct_loses_the_target_fraction_of_equity_at_the_stop(invalidation, held, size):
+    risk = IntradayConfig().risk
+    assert risk.target_risk_per_trade_pct == pytest.approx(0.001)
+    assert stop_sized_pct(200.0, invalidation, risk, held_fraction=held) == pytest.approx(size)
+
+
+def test_a_stop_sized_add_with_no_room_left_is_rejected_by_the_single_name_cap(tmp_path):
+    size = stop_sized_pct(200.0, 196.8, IntradayConfig().risk, held_fraction=0.15)
+    proposal = _open(action="add", size_pct=size, limit_price=200.0, invalidation_price=196.8)
+    context = _context(tmp_path, positions={"NVDA": 15_000.0}, prices={"NVDA": 200.0})
+    failures = validate_proposal(proposal, context)
+    assert any("single_name_cap_pct" in f for f in failures)

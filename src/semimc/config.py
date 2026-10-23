@@ -433,6 +433,13 @@ class IntradayRiskConfig(_Base):
     round_trips_per_symbol_per_day: int = Field(2, gt=0)
     daily_turnover_pct: float = Field(1.50, gt=0)
     risk_per_trade_pct: float = Field(0.0075, gt=0)
+    # What sizes every equity entry (added 2026-10-22, owner's option B): the position
+    # that loses this fraction of equity if the price reaches the entry's invalidation,
+    # capped by single_name_cap_pct (`proposals.py::stop_sized_pct`). The Trader's own
+    # size_pct had averaged 2.0% of equity over Stage 2's 17 entries (about 0.03% at the
+    # stop) while risk_per_trade_pct allowed 15%, the single-name cap, on every one.
+    # risk_per_trade_pct stays the ceiling this can't exceed.
+    target_risk_per_trade_pct: float = Field(0.001, gt=0)
     single_name_cap_pct: float = Field(0.15, gt=0)
     gross_cap_pct: float = Field(1.50, gt=0)
     net_long_cap_pct: float = Field(1.00, gt=0)
@@ -456,6 +463,15 @@ class IntradayRiskConfig(_Base):
     # "delayed_sip" -- fine for "is this name liquid", which is all the gate asks. "sip"
     # is the real-time version, on a paid market-data plan.
     spread_feed: Literal["delayed_sip", "sip", "iex"] = "delayed_sip"
+
+    @model_validator(mode="after")
+    def _target_risk_within_cap(self) -> IntradayRiskConfig:
+        if self.target_risk_per_trade_pct > self.risk_per_trade_pct:
+            raise ValueError(
+                f"intraday.risk.target_risk_per_trade_pct ({self.target_risk_per_trade_pct}) "
+                f"must not exceed risk_per_trade_pct ({self.risk_per_trade_pct})"
+            )
+        return self
 
 
 class IntradayScheduleConfig(_Base):
@@ -604,11 +620,10 @@ class IntradayPlaceboConfig(_Base):
     (`IntradayLedger.total_realized_cash_flow`), never itself persisted.
     """
 
-    # 0.02: at the default risk_per_trade_pct (0.0075) and single_name_cap_pct (0.15),
-    # this is the smallest stop distance where risk_per_trade_pct / stop_distance_pct
-    # alone doesn't already exceed single_name_cap_pct -- placebo.py's own sizing caps
-    # against both up front, rather than relying on validate_proposal to reject an
-    # over-concentrated size every single cycle.
+    # The placebo sizes from this stop the way the real agent's entries are sized from
+    # theirs (`proposals.py::stop_sized_pct`): at the default target_risk_per_trade_pct
+    # (0.001), a 2% stop makes a 5% position. Until 2026-10-22 it sized to
+    # risk_per_trade_pct, which at this stop hit single_name_cap_pct (15%) every time.
     stop_distance_pct: float = Field(0.02, gt=0)
     time_stop_minutes: int = Field(120, gt=0)
     starting_equity: float = Field(100_000.0, gt=0)
