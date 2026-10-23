@@ -3430,3 +3430,138 @@ def test_run_cycle_sizes_an_add_to_the_room_left_in_the_name(config, tmp_path):
         cfg.intraday.risk.single_name_cap_pct - held_fraction
     )
     ledger.close()
+
+
+# -- an entry that hasn't filled by the next cycle (owner's option A, 2026-10-22) ----------
+
+
+def _entry(symbol: str, price: float, invalidation: float, side: str = "buy") -> dict:
+    return {
+        "action": "open",
+        "symbol": symbol,
+        "side": side,
+        "size_pct": 0.05,
+        "limit_price": price,
+        "thesis": "test",
+        "invalidation_price": invalidation,
+        "time_stop_minutes": 1000,
+    }
+
+
+def test_an_entry_still_unfilled_at_the_next_cycle_is_canceled_and_gives_back_its_slot(
+    config, tmp_path
+):
+    """2026-10-22: MU's 09:31 CT short never filled, rested at Alpaca until 12:01 and used
+    one of the 3 new positions all the same, so the afternoon's triggers found none left.
+    The next cycle now cancels it, and its stop, and the slot comes back."""
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=1, new_positions_per_day=1)
+    ledger = _ledger(tmp_path)
+    for symbol in ("MU", "NVDA"):
+        ledger.record_watchlist_item(AS_OF, symbol, thesis="test")
+    market_data = _FakeMarketData(quotes={"MU": _quote(880.0), "NVDA": _quote(190.0)})
+    broker = FakeBroker(now=NOW, partial_fill_fraction=0.0)  # nothing fills
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [_entry("MU", 880.0, 890.0, "sell")]}),
+        _result_json(structured_output={"proposals": [_entry("NVDA", 190.0, 187.0)]}),
+    )
+
+    first = run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+    [entry_id] = first.orders_submitted
+    [leg] = broker.get_order_by_client_id(entry_id).legs
+    assert ledger.get_order(entry_id)["status"] == "accepted"  # resting, nothing filled
+
+    broker.partial_fill_fraction = 1.0
+    later = NOW + dt.timedelta(minutes=30)
+    for symbol, price in (("MU", 870.0), ("NVDA", 190.0)):
+        market_data.quotes[symbol] = _quote(price, at=later)
+    second = run_cycle("cycle_2", cfg, broker, ledger, market_data, client, AS_OF, later)
+
+    assert second.entries_canceled == [entry_id]
+    assert broker.get_order_by_client_id(entry_id).status == "canceled"
+    assert broker.get_order_by_client_id(leg.client_order_id).status == "canceled"
+    assert ledger.get_order(leg.client_order_id)["status"] == "canceled"
+    assert second.proposals_accepted == 1  # NVDA found a slot: MU's came back
+    assert [p.symbol for p in broker.list_positions()] == ["NVDA"]
+    [note] = [i for i in ledger.incidents() if i["message"].startswith("entry_unfilled:")]
+    assert "MU: sell" in note["message"] and "after 30 min" in note["message"]
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("fill_fraction", "minutes_later"),
+    [(0.5, 30), (0.0, 2)],
+    ids=["partly filled", "sent minutes ago"],
+)
+def test_a_cycle_leaves_a_partly_filled_or_just_sent_entry_alone(
+    config, tmp_path, fill_fraction, minutes_later
+):
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=1)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    broker = FakeBroker(now=NOW, partial_fill_fraction=fill_fraction)
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [_entry("NVDA", 190.0, 187.0)]}),
+        _result_json(structured_output={"proposals": []}),
+    )
+
+    first = run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+    later = NOW + dt.timedelta(minutes=minutes_later)
+    market_data.quotes["NVDA"] = _quote(190.0, at=later)
+    second = run_cycle("cycle_2", cfg, broker, ledger, market_data, client, AS_OF, later)
+
+    assert second.entries_canceled == []
+    [entry_id] = first.orders_submitted
+    assert broker.get_order_by_client_id(entry_id).status in ("accepted", "partially_filled")
+    ledger.close()
+
+
+def test_carry_cancels_every_unfilled_entry_whatever_its_age(config, tmp_path):
+    """An entry that filled after carry would be held overnight on an intraday thesis."""
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=1)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    broker = FakeBroker(now=NOW, partial_fill_fraction=0.0)
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [_entry("NVDA", 190.0, 187.0)]})
+    )
+
+    first = run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+    carry = run_carry(cfg, broker, ledger, market_data, AS_OF, NOW + dt.timedelta(minutes=1))
+
+    assert carry.entries_canceled == first.orders_submitted
+    assert broker.get_order_by_client_id(first.orders_submitted[0]).status == "canceled"
+    assert broker.list_positions() == []
+    ledger.close()
+
+
+def test_a_tranched_entry_whose_second_piece_is_canceled_still_counts(config, tmp_path):
+    """Its first piece bought shares, so the proposal used its slot; the second piece is
+    sent again at the next cycle's price, as any next tranche is."""
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=2, new_positions_per_day=1)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    broker = FakeBroker(now=NOW)
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [_entry("NVDA", 190.0, 187.0)]}),
+        _result_json(structured_output={"proposals": []}),
+        _result_json(structured_output={"proposals": []}),
+    )
+
+    run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+    broker.partial_fill_fraction = 0.0  # the second piece rests unfilled
+    t2 = NOW + dt.timedelta(minutes=30)
+    market_data.quotes["NVDA"] = _quote(190.5, at=t2)
+    second = run_cycle("cycle_2", cfg, broker, ledger, market_data, client, AS_OF, t2)
+    [piece] = second.orders_submitted
+    t3 = t2 + dt.timedelta(minutes=30)
+    market_data.quotes["NVDA"] = _quote(190.5, at=t3)
+    third = run_cycle("cycle_3", cfg, broker, ledger, market_data, client, AS_OF, t3)
+
+    assert third.entries_canceled == [piece]
+    assert len(third.orders_submitted) == 1  # the second piece again, at today's price
+    assert ledger.get_order(third.orders_submitted[0])["tranche_index"] == 2
+    assert [row["symbol"] for row in ledger.counted_proposals_for(AS_OF)] == ["NVDA"]
+    ledger.close()

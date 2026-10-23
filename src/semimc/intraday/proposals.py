@@ -204,9 +204,8 @@ class ValidationContext:
 
 
 def _accepted_proposals(context: ValidationContext) -> list[dict]:
-    return [
-        row for row in context.ledger.proposals_for(context.as_of) if row["status"] == "accepted"
-    ]
+    # Less any whose entries were canceled with nothing filled (2026-10-22).
+    return context.ledger.counted_proposals_for(context.as_of)
 
 
 def validate_proposal(proposal: TradeProposal, context: ValidationContext) -> list[str]:

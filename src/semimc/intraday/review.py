@@ -79,7 +79,8 @@ def process_scorecard(
     as light as `eod_report.py`'s existing benchmark gathering.
     """
     todays = ledger.proposals_for(as_of)
-    accepted = [row for row in todays if row["status"] == "accepted"]
+    # Less any whose entries were canceled with nothing filled (2026-10-22).
+    accepted = ledger.counted_proposals_for(as_of)
     # An add counts toward its symbol's round trips, not new positions (proposals.py).
     accepted_opens = [row for row in accepted if row["action"] == "open"]
     rejected = [row for row in todays if row["status"] == "rejected"]

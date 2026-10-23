@@ -206,6 +206,95 @@ def cancel_resting_stops(
     return [leg["client_order_id"] for leg in legs]
 
 
+def cancel_unfilled_entries(
+    broker: Broker,
+    ledger: IntradayLedger,
+    now: dt.datetime,
+    *,
+    older_than: dt.timedelta | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> list[dict]:
+    """Cancels every entry still open with nothing filled, then its resting stop leg, and
+    returns the ledger rows of the entries that ended canceled with nothing filled (added
+    2026-10-22, owner's option A of three). An entry is a `day` limit order with its stop
+    attached (OTO), which rules out IOC: one priced off a market that has already moved
+    on rests at the broker for the rest of the day. MU's 09:31 CT short on 2026-10-22
+    did, until MU's time-stop exit canceled it at 12:01, and could have filled hours
+    after its trigger.
+
+    `older_than` limits it to entries sent at least that long before `now`: `run_cycle`
+    passes a few minutes, so it cancels what earlier jobs sent and never what a job
+    re-dispatched seconds before sent. `run_carry` passes nothing and cancels them all,
+    since an entry that fills after carry is held overnight on an intraday thesis.
+
+    A partly filled entry is left alone: its shares are held, under its stop. An entry
+    cancels before its stop leg does, and the leg (found through the broker's own record
+    of the order) is canceled only once the entry is confirmed canceled with nothing
+    filled: one that filled in the meantime keeps its stop. An entry whose lookup fails
+    or whose cancel hasn't completed is asked about again next time.
+
+    Each entry canceled with nothing filled gets an ``"entry_unfilled:{proposal_id}"``
+    info incident, which the day's budgets read (`IntradayLedger.counted_proposals_for`):
+    a proposal none of whose entries filled uses no new position, round trip or turnover.
+    """
+    cutoff = None if older_than is None else pd.Timestamp(_utc(now)) - older_than
+    entries = [
+        row
+        for row in ledger.open_orders()
+        if row["leg"] == "entry"
+        and not ledger.fills_for_order(row["client_order_id"])
+        and (cutoff is None or _sent_by(row, cutoff))
+    ]
+    if not entries:
+        return []
+    _cancel_and_settle(entries, broker, ledger, now, sleep)
+
+    canceled: list[dict] = []
+    legs: list[dict] = []
+    for entry in entries:
+        row = ledger.get_order(entry["client_order_id"]) or entry
+        if row["status"] in _OPEN_STATUSES or ledger.fills_for_order(row["client_order_id"]):
+            continue
+        canceled.append(row)
+        with contextlib.suppress(Exception):  # an unfound leg is swept as an orphan later
+            order = broker.get_order_by_client_id(row["client_order_id"])
+            for child in (order.legs or []) if order is not None else []:
+                leg = ledger.get_order(child.client_order_id)
+                if leg is not None and leg["status"] in _OPEN_STATUSES:
+                    legs.append(leg)
+        sent = _sent_at(row)
+        age = (
+            f" after {(pd.Timestamp(_utc(now)) - sent).total_seconds() / 60:.0f} min"
+            if sent
+            else ""
+        )
+        ledger.record_incident(
+            "info",
+            f"entry_unfilled:{row['proposal_id']} {row['symbol']}: {row['side']} "
+            f"{row['qty']:g} at {row['limit_price']} canceled with nothing filled{age}",
+        )
+    if legs:
+        _cancel_and_settle(legs, broker, ledger, now, sleep)
+    return canceled
+
+
+def _utc(moment: dt.datetime) -> dt.datetime:
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=dt.UTC)
+
+
+def _sent_at(row: dict) -> pd.Timestamp | None:
+    if not row.get("submitted_at"):
+        return None
+    sent = pd.Timestamp(row["submitted_at"])
+    return sent.tz_localize("UTC") if sent.tzinfo is None else sent.tz_convert("UTC")
+
+
+def _sent_by(row: dict, cutoff: pd.Timestamp) -> bool:
+    """Whether `row` was sent at or before `cutoff`; one with no send time counts as old."""
+    sent = _sent_at(row)
+    return sent is None or sent <= cutoff
+
+
 def _cancel_and_settle(
     rows: list[dict],
     broker: Broker,
