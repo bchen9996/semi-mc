@@ -2971,8 +2971,10 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         PA33HJGNHLI7 (owner, from its settings page, 2026-10-21; the local `.env` keys open
         the S3 account PA3P3XIM4N7V, so the S4 account can't be read from here). Every
         universe stock and SOXX is `shortable` and `easy_to_borrow` (asset fields, the
-        same for every account; read 2026-10-21). Still unverified until the first real
-        short: Alpaca's handling of a short OTO's buy stop.
+        same for every account; read 2026-10-21). Alpaca's handling of a short OTO's buy
+        stop was the one open question; the first real shorts (MU, 2026-10-22) answered
+        it: the sell entry went in with its buy stop leg resting, and the time stop's
+        exit canceled the leg as it does a long's.
         `reviewer.md` now tells the placebo and "do nothing" apart, which the Reviewer
         had mixed up two days running.
   - [x] **2026-10-22: code sizes every stock entry from its stop (owner chose option B
@@ -2992,6 +2994,23 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         for like; its figures from before 10-22 are at three times the risk.
         `trader.md` drops the 2% example and says why the invalidation must not be
         moved to change the size. Watch: whether the Trader starts tightening stops.
+  - [x] **2026-10-22, day 6: TXN long -$17.39, MU short +$29.85 gross (+$7.43 net), on a
+        semis selloff** (SOXX -6.79% close to close, -2.87% open to close; S3 -$3,095,
+        -3.24%; the placebo -$595). Sized the old way: the stop-sized entries start
+        10-23. The first real shorts, on the Researcher's new short setups: a MU fading
+        gap. TXN's stop filled at 280.34 against a 280.64 invalidation; the halfway
+        rule had skipped its second tranche. MU's 10:00 CT short went in as 1 + 1 and the
+        time stop bought both back at 12:01. **Found: an entry that doesn't fill rests
+        at the broker for the rest of the day.** MU's 09:31 CT short (a sell limit at
+        885.01, collared from a price the market had already left) never filled and
+        stayed open until MU's time-stop exit canceled it at 12:01; it still used a new
+        position and one of MU's round trips, so the 3-a-day budget was spent by 10:00
+        and the afternoon's short triggers (INTC, LRCX, AMAT, per the Reviewer) had no
+        slot. Entries are `day` orders (OTO legs rule out IOC) and nothing cancels an
+        unfilled one. Late GitHub cron copies of carry (17:46 CT) and eod-review
+        (18:22 CT) ran harmlessly: carry declined (market closed), and eod-review made
+        no Reviewer call and reconciled ok a second time. Stage 3 rule 5 of 6 (10 closed
+        trades; 6 of 10 sessions).
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so
