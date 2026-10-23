@@ -140,3 +140,12 @@ def test_trader_thinking_cap_takes_off_the_api_minimum_or_none(value):
 def test_trader_thinking_cap_below_the_api_minimum_is_rejected():
     with pytest.raises(ValidationError, match="at least 1024"):
         load_config(overrides=["intraday.models.trader_max_thinking_tokens=500"])
+
+
+def test_entries_are_sized_to_lose_a_tenth_of_a_percent_at_the_stop():
+    """Owner's option B, 2026-10-22. The per-trade ceiling stays risk_per_trade_pct, and
+    the sizing target can't be set above it."""
+    for cfg in (load_config(), load_config(PROJECT_ROOT / "config" / "paper.yaml")):
+        assert cfg.intraday.risk.target_risk_per_trade_pct == pytest.approx(0.001)
+    with pytest.raises(ValueError, match="target_risk_per_trade_pct"):
+        load_config(overrides=["intraday.risk.target_risk_per_trade_pct=0.01"])

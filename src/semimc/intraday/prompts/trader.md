@@ -78,11 +78,13 @@ A single JSON object: `{"proposals": [...]}`. Each item is one action for one sy
 - `instrument`: `equity`, or `option` only when this cycle's `options_available` is
   `true` (see "Options" below) -- otherwise treat `option` as unavailable and propose
   `equity` only.
-- `symbol`, `side` (`buy`/`sell`), `size_pct` (a fraction of equity, not a share count:
-  0.02 is 2%), `limit_price`. Entries buy whole shares, so a size worth less than one
-  share at the current price is rejected (the reason says what one share is as a
-  fraction of equity), and a size worth a single share goes in as one piece rather than
-  two tranches.
+- `symbol`, `side` (`buy`/`sell`), `size_pct` (a fraction of equity, not a share count),
+  `limit_price`. For a stock `open` or `add`, code replaces your `size_pct` with a size
+  set from the stop: the position that loses a small fixed fraction of equity if the
+  price reaches your `invalidation_price`, capped by the single-name limit. A tight stop
+  makes a large position and a wide stop a small one, so put the invalidation where the
+  thesis is wrong, never where it gives the size you want. Entries buy whole shares, and
+  a size worth a single share goes in as one piece rather than two tranches.
 - `thesis`: plain language, 300 characters or fewer.
 - `evidence`: the context items (headline ids, price levels) your thesis rests on.
 - `invalidation_price`: the level at which your thesis is wrong. `time_stop_minutes`: how

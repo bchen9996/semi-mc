@@ -83,6 +83,7 @@ from .proposals import (
     OPEN_OR_ADD_ACTIONS,
     TradeProposal,
     ValidationContext,
+    stop_sized_pct,
     validate_proposal,
     whole_shares,
 )
@@ -1448,6 +1449,18 @@ def run_cycle(
         except (ValidationError, TypeError) as exc:
             ledger.record_incident("error", f"malformed trader proposal: {exc}")
             continue
+
+        # Code sizes a stock entry from its stop, not the Trader (2026-10-22): its own
+        # size_pct had averaged 2.0% of equity. The ledger records the size used.
+        if proposal.instrument == "equity" and proposal.action in OPEN_OR_ADD_ACTIONS:
+            held = abs(positions_notional.get(proposal.symbol, 0.0)) / account.equity
+            size = stop_sized_pct(
+                proposal.limit_price,
+                proposal.invalidation_price,
+                intraday.risk,
+                held_fraction=held,
+            )
+            proposal = proposal.model_copy(update={"size_pct": size})
 
         # Phase 12b (Rollout Stage 4): price this proposal's own contract before building
         # the ValidationContext -- validate_option_proposal (intraday/options.py) requires

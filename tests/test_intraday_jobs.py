@@ -671,10 +671,11 @@ def test_run_cycle_sizes_an_entry_at_the_trade_price_not_the_iex_midpoint(config
         "action": "open",
         "symbol": "MU",
         "side": "buy",
-        "size_pct": 0.03,  # $3,000: 3 shares at 1,000, only 2 at the 1,050 midpoint
+        "size_pct": 0.03,
         "limit_price": 1000.0,
         "thesis": "memory pricing",
-        "invalidation_price": 990.0,
+        # A 3.3% stop sizes it at 3.03%: $3,030 is 3 shares at 1,000, 2 at the 1,050 mid.
+        "invalidation_price": 967.0,
         "time_stop_minutes": 60,
     }
     client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
@@ -1087,7 +1088,8 @@ def test_past_halfway_to_stop_works_for_both_sides(side, stop, price, past):
 
 def test_a_tranched_entry_buys_the_whole_positions_shares_split_smaller_first(config, tmp_path):
     """2026-10-19: 2% of $100k in AVGO at 339.90 is 5.9 shares. Each half rounded down on
-    its own bought 2 + 2; rounded once, the 5 whole shares go in as 2 + 3."""
+    its own bought 2 + 2; rounded once, the 5 whole shares go in as 2 + 3. (A 5% stop
+    sizes it at 2%.)"""
     cfg = _tradeable_config(config, tmp_path, entry_tranches=2)
     ledger = _ledger(tmp_path)
     ledger.record_watchlist_item(AS_OF, "AVGO", thesis="test")
@@ -1099,7 +1101,7 @@ def test_a_tranched_entry_buys_the_whole_positions_shares_split_smaller_first(co
         "size_pct": 0.02,
         "limit_price": 339.90,
         "thesis": "opening-range breakout",
-        "invalidation_price": 336.60,
+        "invalidation_price": 323.0,
         "time_stop_minutes": 1000,
     }
     broker = FakeBroker(now=NOW)
@@ -1136,6 +1138,10 @@ def test_tranche_qty_splits_the_whole_positions_shares(full_shares, filled, tran
 
 
 def _expensive_open(size_pct: float, price: float = 1000.0) -> dict:
+    """An MU open whose stop sizes it at `size_pct` of equity, a hair over so a size worth
+    exactly N shares buys N: code sizes an entry from its stop, at the default
+    target_risk_per_trade_pct of 0.001 (`proposals.py::stop_sized_pct`)."""
+    stop_fraction = 0.001 / (size_pct * 1.001)
     return {
         "action": "open",
         "symbol": "MU",
@@ -1143,7 +1149,7 @@ def _expensive_open(size_pct: float, price: float = 1000.0) -> dict:
         "size_pct": size_pct,
         "limit_price": price,
         "thesis": "memory pricing",
-        "invalidation_price": price * 0.985,
+        "invalidation_price": price * (1 - stop_fraction),
         "time_stop_minutes": 60,
     }
 
@@ -1252,15 +1258,17 @@ def test_run_cycle_rejects_a_proposal_over_the_new_positions_budget(config, tmp_
     ledger.close()
 
 
-def test_run_cycle_rejects_an_oversized_proposal_even_if_the_model_looks_compromised(
+def test_run_cycle_bounds_an_oversized_proposal_even_if_the_model_looks_compromised(
     config, tmp_path
 ):
     """Phase 8's actual backstop, not the text-pattern scanner in `security.py`: even a
     schema-valid Trader proposal that reads as if the model had been steered by injected
-    content (a thesis quoting the corpus's own override/command phrase, sized to the
-    schema's maximum) is still bounded by `validate_proposal`'s `single_name_cap_pct`
-    check -- "no text from a source can raise a limit... by itself" holds structurally,
-    independent of whether any scanner caught the phrase that (hypothetically) produced it.
+    content (a thesis quoting the corpus's own override/command phrase, sized at 90% with
+    a stop a few cents away) goes in no larger than `single_name_cap_pct` -- "no text from
+    a source can raise a limit... by itself" holds structurally, independent of whether
+    any scanner caught the phrase that (hypothetically) produced it. Since 2026-10-22 code
+    sizes the entry from its stop and ignores the Trader's size_pct; the tight stop would
+    size it at 100%, and the single-name cap holds it to 15%.
     """
     cfg = _tradeable_config(config, tmp_path)
     ledger = _ledger(tmp_path)
@@ -1274,17 +1282,18 @@ def test_run_cycle_rejects_an_oversized_proposal_even_if_the_model_looks_comprom
         "size_pct": 0.9,
         "limit_price": 190.0,
         "thesis": injected_phrase,
-        "invalidation_price": 185.0,
+        "invalidation_price": 189.9,
         "time_stop_minutes": 60,
     }
     client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
+    broker = FakeBroker()
 
-    result = run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, NOW)
+    run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
 
-    assert result.proposals_rejected == 1
-    assert result.orders_submitted == []
-    rejected = [r for r in ledger.proposals_for(AS_OF) if r["status"] == "rejected"]
-    assert "single_name_cap_pct" in rejected[0]["reason"]
+    [row] = ledger.proposals_for(AS_OF)
+    assert row["payload"]["size_pct"] == pytest.approx(cfg.intraday.risk.single_name_cap_pct)
+    held = sum(abs(p.market_value) for p in broker.list_positions())
+    assert held <= cfg.intraday.risk.single_name_cap_pct * 100_000.0
     ledger.close()
 
 
@@ -3354,4 +3363,70 @@ def test_reconcile_signs_a_short_by_its_side_whatever_sign_the_broker_reports(co
     _seed_open_position(broker, ledger, cfg, side="sell", invalidation_price=195.0)
 
     assert reconcile_positions(broker, ledger, AS_OF) == []
+    ledger.close()
+
+
+# -- entries sized from their stops (owner's option B, 2026-10-22) -------------------------
+
+
+def test_run_cycle_sizes_a_stock_entry_from_its_stop_not_the_traders_size(config, tmp_path):
+    """The Trader's own size_pct averaged 2.0% of equity over Stage 2. Code now sizes each
+    entry to lose target_risk_per_trade_pct (0.10%) of equity at its stop: a 1.6% stop is
+    a 6.25% position, $6,250, or 31 shares at 200."""
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=1)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(200.0)})
+    proposal = {
+        "action": "open",
+        "symbol": "NVDA",
+        "side": "buy",
+        "size_pct": 0.02,
+        "limit_price": 200.0,
+        "thesis": "holds above VWAP",
+        "invalidation_price": 196.8,
+        "time_stop_minutes": 1000,
+    }
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": [proposal]}))
+
+    result = run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, NOW)
+
+    [row] = ledger.proposals_for(AS_OF)
+    assert row["status"] == "accepted"
+    assert row["payload"]["size_pct"] == pytest.approx(0.0625)
+    assert ledger.get_order(result.orders_submitted[0])["qty"] == 31
+    ledger.close()
+
+
+def test_run_cycle_sizes_an_add_to_the_room_left_in_the_name(config, tmp_path):
+    """An add's stop would size it past the single-name cap with the position already
+    held, so it takes only the room left."""
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=1)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg)
+    [held] = broker.list_positions()
+    held_fraction = abs(held.market_value) / broker.get_account().equity
+    ledger.record_watchlist_item(AS_OF, held.symbol, thesis="test")
+    price = held.market_value / held.qty
+    market_data = _FakeMarketData(quotes={held.symbol: _quote(price)})
+    add = {
+        "action": "add",
+        "symbol": held.symbol,
+        "side": "buy",
+        "size_pct": 0.02,
+        "limit_price": price,
+        "thesis": "holds above VWAP",
+        "invalidation_price": price * 0.999,  # alone, this stop would size it at 100%
+        "time_stop_minutes": 1000,
+    }
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": [add]}))
+
+    run_cycle("cycle_2", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+
+    row = ledger.proposals_for(AS_OF)[-1]
+    assert row["action"] == "add"
+    assert row["payload"]["size_pct"] == pytest.approx(
+        cfg.intraday.risk.single_name_cap_pct - held_fraction
+    )
     ledger.close()

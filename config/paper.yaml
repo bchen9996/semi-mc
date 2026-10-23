@@ -225,6 +225,7 @@ intraday:
     round_trips_per_symbol_per_day: 2
     daily_turnover_pct: 0.75          # default 1.50
     risk_per_trade_pct: 0.0075
+    target_risk_per_trade_pct: 0.001   # owner decision 2026-10-22: entries sized from their stop
     single_name_cap_pct: 0.15
     gross_cap_pct: 0.75               # default 1.50
     net_long_cap_pct: 1.00

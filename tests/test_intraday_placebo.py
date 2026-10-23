@@ -198,6 +198,8 @@ def test_run_placebo_cycle_proposes_a_seeded_random_candidate_and_submits_it(tmp
     accepted = [r for r in shadow_ledger.proposals_for(AS_OF) if r["status"] == "accepted"]
     assert len(accepted) == 1
     assert accepted[0]["payload"]["thesis"].startswith("placebo:")
+    # Sized by the real agent's rule from the placebo's 2% stop: 0.10% / 2% = 5%.
+    assert accepted[0]["payload"]["size_pct"] == pytest.approx(0.05)
     real_ledger.close()
     shadow_ledger.close()
 

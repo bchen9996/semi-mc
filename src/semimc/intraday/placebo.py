@@ -45,7 +45,7 @@ from .jobs import (
 from .ledger import IntradayLedger
 from .monitor import check_invalidation_and_time_stops
 from .orders import build_entry_order, submit_order_with_fault_isolation
-from .proposals import TradeProposal, ValidationContext, validate_proposal
+from .proposals import TradeProposal, ValidationContext, stop_sized_pct, validate_proposal
 
 _THESIS = "placebo: random draw from watchlist -- see THESES.md's T6"
 
@@ -178,15 +178,10 @@ def run_placebo_cycle(
     invalidation_price = (
         price * (1 - stop_distance) if side == "buy" else price * (1 + stop_distance)
     )
-    # Maximally sized subject to every cap already known up front (risk-to-invalidation
-    # and single-name), rather than relying on validate_proposal to reject an
-    # over-concentrated size this code could have avoided proposing in the first place --
-    # "no judgment" means no restraint beyond the hard caps, not "guaranteed rejected."
-    size_pct = min(
-        intraday.risk.risk_per_trade_pct / stop_distance,
-        intraday.risk.single_name_cap_pct,
-        1.0,
-    )
+    # Sized by the same rule as the real agent's entries (2026-10-22), so the two books
+    # risk the same at each stop and their P&L compares like for like. A candidate is
+    # never already held, so the whole single-name cap is room.
+    size_pct = stop_sized_pct(price, invalidation_price, intraday.risk)
 
     proposal = TradeProposal(
         action="open",
