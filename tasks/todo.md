@@ -3029,6 +3029,33 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         second time while the first copy still rested. Options not chosen: B, cancel
         but keep counting the slot; C, no change. On 10-22 under A, MU's 09:31 short is
         canceled at 10:01 and one slot stays open for the afternoon.
+  - [x] **2026-10-23, day 7: NVDA and MU longs, -$90.37 gross (-$136.28 net), both on
+        their time stops at 12:01 CT** (SOXX +0.53% close to close, +0.73% open to close;
+        S3 +$682, +0.74%; the placebo -$57.96). The first day of stop-sized entries: NVDA
+        7.6% of equity (1.32% stop, 17 + 18 shares), MU 13.6% (0.73% stop, 7 + 8), the
+        risk at each stop 0.10% as designed. Every entry filled within 2 s, so no
+        unfilled-entry cancel ran. **Found: MU reached 24 shares, $21.3k, 21% of equity,
+        past the 15% single-name cap.** The Trader added at 10:31 CT in the cycle that
+        sent the open's second tranche; the add was sized to the room left beside the 7
+        shares held, while the 8 sent two seconds earlier hadn't filled, and the
+        validator's single-name check read the same positions. Harmless at 2% sizes,
+        reachable at stop-sized ones. Fixed the same day: `jobs.py::committed_notional`
+        (held, plus each open entry's unfilled part, plus a tranche not yet sent unless
+        skipped) is what the sizing and the single-name, gross and net checks measure,
+        and each entry a cycle accepts is added to it before the next proposal is
+        checked. **Also found: the 11:30 CT dispatches never arrived** -- no intraday
+        cycle and neither paper mark, though all three ran at 11:30 the day before; the
+        paper workflow has its own concurrency group, so not a GitHub cancel. A 60-min
+        gap between cycle checks made 10-23 unclean, resetting the Stage 3 streak to 0
+        (rule 4 of 6; 7 of 10 sessions). The owner to check cron-job.org's history for
+        11:30. **And: the placebo's shadow ledger has three duplicated exit fills** from
+        before the 2026-10-03 fill sync (AMD 10-01, MU and NVDA 10-02; fill ids 16, 21,
+        23): its derived equity reads $15,479.29 low (session open 82,363 on 10-23, about
+        97,842 without them), and every placebo NVDA, MU and AMD reflection since has a
+        wrong entry price (10-23's NVDA short: +$122 reflected, -$23.56 from its fills).
+        The day P&L benchmark is a difference of equities, so it is right. The S4 ledger
+        nets to zero on every symbol. Repair not yet made: an owner decision, since it
+        edits recorded data.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so

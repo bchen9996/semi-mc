@@ -1125,6 +1125,49 @@ def _entry_fills_so_far(ledger: IntradayLedger, proposal_id: int) -> tuple[float
     return qty, notional
 
 
+def committed_notional(
+    ledger: IntradayLedger,
+    positions_notional: dict[str, float],
+    prices: dict[str, float],
+    equity: float,
+) -> dict[str, float]:
+    """Each name's signed notional held plus what is still on its way in (added
+    2026-10-23): the unfilled part of every open entry order, and the rest of a tranched
+    entry not yet sent, unless the halfway rule skipped it. The single-name, gross and net
+    caps and the entry sizing measure against this, not the position alone. On 2026-10-23
+    they read MU's 7 shares held while the open's second tranche of 8 was two seconds from
+    filling; the Trader's add was sized to the room that seemed to leave, and MU reached 24
+    shares, 21% of equity against the 15% single-name cap."""
+    committed = dict(positions_notional)
+    in_flight: set[int] = set()
+    for row in ledger.open_orders():
+        if row["leg"] != "entry":
+            continue
+        filled = sum(fill["qty"] for fill in ledger.fills_for_order(row["client_order_id"]))
+        price = prices.get(row["symbol"]) or row["limit_price"] or 0.0
+        unfilled = max(0.0, (row["qty"] or 0.0) - filled) * price
+        sign = 1.0 if row["side"] == "buy" else -1.0
+        committed[row["symbol"]] = committed.get(row["symbol"], 0.0) + sign * unfilled
+        if row["proposal_id"] is not None:
+            in_flight.add(row["proposal_id"])
+    skipped = ledger.skipped_tranche_proposals()
+    for symbol in positions_notional:
+        pending = ledger.pending_tranche_for(symbol)
+        if pending is None or pending["proposal_id"] is None:
+            continue
+        if pending["proposal_id"] in skipped or pending["proposal_id"] in in_flight:
+            continue
+        proposal_row = ledger.get_proposal(pending["proposal_id"])
+        payload = proposal_row["payload"] if proposal_row is not None else {}
+        if payload.get("size_pct") is None:
+            continue
+        _filled_qty, filled_notional = _entry_fills_so_far(ledger, pending["proposal_id"])
+        remaining = max(0.0, payload["size_pct"] * equity - filled_notional)
+        sign = 1.0 if payload.get("side") == "buy" else -1.0
+        committed[symbol] = committed.get(symbol, 0.0) + sign * remaining
+    return committed
+
+
 def _tranche_qty(full_shares: int, filled: float, tranches_left: int) -> int:
     """Shares for the next tranche of an entry worth `full_shares` whole shares, with
     `filled` bought and `tranches_left` pieces to go, this one included (added
@@ -1451,6 +1494,9 @@ def run_cycle(
 
     turnover_usd = turnover_so_far_usd(ledger, as_of, account.equity)
     last_stopout_at = ledger.last_stopout_times()
+    # What the caps and sizing measure: held, on its way in, and (below) each entry this
+    # cycle accepts, so a second proposal sees the first (2026-10-23).
+    committed = committed_notional(ledger, positions_notional, prices, account.equity)
 
     raw_proposals = (
         (response.structured_output or {}).get("proposals", [])
@@ -1469,7 +1515,7 @@ def run_cycle(
         # Code sizes a stock entry from its stop, not the Trader (2026-10-22): its own
         # size_pct had averaged 2.0% of equity. The ledger records the size used.
         if proposal.instrument == "equity" and proposal.action in OPEN_OR_ADD_ACTIONS:
-            held = abs(positions_notional.get(proposal.symbol, 0.0)) / account.equity
+            held = abs(committed.get(proposal.symbol, 0.0)) / account.equity
             size = stop_sized_pct(
                 proposal.limit_price,
                 proposal.invalidation_price,
@@ -1517,7 +1563,7 @@ def run_cycle(
             ledger=ledger,
             equity=account.equity,
             equity_at_session_open=equity_at_session_open,
-            positions=positions_notional,
+            positions=committed,
             prices=prices,
             turnover_so_far_usd=turnover_usd,
             last_stopout_at=last_stopout_at,
@@ -1557,6 +1603,11 @@ def run_cycle(
             result.proposals_rejected += 1
             continue
         result.proposals_accepted += 1
+        if proposal.instrument == "equity" and proposal.action in OPEN_OR_ADD_ACTIONS:
+            notional = proposal.size_pct * account.equity
+            committed[proposal.symbol] = committed.get(proposal.symbol, 0.0) + (
+                notional if proposal.side == "buy" else -notional
+            )
 
         if proposal.instrument == "option":
             # Stage 4 (BRIEF_INTRADAY.md rollout) -- priced and logged above, never

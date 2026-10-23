@@ -28,6 +28,7 @@ from semimc.intraday.jobs import (
     _protect_unguarded_positions,
     _tranche_qty,
     closed_market_note,
+    committed_notional,
     current_prices,
     early_close_note_prefix,
     mark_broker_to_market,
@@ -3564,4 +3565,78 @@ def test_a_tranched_entry_whose_second_piece_is_canceled_still_counts(config, tm
     assert len(third.orders_submitted) == 1  # the second piece again, at today's price
     assert ledger.get_order(third.orders_submitted[0])["tranche_index"] == 2
     assert [row["symbol"] for row in ledger.counted_proposals_for(AS_OF)] == ["NVDA"]
+    ledger.close()
+
+
+# -- the caps count what is on its way in (2026-10-23) -------------------------------------
+
+
+def test_an_add_is_sized_to_the_room_left_after_a_tranche_still_on_its_way_in(config, tmp_path):
+    """2026-10-23: MU's open went in as 7 + 8 shares; the add came in the cycle that sent
+    the 8, two seconds before they filled, and was sized to the room left beside the 7
+    alone. MU reached 24 shares, 21% of equity against the 15% single-name cap."""
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=2)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "MU", thesis="test")
+    market_data = _FakeMarketData(quotes={"MU": _quote(880.0)})
+    broker = FakeBroker(now=NOW)
+    add = {**_entry("MU", 880.0, 875.6), "action": "add"}  # alone, a 10% add
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [_entry("MU", 880.0, 873.6)]}),
+        _result_json(structured_output={"proposals": [add]}),
+    )
+
+    run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+    broker.partial_fill_fraction = 0.0  # the second tranche is still on its way in
+    later = NOW + dt.timedelta(minutes=30)
+    market_data.quotes["MU"] = _quote(880.0, at=later)
+    run_cycle("cycle_2", cfg, broker, ledger, market_data, client, AS_OF, later)
+
+    entries = [row for row in ledger.open_orders() if row["leg"] == "entry"]
+    held = sum(abs(p.market_value) for p in broker.list_positions())
+    on_the_way = sum(row["qty"] * 880.0 for row in entries)
+    assert held + on_the_way <= cfg.intraday.risk.single_name_cap_pct * 100_000.0
+    [add_row] = [r for r in ledger.proposals_for(AS_OF) if r["action"] == "add"]
+    assert add_row["payload"]["size_pct"] < 0.03  # the room left, not the 10% its stop gives
+    ledger.close()
+
+
+def test_a_second_entry_in_one_cycle_is_checked_against_the_first(config, tmp_path):
+    """Two opens in one answer: the gross cap counts the first when checking the second."""
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=1, gross_cap_pct=0.10)
+    ledger = _ledger(tmp_path)
+    for symbol in ("NVDA", "AMD"):
+        ledger.record_watchlist_item(AS_OF, symbol, thesis="test")
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(200.0), "AMD": _quote(150.0)})
+    both = [_entry("NVDA", 200.0, 196.8), _entry("AMD", 150.0, 147.6)]  # 6.25% each
+    client = _sequenced_llm_client(_result_json(structured_output={"proposals": both}))
+
+    result = run_cycle("cycle_1", cfg, FakeBroker(now=NOW), ledger, market_data, client, AS_OF, NOW)
+
+    assert (result.proposals_accepted, result.proposals_rejected) == (1, 1)
+    [rejected] = [r for r in ledger.proposals_for(AS_OF) if r["status"] == "rejected"]
+    assert rejected["symbol"] == "AMD" and "gross_cap_pct" in rejected["reason"]
+    ledger.close()
+
+
+def test_committed_notional_counts_a_tranche_not_yet_sent_unless_it_was_skipped(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=2)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "MU", thesis="test")
+    market_data = _FakeMarketData(quotes={"MU": _quote(880.0)})
+    broker = FakeBroker(now=NOW)
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [_entry("MU", 880.0, 873.6)]})
+    )
+    run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+    [position] = broker.list_positions()
+    held = {"MU": position.market_value}
+    [row] = [r for r in ledger.proposals_for(AS_OF) if r["action"] == "open"]
+    planned = row["payload"]["size_pct"] * 100_000.0
+
+    assert committed_notional(ledger, held, {"MU": 880.0}, 100_000.0)["MU"] == pytest.approx(
+        planned
+    )
+    ledger.record_incident("info", f"tranche_skipped:{row['id']} MU: test")
+    assert committed_notional(ledger, held, {"MU": 880.0}, 100_000.0) == held
     ledger.close()
