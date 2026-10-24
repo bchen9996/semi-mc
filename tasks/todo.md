@@ -3054,8 +3054,26 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         97,842 without them), and every placebo NVDA, MU and AMD reflection since has a
         wrong entry price (10-23's NVDA short: +$122 reflected, -$23.56 from its fills).
         The day P&L benchmark is a difference of equities, so it is right. The S4 ledger
-        nets to zero on every symbol. Repair not yet made: an owner decision, since it
-        edits recorded data.
+        nets to zero on every symbol.
+  - [x] **2026-10-23: the placebo's shadow ledger repaired (owner chose option A of
+        two; B was to leave it and record the fault).** Made at 21:30 CT, after GitHub's
+        late carry, eod-review and weekly-review copies, from a copy checked against
+        the committed file. (1) Deleted fills 16, 21 and 23, each identical to its twin
+        (15, 20, 22) and each order filled exactly once by the twin: equity corrections
+        +14,757.84 (AMD), -11,825.77 (MU), +12,547.22 (NVDA), +15,479.29 in all. Every
+        symbol's fills now net to zero. (2) Rebuilt each reflection's price fields with
+        `reflect.trade_figures`: only 5 had been wrong, not the 26 first counted (ids 48,
+        52, 54, 56, 57, from 2026-10-20 on, when entries began to be found by walking the
+        fill history; earlier ones took their entry from the order and were right). All
+        53 others reproduced exactly as stored, the check on the method. E.g. 10-22's MU
+        long: entry 970.47 -> 906.13, gross -1,147.84 -> -311.48. (3) Corrected the 16
+        session-open equities recorded after a duplicate (10-02 to 10-23) by the cash
+        effect present then: 10-23's 82,363.21 -> 97,842.50. The placebo's derived equity
+        is now 97,784.54 (from 100,000). (4) One `data_repair` info incident in that
+        ledger records it. Readiness's agent-vs-placebo table moved from 55 placebo
+        trades, -$1,208.71 gross, 41% won, to 58, -$2,215.46, 36%: the wrong entries had
+        also merged three trades into others in `round_trip_count`. Its sizes were 15%
+        until 2026-10-22 (5% since), so its P&L before then is at three times the risk.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so
