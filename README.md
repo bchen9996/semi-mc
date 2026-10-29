@@ -1,4 +1,11 @@
 # semimc
+**Background:**
+- This project is a follow-up to a team research project, advised by a
+  Saint Louis University finance professor, that tested whether earnings
+  signals predict price reactions in large semiconductor stocks.
+- It simulates thousands of price paths for the same stocks to test whether
+  the research's ideas hold up before any paper trading.
+- Paper trading (via Alpaca) is planned; no real money is traded.
 
 Monte Carlo forecasting for U.S.-listed semiconductor stocks: distributions of future
 prices and returns, probabilities of reaching price levels, and downside risk (VaR, CVaR,
