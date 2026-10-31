@@ -2298,7 +2298,10 @@ def intraday_eod_review(
     ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
     market_data = _intraday_market_data()
     news_client = _intraday_news_client()
-    market_data_pit = load_market_data(cfg, tickers=["SOXX"])
+    # The universe too, for each traded name's beta (`intraday/hedge.py`).
+    market_data_pit = load_market_data(
+        cfg, tickers=list(dict.fromkeys([*cfg.universe.tickers, "SOXX"]))
+    )
     paper_ledger = PaperLedger(cfg.path(cfg.paper.ledger_path))
     shadow_ledger = IntradayLedger(cfg.path(cfg.intraday.shadow_ledger_path))
     llm_client = ClaudeCliClient.from_env()

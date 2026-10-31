@@ -268,6 +268,10 @@ intraday:
     timezone: America/Chicago
     cycle_interval_minutes: 30
     time_stop_grace_minutes: 2
+  hedge:   # measured on every closed trade, never traded (intraday/hedge.py)
+    instrument: SOXX
+    beta_window_days: 90
+    beta_min_observations: 30
   options:
     enabled: false   # both gates unresolved -- see docs/alpaca_notes.md
     shadow_pricing: false   # Stage 4's own switch -- proposed, priced, logged, never traded

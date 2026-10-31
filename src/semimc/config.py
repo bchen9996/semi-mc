@@ -485,6 +485,17 @@ class IntradayScheduleConfig(_Base):
     time_stop_grace_minutes: int = Field(2, ge=0)
 
 
+class IntradayHedgeConfig(_Base):
+    """The hedge every closed trade is measured against (`intraday/hedge.py`, added
+    2026-10-31). Measured, never traded: nothing here sends an order."""
+
+    instrument: str = "SOXX"
+    # Calendar days of daily returns behind each beta, about 60 sessions, ending the day
+    # before the entry.
+    beta_window_days: int = Field(90, gt=0)
+    beta_min_observations: int = Field(30, gt=1)
+
+
 class IntradayOptionsConfig(_Base):
     """Both gates (account level, data feed) are unresolved -- see docs/alpaca_notes.md.
     `enabled` stays False through the equities-only rollout stages regardless of either
@@ -693,6 +704,7 @@ class IntradayConfig(_Base):
     budget: IntradayBudgetConfig = Field(default_factory=IntradayBudgetConfig)
     risk: IntradayRiskConfig = Field(default_factory=IntradayRiskConfig)
     schedule: IntradayScheduleConfig = Field(default_factory=IntradayScheduleConfig)
+    hedge: IntradayHedgeConfig = Field(default_factory=IntradayHedgeConfig)
     options: IntradayOptionsConfig = Field(default_factory=IntradayOptionsConfig)
     models: IntradayModelsConfig = Field(default_factory=IntradayModelsConfig)
     research: IntradayResearchConfig = Field(default_factory=IntradayResearchConfig)

@@ -560,7 +560,8 @@ jobs:
           # the job: plain set -e lost two 2026-10-01 cycles' rows outright.
           status=0
           uv run semimc intraday eod-review --config config/paper.yaml || status=$?
-          git add ledger/intraday.sqlite3
+          # The shadow ledger too: this job prices both sleeves' exits (intraday/hedge.py).
+          git add ledger/intraday.sqlite3 ledger/intraday_shadow.sqlite3
           [ -d reports ] && git add reports/ || true
           [ -d proposals ] && git add proposals/ || true
           if git diff --cached --quiet; then

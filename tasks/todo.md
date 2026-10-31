@@ -3127,6 +3127,23 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         checked, and keeps the broker's figures if any close is missing or the read fails.
         **Not repaired:** S3's past snapshots still carry after-hours marks. `paper report`
         at 17:30 ET still reads the 15:30 mark, since the closing mark lands later.
+  - [x] **2026-10-31: every exit is measured against a SOXX hedge (owner's go; step 2 of
+        the plan in `research_log.md`'s 2026-10-31 entry).** No order is ever sent. S4's
+        P&L is mostly the sector's direction, so this is what shows whether the picks
+        have an edge. `intraday/hedge.py` adds a `hedge` block to each reflection:
+        beta (daily returns, 90 calendar days, ending the day before the entry, through
+        `training_window`), notional, P&L from each entry fill to the exit on one-minute
+        bars, and modeled cost. `run_eod_review` prices both ledgers on every run,
+        before reading the reflections, so a failed day is picked up by the next, and
+        its workflow step now commits the shadow ledger. The eod report and readiness
+        report show it in basis points per exit, since the sleeves' sizes differ; the
+        Reviewer gets it as `process_metrics.sector_removed`. Daily beta against
+        30-minute beta, and IEX against SIP, moved the agent by under 5 bps. Dry run on
+        copies of the ledgers, all 62 exits priced: agent -36.8 bps per exit (standard
+        error 13.4), placebo -11.0 (16.7), a gap of -25.8 (21.4), so the agent's picks
+        aren't distinguishable from the placebo's. Exits within a day aren't independent,
+        so those errors are if anything too small. **Not done:** the weekly review doesn't show it
+        yet. The first real run backfills Stage 2 at Monday's eod-review.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so

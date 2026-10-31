@@ -94,14 +94,14 @@ def _summed_fills(
     return qty, notional, earliest, latest
 
 
-def _position_entries(
+def position_entry_fills(
     ledger: IntradayLedger, symbol: str, close_order_ids: Sequence[str]
-) -> tuple[float, float, dt.datetime | None]:
-    """Qty, notional and first fill time of the entries that built the position
-    `close_order_ids` exit: every entry fill since `symbol` was last flat, before the
-    first of those orders' own fills. Fills are walked in fill-time order, signed by side
-    (buy +, sell -); each return to zero starts a new position. All zeros if no entry is
-    found, e.g. a ledger whose history doesn't net out."""
+) -> list[dict[str, Any]]:
+    """The entry fills that built the position `close_order_ids` exit: every entry fill
+    since `symbol` was last flat, before the first of those orders' own fills. Fills are
+    walked in fill-time order, signed by side (buy +, sell -); each return to zero starts a
+    new position. Empty if no entry is found, e.g. a ledger whose history doesn't net
+    out."""
     closing = set(close_order_ids)
     fills = [fill for fill in ledger.fills_with_orders() if fill["symbol"] == symbol]
     fills.sort(key=lambda fill: _aware(dt.datetime.fromisoformat(fill["filled_at"])))
@@ -115,6 +115,15 @@ def _position_entries(
             entries.append(fill)
         if abs(running) < 1e-9:
             entries = []
+    return entries
+
+
+def _position_entries(
+    ledger: IntradayLedger, symbol: str, close_order_ids: Sequence[str]
+) -> tuple[float, float, dt.datetime | None]:
+    """Qty, notional and first fill time of :func:`position_entry_fills`; all zeros if
+    there are none."""
+    entries = position_entry_fills(ledger, symbol, close_order_ids)
     qty = sum(fill["qty"] for fill in entries)
     notional = sum(fill["qty"] * fill["price"] for fill in entries)
     first = min(

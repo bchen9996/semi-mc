@@ -160,6 +160,15 @@ def _workflow(name: str) -> dict:
     return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
 
 
+def test_eod_review_commits_the_placebos_ledger_too():
+    """It prices both sleeves' exits (`intraday/hedge.py`). Without this the placebo's blocks
+    would be lost with the runner, and it would pay to price them again every day."""
+    steps = _workflow("intraday_trading.yml")["jobs"]["eod-review"]["steps"]
+    script = "\n".join(step.get("run", "") for step in steps)
+
+    assert "git add ledger/intraday.sqlite3 ledger/intraday_shadow.sqlite3" in script
+
+
 def _scripts(job: dict) -> str:
     return "\n".join(step.get("run", "") for step in job["steps"])
 

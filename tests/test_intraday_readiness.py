@@ -160,6 +160,43 @@ def test_agent_and_placebo_results_are_reported_side_by_side(tmp_path, pinned_cl
     assert _check(report, "Placebo comparison").passed
 
 
+def _priced_exit(ledger, gross, hedge_pnl, notional=1_000.0):
+    ledger.record_reflection(
+        MON,
+        "NVDA",
+        {
+            "pnl_gross": gross,
+            "pnl_net": gross - 1.0,
+            "qty": 10.0,
+            "avg_entry_price": notional / 10.0,
+            "hedge": {"pnl": hedge_pnl, "cost": 1.0, "notional": notional, "beta": 1.0},
+        },
+    )
+
+
+def test_each_sleeves_exits_are_compared_with_the_sector_removed(tmp_path, pinned_clock):
+    """In basis points, since the sleeves' sizes differ."""
+    ledger = IntradayLedger(tmp_path / "agent.sqlite3")
+    placebo = IntradayLedger(tmp_path / "placebo.sqlite3")
+    _active_day(ledger, MON)
+    _priced_exit(ledger, 10.0, 5.0)  # +150 bps
+    _priced_exit(ledger, 0.0, 5.0)  # +50 bps
+    _priced_exit(placebo, -30.0, 10.0, notional=4_000.0)  # -50 bps
+    ledger.record_reflection(MON, "AMD", {"pnl_gross": 1.0, "pnl_net": 0.5})
+
+    report = stage_readiness(ledger, placebo, IntradayConfig(), tmp_path, MON, MON)
+    text = render_stage_readiness_markdown(report)
+
+    assert report.hedged_agent.exits == 2
+    assert report.hedged_agent.unpriced == 1
+    assert report.hedged_agent.mean_bps == pytest.approx(100.0)
+    assert "## With the sector removed (a SOXX hedge measured, not traded)" in text
+    assert "| agent | 2 | 1 | +100.0 | 50.0 | +16.00 |" in text
+    assert "| placebo | 1 | 0 | -50.0 | - | -22.00 |" in text
+    ledger.close()
+    placebo.close()
+
+
 def test_a_missing_placebo_ledger_is_unavailable_not_zero(tmp_path, pinned_clock):
     ledger = IntradayLedger(tmp_path / "intraday.sqlite3")
     report = stage_readiness(ledger, None, IntradayConfig(), tmp_path, MON, MON)

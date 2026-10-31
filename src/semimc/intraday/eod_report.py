@@ -84,6 +84,8 @@ class EodReport:
     reviewer_note: str | None = None
     # Symbols still held after the close with no multi-day thesis (`run_eod_review`).
     held_after_close: tuple[str, ...] = ()
+    # `hedge.py`'s summaries under "today", "agent" and, with a shadow ledger, "placebo".
+    hedged: dict[str, Any] | None = None
 
 
 def close_to_close_return(
@@ -214,6 +216,7 @@ def build_eod_report(
     playbook_proposal: str | None = None,
     reviewer_note: str | None = None,
     held_after_close: tuple[str, ...] = (),
+    hedged: dict[str, Any] | None = None,
 ) -> EodReport:
     proposals = ledger.proposals_for(as_of)
     reflections = ledger.reflections_for(as_of)
@@ -247,6 +250,7 @@ def build_eod_report(
         playbook_proposal=playbook_proposal,
         reviewer_note=reviewer_note,
         held_after_close=held_after_close,
+        hedged=hedged,
     )
 
 
@@ -256,6 +260,42 @@ def _pct(value: float | None) -> str:
 
 def _money(value: float | None) -> str:
     return f"{value:,.2f}" if value is not None else "not available"
+
+
+def _exits(count: int) -> str:
+    return f"{count} exit{'' if count == 1 else 's'}"
+
+
+def _hedged_since_line(label: str, summary: Any) -> str:
+    """One sleeve since Stage 2 began, in basis points so different sizes compare."""
+    if summary.mean_bps is None:
+        return f"- {label} since Stage 2: nothing priced yet"
+    stderr = f"standard error {summary.stderr_bps:.1f}, " if summary.stderr_bps is not None else ""
+    unpriced = f", {summary.unpriced} not priced yet" if summary.unpriced else ""
+    return (
+        f"- {label} since Stage 2: {summary.mean_bps:+.1f} bps per exit before costs "
+        f"({stderr}{_exits(summary.exits)}{unpriced})"
+    )
+
+
+def _hedged_lines(hedged: dict[str, Any]) -> list[str]:
+    today = hedged["today"]
+    lines = ["## With the sector removed (a SOXX hedge measured, not traded)"]
+    if today.exits:
+        unpriced = f" ({today.unpriced} more not priced yet)" if today.unpriced else ""
+        lines.append(
+            f"- Today, {_exits(today.exits)}{unpriced}: gross {_money(today.gross)}, hedge "
+            f"{_money(today.hedge_pnl)}, hedged gross {_money(today.hedged_gross)}, hedged net "
+            f"{_money(today.hedged_net)}"
+        )
+    elif today.unpriced:
+        lines.append(f"- Today: {_exits(today.unpriced)} not priced yet")
+    else:
+        lines.append("- Today: no exits")
+    lines.append(_hedged_since_line("Agent", hedged["agent"]))
+    if "placebo" in hedged:
+        lines.append(_hedged_since_line("Placebo", hedged["placebo"]))
+    return [*lines, ""]
 
 
 def render_eod_markdown(report: EodReport) -> str:
@@ -317,6 +357,9 @@ def render_eod_markdown(report: EodReport) -> str:
         )
 
     lines.append("")
+    if report.hedged is not None:
+        lines += _hedged_lines(report.hedged)
+
     lines.append("## Benchmarks for the day")
     lines.append(
         f"- SOXX buy-and-hold, prior close to close: {_pct(report.benchmarks.soxx_return)}"

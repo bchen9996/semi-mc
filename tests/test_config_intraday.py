@@ -56,6 +56,8 @@ def test_intraday_section_matches_the_briefs_defaults_table():
     assert cfg.intraday.schedule.timezone == "America/Chicago"
     assert cfg.intraday.schedule.cycle_interval_minutes == 30  # brief: 20; owner, 2026-10-06
     assert cfg.intraday.schedule.time_stop_grace_minutes == 2
+    assert cfg.intraday.hedge.instrument == "SOXX"
+    assert cfg.intraday.hedge.beta_window_days == 90
     assert cfg.intraday.options.enabled is False
     assert cfg.intraday.options.shadow_pricing is False
     assert cfg.intraday.options.premium_at_risk_pct_per_position == pytest.approx(0.005)

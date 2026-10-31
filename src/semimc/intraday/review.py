@@ -16,6 +16,8 @@ genuine per-trade regression against SOXX's return over that trade's own holding
 isn't buildable from data this project keeps today. See its own docstring for the
 day-level approximation used instead -- a labeled interpretation, not a fabricated
 number, the same honesty convention `eod_report.py`'s "pessimistic P&L" already uses.
+`hedge.py` (2026-10-31) measures each trade against SOXX over its own holding period, with
+a beta; this split stays as the quick day-level read.
 
 :func:`weekly_summary`/:func:`render_weekly_review_markdown` (Phase 10) extend the same
 "mechanical here, judgment elsewhere" split one level further: `weekly_review` has no

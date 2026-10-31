@@ -63,6 +63,7 @@ from typing import Any
 import pandas as pd
 
 from ..config import IntradayConfig
+from .hedge import HedgedSummary, summarize_hedged
 from .ledger import IntradayLedger
 from .reflect import round_trip_count
 
@@ -166,6 +167,9 @@ class StageReadiness:
     clean_streak_accepted: int = 0
     # Empty unless `readiness.stage_2_started` is set and within the window.
     stage_3_checks: list[EvidenceCheck] = field(default_factory=list)
+    # Each sleeve's exits in the window with the sector taken out (`hedge.py`).
+    hedged_agent: HedgedSummary | None = None
+    hedged_placebo: HedgedSummary | None = None
 
 
 def _sleeve_result(ledger: IntradayLedger, reflections: list[dict[str, Any]]) -> SleeveResult:
@@ -375,11 +379,13 @@ def stage_readiness(
     ]
     agent = _sleeve_result(ledger, agent_reflections)
     placebo = None
+    hedged_placebo = None
     if placebo_ledger is not None:
-        placebo = _sleeve_result(
-            placebo_ledger,
-            [r for r in placebo_ledger.all_reflections() if _in_window(r["as_of"], since, as_of)],
-        )
+        placebo_reflections = [
+            r for r in placebo_ledger.all_reflections() if _in_window(r["as_of"], since, as_of)
+        ]
+        placebo = _sleeve_result(placebo_ledger, placebo_reflections)
+        hedged_placebo = summarize_hedged(placebo_reflections)
 
     reasons: Counter[str] = Counter()
     incident_counts: Counter[tuple[str, str]] = Counter()
@@ -404,6 +410,8 @@ def stage_readiness(
         spend_cap_usd=config.budget.max_cost_usd_per_day,
         clean_streak=[d.date for d in streak],
         clean_streak_accepted=sum(d.proposals_accepted for d in streak),
+        hedged_agent=summarize_hedged(agent_reflections),
+        hedged_placebo=hedged_placebo,
     )
     report.checks.extend(_evidence_checks(report, config))
     report.stage_3_checks.extend(_stage_3_checks(report, ledger, config))
@@ -611,6 +619,16 @@ def _sleeve_line(label: str, result: SleeveResult) -> str:
     )
 
 
+def _hedged_line(label: str, summary: HedgedSummary) -> str:
+    if summary.mean_bps is None:
+        return f"| {label} | {summary.unpriced} not priced yet | | | | |"
+    stderr = f"{summary.stderr_bps:.1f}" if summary.stderr_bps is not None else "-"
+    return (
+        f"| {label} | {summary.exits} | {summary.unpriced} | {summary.mean_bps:+.1f} | {stderr} | "
+        f"{summary.hedged_net:+,.2f} |"
+    )
+
+
 def render_stage_readiness_markdown(report: StageReadiness) -> str:
     lines = [
         f"# S4 stage readiness: {report.since.date()} to {report.as_of.date()}",
@@ -665,6 +683,22 @@ def render_stage_readiness_markdown(report: StageReadiness) -> str:
     lines.append(
         "A few days of P&L is noise (the brief's first principle); read this next to the "
         "closed-trade count, not on its own."
+    )
+
+    lines += ["", "## With the sector removed (a SOXX hedge measured, not traded)", ""]
+    lines.append("| sleeve | exits | not priced | bps per exit, gross | std error | net USD |")
+    lines.append("|---|---|---|---|---|---|")
+    if report.hedged_agent is not None:
+        lines.append(_hedged_line("agent", report.hedged_agent))
+    if report.hedged_placebo is not None:
+        lines.append(_hedged_line("placebo", report.hedged_placebo))
+    else:
+        lines.append("| placebo | not available | | | | |")
+    lines.append("")
+    lines.append(
+        "This is what's left of each exit once a beta-sized SOXX position is set against it. "
+        "Compare the sleeves in basis points, since their sizes differ. A mean within about "
+        "two standard errors of zero, or of the other sleeve, is not evidence of an edge."
     )
 
     lines += ["", "## Day by day", ""]

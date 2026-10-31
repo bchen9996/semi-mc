@@ -92,6 +92,9 @@ Regenerate test fixtures with `uv run python tests/fixtures/make_fixtures.py`.
   (`forecasting/pipeline.py`) is the only place a Phase 4B panel is assembled in a loop; it
   calls `build_regression_row`, which calls `signal_panel`, which is the only caller of the
   four ticker-level signal builders. One choke point per data path, same as `training_window`.
+- **The sector hedge is measured, not traded.** `intraday/hedge.py` adds a `hedge` block
+  to each reflection from `run_eod_review`; nothing sends a SOXX order. Compare sleeves in
+  basis points (`HedgedSummary.mean_bps`), since their sizes differ.
 - **The dashboard drives the CLI; it does not reimplement it.** `dashboard/web/app.js`
   builds a `semimc <command> ...` argument list from form input, the same way a terminal
   user would, and POSTs it to `dashboard/server.py` (stdlib `http.server`), which hands it

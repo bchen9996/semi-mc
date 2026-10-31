@@ -57,6 +57,7 @@ from .context import (
     build_reviewer_context,
     build_trader_context,
 )
+from .hedge import HedgedSummary, record_trade_hedges, reflections_since, summarize_hedged
 from .ledger import IntradayLedger
 from .llm import ClaudeCliClient, ClaudeCliError, DailyBudgetExhausted, invoke_role
 from .monitor import check_invalidation_and_time_stops
@@ -2096,6 +2097,10 @@ def run_eod_review(
     `held_after_close`, so the job fails and the failure email goes out once the report is
     committed. On 2026-10-29 MRVL's carry exit expired unfilled; reconciliation passed,
     since the ledger agreed the shares were still held, and the report said nothing.
+
+    Every exit since Stage 2 began is priced against a SOXX hedge (`hedge.py`, 2026-10-31),
+    on every run, before the reflections are read: measured, not traded. `shadow_ledger`
+    too, which is why this job's workflow step commits it.
     """
     held_after_close: tuple[str, ...] = ()
     if broker is not None:
@@ -2117,6 +2122,15 @@ def run_eod_review(
                 f"held after the close with no multi-day thesis: {', '.join(held_after_close)} "
                 "-- needs attention before the open",
             )
+    hedging_from = config.intraday.readiness.stage_2_started
+    try:
+        for book in (ledger, shadow_ledger):
+            if book is not None:
+                record_trade_hedges(
+                    book, market_data, market_data_pit, config.intraday, hedging_from
+                )
+    except Exception as exc:  # noqa: BLE001 - a measurement must never block the report
+        ledger.record_incident("warning", f"trade hedges unavailable: {exc}")
     proposals_today = ledger.proposals_for(as_of)
     reflections_today = ledger.reflections_for(as_of)
     nothing_to_grade = not proposals_today and not reflections_today
@@ -2227,6 +2241,14 @@ def run_eod_review(
     scorecard = process_scorecard(ledger, intraday, as_of)
     # The session's move, not the whole day's: S4 holds nothing overnight (review.py).
     attribution = day_attribution(reflections_today, soxx_open_to_close)
+    hedged: dict[str, HedgedSummary] = {
+        "today": summarize_hedged(reflections_today),
+        "agent": summarize_hedged(reflections_since(ledger.all_reflections(), hedging_from)),
+    }
+    if shadow_ledger is not None:
+        hedged["placebo"] = summarize_hedged(
+            reflections_since(shadow_ledger.all_reflections(), hedging_from)
+        )
     out_path = config.path(intraday.reports_dir) / str(pd.Timestamp(as_of).date()) / "eod.md"
 
     def write_mechanical_report(note: str) -> str:
@@ -2240,6 +2262,7 @@ def run_eod_review(
             attribution=attribution,
             reviewer_note=note,
             held_after_close=held_after_close,
+            hedged=hedged,
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(render_eod_markdown(report), encoding="utf-8")
@@ -2302,7 +2325,11 @@ def run_eod_review(
         "placebo_pnl": placebo_pnl,
         "do_nothing_return": do_nothing,
     }
-    process_metrics = {**scorecard, "attribution": attribution}
+    process_metrics = {
+        **scorecard,
+        "attribution": attribution,
+        "sector_removed": {key: asdict(value) for key, value in hedged.items()},
+    }
 
     try:
         context = build_reviewer_context(
@@ -2430,6 +2457,7 @@ def run_eod_review(
         closing_market_report=closing_market_report,
         playbook_proposal=playbook_proposal,
         held_after_close=held_after_close,
+        hedged=hedged,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(render_eod_markdown(report), encoding="utf-8")

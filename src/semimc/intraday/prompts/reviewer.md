@@ -23,7 +23,10 @@ against it.
 
 `process_metrics` is already computed for you -- rejection rate and reasons, budget
 usage against the configured caps, invalidation adherence, a running confidence-
-calibration curve, and a day-level sector/stock-specific/options attribution split. This
+calibration curve, a day-level sector/stock-specific/options attribution split, and
+`sector_removed`, each exit's result had it carried a SOXX hedge. That hedge is measured,
+never traded, and `mean_bps` is the only figure comparable between the agent and the
+placebo, whose sizes differ. This
 is deliberate: it's plain arithmetic over the ledger, not judgment, so the code computes
 it once and hands it to you already correct. **Narrate and grade these numbers -- do not
 recompute them, and do not report different ones.** If a number looks wrong, say so in

@@ -15,6 +15,7 @@ import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 from fixtures.injection_corpus import INJECTION_CORPUS
@@ -2546,6 +2547,149 @@ def test_run_eod_review_falls_back_to_the_cached_close_if_the_bars_fail(config, 
     for figure in _soxx_figures(market):
         assert figure in text
     assert any("SOXX session close unavailable" in i["message"] for i in ledger.incidents())
+    ledger.close()
+
+
+def _with_stage_2(cfg):
+    readiness = cfg.intraday.readiness.model_copy(update={"stage_2_started": AS_OF.date()})
+    return cfg.model_copy(
+        update={"intraday": cfg.intraday.model_copy(update={"readiness": readiness})}
+    )
+
+
+class _BetaMarket:
+    """The price cache as `hedge.py` reads it: NVDA moves 1.5 times SOXX, every day."""
+
+    ohlc: dict = {}
+
+    def training_window(self, tickers, as_of, window_days=None, min_observations=None):
+        soxx = np.tile([0.01, -0.02, 0.015, -0.005, 0.02, -0.01], 10)
+        return pd.DataFrame({tickers[0]: 1.5 * soxx, tickers[1]: soxx})
+
+
+def _soxx_minutes(*prices_at):
+    aware = [(moment.replace(tzinfo=dt.UTC), price) for moment, price in prices_at]
+    return _FakeMarketData(bars_by_symbol={"SOXX": [_bar_at(at, price) for at, price in aware]})
+
+
+def test_run_eod_review_prices_both_books_and_reports_them_in_basis_points(config, tmp_path):
+    """Measured, never traded: no order goes out for any of this."""
+    cfg = _with_stage_2(_eod_review_config(config, tmp_path))
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday", price=190.0)
+    later = NOW + dt.timedelta(hours=1)
+    broker.now = later
+    exit_quote = {"NVDA": _quote(190.0, at=later)}
+    run_carry(cfg, broker, ledger, _FakeMarketData(quotes=exit_quote), AS_OF, later)
+    orders_before = len(ledger.open_orders_for("SOXX"))
+    shadow = IntradayLedger(tmp_path / "shadow.sqlite3")
+    shadow_broker = FakeBroker(now=NOW)
+    _seed_open_position(shadow_broker, shadow, cfg, horizon="intraday", price=190.0)
+    shadow_broker.now = later
+    run_carry(cfg, shadow_broker, shadow, _FakeMarketData(quotes=exit_quote), AS_OF, later)
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+    market_data = _soxx_minutes((NOW, 200.0), (later, 190.0))
+
+    result = run_eod_review(
+        cfg,
+        market_data,
+        _FakeNewsClient(),
+        _BetaMarket(),
+        paper_ledger,
+        shadow,
+        ledger,
+        _sequenced_llm_client(_result_json(structured_output={"not": "the right shape"})),
+        AS_OF,
+        "eod_review",
+        later,
+        broker=broker,
+    )
+
+    [row] = ledger.reflections_for(AS_OF)
+    [shadow_row] = shadow.reflections_for(AS_OF)
+    notional = row["content"]["qty"] * row["content"]["avg_entry_price"]
+    # Long NVDA at beta 1.5, flat itself, and SOXX fell 5%: the short hedge made 750 bps.
+    expected_bps = 10_000 * (row["content"]["pnl_gross"] + 1.5 * notional * 0.05) / notional
+    assert row["content"]["hedge"]["pnl"] == pytest.approx(1.5 * notional * 0.05)
+    assert "hedge" in shadow_row["content"]
+    assert len(ledger.open_orders_for("SOXX")) == orders_before == 0
+    text = Path(result.report_path).read_text(encoding="utf-8")
+    assert "## With the sector removed (a SOXX hedge measured, not traded)" in text
+    assert "- Today, 1 exit: gross" in text
+    assert f"- Agent since Stage 2: {expected_bps:+.1f} bps per exit before costs (1 exit)" in text
+    assert "- Placebo since Stage 2:" in text
+    paper_ledger.close()
+    shadow.close()
+    ledger.close()
+
+
+def test_the_reviewers_grades_keep_the_hedge_block(config, tmp_path):
+    """The Reviewer's update rewrites the reflection, so the block must be there first."""
+    cfg = _with_stage_2(_eod_review_config(config, tmp_path))
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday", price=190.0)
+    later = NOW + dt.timedelta(hours=1)
+    run_carry(
+        cfg, broker, ledger, _FakeMarketData(quotes={"NVDA": _quote(190.0, at=later)}), AS_OF, later
+    )
+    [row] = ledger.reflections_for(AS_OF)
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+
+    run_eod_review(
+        cfg,
+        _soxx_minutes((NOW, 200.0), (later, 190.0)),
+        _FakeNewsClient(),
+        _BetaMarket(),
+        paper_ledger,
+        None,
+        ledger,
+        _sequenced_llm_client(_reviewer_response(row["id"])),
+        AS_OF,
+        "eod_review",
+        later,
+        broker=broker,
+    )
+
+    [graded] = ledger.reflections_for(AS_OF)
+    assert graded["content"]["category"] is not None
+    assert "hedge" in graded["content"]
+    paper_ledger.close()
+    ledger.close()
+
+
+def test_run_eod_review_writes_its_report_if_the_hedges_fail(config, tmp_path):
+    cfg = _with_stage_2(_eod_review_config(config, tmp_path))
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday", price=190.0)
+    later = NOW + dt.timedelta(hours=1)
+    run_carry(
+        cfg, broker, ledger, _FakeMarketData(quotes={"NVDA": _quote(190.0, at=later)}), AS_OF, later
+    )
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+
+    result = run_eod_review(
+        cfg,
+        _FakeMarketData(bars_raise=True),
+        _FakeNewsClient(),
+        _BetaMarket(),
+        paper_ledger,
+        None,
+        ledger,
+        _sequenced_llm_client(_result_json(structured_output={"not": "the right shape"})),
+        AS_OF,
+        "eod_review",
+        later,
+        broker=broker,
+    )
+
+    assert any("trade hedges unavailable" in i["message"] for i in ledger.incidents())
+    text = Path(result.report_path).read_text(encoding="utf-8")
+    assert "- Today: 1 exit not priced yet" in text
+    assert "- Agent since Stage 2: nothing priced yet" in text
+    paper_ledger.close()
     ledger.close()
 
 
