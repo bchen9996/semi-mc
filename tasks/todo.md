@@ -3096,7 +3096,37 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         with no multi-day thesis as an error incident (so the day isn't clean), puts it
         at the top of the report, and fails the job after the report and ledger are
         committed. A second failure email from GitHub's late copy is expected if the
-        position is still held. The placebo keeps its limit.
+        position is still held. The placebo keeps its limit. The owner also added a
+        second cron-job.org `carry` at 14:50 CT: the 14:45 backstop `external_scheduler.md`
+        described had never reached GitHub (one carry a day, 10-22 to 10-30). First run
+        due 2026-11-02.
+  - [x] **2026-10-31: four fixes from the 10-30 review (owner's go).** (1) **SOXX's close.**
+        10-30's report read -10.19% for a -8.24% day: the job's own fetch, minutes after
+        the bell, cached a bar still holding about 461.50 against the official 471.51.
+        It was the only wrong day since 10-20, and the cause is likely, not proven.
+        `run_eod_review` now takes today's close from the session's last 5-minute bar
+        (`session_closes`, within 0.09% of official on all 24 sessions checked), keeps the
+        cached open and prior close, and falls back to the cached close if the bars fail.
+        A gap over 0.25% is a warning incident, so the next one proves the cause. 10-30's
+        report is corrected with a dated note: sector +229.42 and stock-specific +280.14,
+        not +520.24 and -10.67, so the Reviewer's "no edge from picking names" was wrong.
+        (2) **Time stops.** 12 of Stage 2's 15 time-stop exits ran 29 to 30 minutes late,
+        because the 30-minute cycles put each due time just after a check. Within
+        `schedule.time_stop_grace_minutes` (2) of due now counts as due; the placebo too.
+        (3) **INTC's add.** The add at 11:01:15 CT on 10-30 got its time-stop exit's id,
+        Alpaca refused the duplicate, and the adapter returned the exit as if it were the
+        add, so it stayed accepted and spent INTC's last round trip with nothing sent.
+        Exits now have their own ids (`intraday_exit_order_id`); an order that comes back
+        with a different side or symbol is an error and not sent; a name closed this
+        cycle is hidden from the Trader, whose read still listed it, and an entry in a
+        name closing or failing to close this cycle is rejected. 1 of 39 accepted entries.
+        (4) **S3's marks.** GitHub's late mark, around 19:30 ET, wrote the day's one
+        snapshot from live, after-hours equity: 10-29 read 94,410 against an official
+        96,558. With the market closed, `paper mark` now values the snapshot at the
+        session's closes, which reproduced Alpaca's closing equity to within $14 on 8 days
+        checked, and keeps the broker's figures if any close is missing or the read fails.
+        **Not repaired:** S3's past snapshots still carry after-hours marks. `paper report`
+        at 17:30 ET still reads the 15:30 mark, since the closing mark lands later.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so

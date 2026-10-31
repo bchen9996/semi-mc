@@ -8,6 +8,11 @@ ledger still thinks is open, prune orders that have sat unfilled past the config
 reprice interval (never resubmits -- the next ``execute`` run rebuilds the remaining gap at
 a fresh price), and reconcile the ledger's own view of positions against the broker's
 actual ones. A fresh snapshot is always recorded last, regardless of what else happened.
+
+Once the session is over that snapshot is valued at its closing prices, not at the broker's
+live equity (2026-10-31): each day keeps one snapshot, the last mark's, and GitHub's late
+copy of this job lands around 19:30 ET, so the day's equity was an after-hours price.
+2026-10-29 read 94,410 against an official close of 96,558.
 """
 
 from __future__ import annotations
@@ -81,6 +86,32 @@ def _record_new_fill(
     return True
 
 
+def _at_closing_prices(
+    sleeve: str,
+    account,  # noqa: ANN001 -- execution.broker.Account
+    positions: dict,
+    closes: dict[str, float] | None,
+    ledger: Ledger,
+) -> tuple[float, dict]:
+    """Equity and positions for the snapshot: cash plus each position at its close, which
+    reproduced Alpaca's closing equity to within $14 on all 8 days checked to 2026-10-29.
+    The broker's own figures without `closes`. A symbol with no close keeps them too, with
+    a warning: half the book at the close and half after hours would be neither."""
+    if not closes:
+        return account.equity, positions
+    missing = sorted(set(positions) - set(closes))
+    if missing:
+        ledger.record_incident(
+            "warning", f"no closing price for {', '.join(missing)}; marked at the broker's", sleeve
+        )
+        return account.equity, positions
+    valued = {}
+    for symbol, position in positions.items():
+        qty = -abs(position.qty) if position.side == "short" else abs(position.qty)
+        valued[symbol] = _CarriedPosition(qty=qty, market_value=qty * closes[symbol])
+    return account.cash + sum(p.market_value for p in valued.values()), valued
+
+
 def run_mark(
     sleeve: str,
     config,  # noqa: ANN001
@@ -88,7 +119,10 @@ def run_mark(
     ledger: Ledger,
     as_of: pd.Timestamp,
     now: dt.datetime,
+    closes: dict[str, float] | None = None,
 ) -> MarkResult:
+    """`closes` is the session's closing prices once it's over, else `None`
+    (`cli.py::_paper_closes`)."""
     as_of = pd.Timestamp(as_of)
     result = MarkResult()
     reprice_after = dt.timedelta(minutes=config.paper.execution.reprice_interval_minutes)
@@ -190,7 +224,8 @@ def run_mark(
     if is_sole_trader:
         account = broker.get_account()
         positions = {p.symbol: p for p in broker.list_positions()}
-        ledger.record_snapshot(sleeve, as_of, account.equity, account.cash, positions)
+        equity, valued = _at_closing_prices(sleeve, account, positions, closes, ledger)
+        ledger.record_snapshot(sleeve, as_of, equity, account.cash, valued)
     else:
         # Some other sleeve has also traded on this shared account (s0 while s3 trades,
         # `docs/go_live_checklist.md` item 6) -- broker.get_account()/list_positions() would

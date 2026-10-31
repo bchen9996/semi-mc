@@ -86,12 +86,15 @@ class EodReport:
     held_after_close: tuple[str, ...] = ()
 
 
-def close_to_close_return(market_data_pit: Any, ticker: str, as_of: pd.Timestamp) -> float | None:
+def close_to_close_return(
+    market_data_pit: Any, ticker: str, as_of: pd.Timestamp, close: float | None = None
+) -> float | None:
     """`ticker`'s return from the last close before `as_of` to `as_of`'s close, both from
     the price cache's daily bars, like :func:`open_to_close_return` (added 2026-10-20).
     It used to run to a live quote at 15:15 CT, after the bell: on 2026-10-20 IEX quoted
     SOXX at 501.60/502.15 after hours against a 500.01 close, and the benchmark read
-    -0.01% for a -0.38% day. `None` without the bars."""
+    -0.01% for a -0.38% day. `close`, when given, stands in for the cache's close on
+    `as_of` (`run_eod_review`, 2026-10-31). `None` without the bars."""
     frames = market_data_pit.ohlc
     if not frames or "close" not in frames or ticker not in frames["close"].columns:
         return None
@@ -99,24 +102,27 @@ def close_to_close_return(market_data_pit: Any, ticker: str, as_of: pd.Timestamp
     day = pd.Timestamp(as_of).normalize()
     today = closes.loc[closes.index == day]
     prior = closes.loc[closes.index < day]
-    if today.empty or prior.empty or prior.iloc[-1] <= 0:
+    final = close if close is not None else (today.iloc[-1] if not today.empty else None)
+    if final is None or prior.empty or prior.iloc[-1] <= 0:
         return None
-    return float(today.iloc[-1] / prior.iloc[-1] - 1.0)
+    return float(final / prior.iloc[-1] - 1.0)
 
 
-def open_to_close_return(market_data_pit: Any, ticker: str, as_of: pd.Timestamp) -> float | None:
+def open_to_close_return(
+    market_data_pit: Any, ticker: str, as_of: pd.Timestamp, close: float | None = None
+) -> float | None:
     """`ticker`'s return from `as_of`'s open to its close, from the price cache's daily
     bar (added 2026-10-19). `run_eod_review`'s own `semimc fetch` runs after the bell, so
     the bar is today's. Adjusted open and close share one adjustment factor, so their
-    ratio is the day's own. `None` without OHLC in the cache, or with no bar dated
-    `as_of`."""
+    ratio is the day's own. `close` as in :func:`close_to_close_return`. `None` without
+    OHLC in the cache, or with no bar dated `as_of`."""
     frames = market_data_pit.ohlc
     if not frames or "open" not in frames or "close" not in frames:
         return None
     day = pd.Timestamp(as_of).normalize()
     try:
         opened = frames["open"].loc[day, ticker]
-        closed = frames["close"].loc[day, ticker]
+        closed = close if close is not None else frames["close"].loc[day, ticker]
     except KeyError:
         return None
     if pd.isna(opened) or pd.isna(closed) or opened <= 0:

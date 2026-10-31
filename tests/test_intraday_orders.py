@@ -205,6 +205,56 @@ def test_submit_records_an_incident_and_returns_none_on_rate_limit(tmp_path):
     ledger.close()
 
 
+def test_an_exit_never_shares_an_id_with_an_entry_in_the_same_cycle():
+    """2026-10-30: INTC's time-stop exit and the Trader's add were one cycle, one symbol
+    and attempt 0, so both were `s4-20261030-cycle_1600-INTC-0`."""
+    config = IntradayConfig()
+    position = Position(
+        symbol="NVDA", qty=26.0, side="long", market_value=4940.0, avg_entry_price=190.0
+    )
+    entry = build_entry_order(_proposal(), AS_OF, CYCLE, 190.0, 100_000.0, config)
+    close = build_close_order(position, AS_OF, CYCLE, price=190.0, config=config)
+    trim = build_trim_order(
+        _proposal(action="trim", size_pct=0.02), position, AS_OF, CYCLE, 190.0, 100_000.0, config
+    )
+
+    assert entry.client_order_id == intraday_client_order_id(AS_OF, CYCLE, "NVDA")
+    assert close.client_order_id not in (entry.client_order_id, None)
+    assert trim.client_order_id not in (entry.client_order_id, None)
+
+
+def test_an_id_held_by_a_different_order_is_not_reported_as_sent(tmp_path):
+    """A broker answers a reused id with the order already holding it. That isn't this
+    request, and treating it as success is how INTC's add vanished on 2026-10-30."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(partial_fill_fraction=0.0)
+    broker.submit_order(_order(side="sell", client_order_id="same-id", order_class="simple"))
+
+    result = submit_order_with_fault_isolation(
+        _order(side="buy", client_order_id="same-id"), broker, ledger, NOW
+    )
+
+    assert result is None
+    assert ledger.get_order("same-id") is None
+    assert any(
+        i["severity"] == "error" and "already belongs" in i["message"] for i in ledger.incidents()
+    )
+    ledger.close()
+
+
+def test_a_rerun_answered_with_its_own_order_is_still_a_success(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(partial_fill_fraction=0.0)
+    request = _order(side="buy", client_order_id="same-id")
+
+    first = submit_order_with_fault_isolation(request, broker, ledger, NOW)
+    second = submit_order_with_fault_isolation(request, broker, ledger, NOW)
+
+    assert second is not None
+    assert second.id == first.id
+    ledger.close()
+
+
 def test_submit_records_an_incident_and_returns_none_on_a_wash_trade(tmp_path):
     ledger = _ledger(tmp_path)
     broker = FakeBroker(wash_trade_symbols={"NVDA"}, partial_fill_fraction=0.0)

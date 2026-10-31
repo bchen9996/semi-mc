@@ -105,6 +105,7 @@ uses the same request settings:
 | `open-batch` | 08:32 | `32 8 * * 1-5` | 2 min after the open, so pretrade sees the market open; runs once per day |
 | `cycle` | every 30 min, 09:00-14:30 | `*/30 9-14 * * 1-5` | the open-batch covers 08:30; every 20 min until 2026-10-06 |
 | `carry` | 14:45 | `45 14 * * 1-5` | |
+| `carry` (backstop) | 14:50 | `50 14 * * 1-5` | a second job with the same body: retries a failed exit, otherwise does nothing |
 | `eod-review` | 15:15 | `15 15 * * 1-5` | one Reviewer call per day |
 | `weekly-review` | Fri 15:45 | `45 15 * * 5` | |
 
@@ -129,12 +130,15 @@ last `cycle` whose successor would land less than 15 minutes before the close (t
 early_close_before_next_cycle`, from Alpaca's calendar). That handover is the only thing
 that closes positions before an early close's bell. The owner had added a `carry` at
 11:45 CT as a backstop for 2026-11-27 and 2026-12-24, but it fired every day, and on
-2026-10-22 the owner moved it to 14:45 CT. So `carry` is now dispatched twice at 14:45
-CT: the two runs queue one after the other in the ledger-write concurrency group, and
-the second finds the book already flat and does nothing, or acts if the first never
-started. If the 11:30 cycle doesn't run on an early-close day, the 14:45 carry finds
-the market closed and records an error incident naming what is still held, and the next
-session's monitor closes it.
+2026-10-22 the owner moved it to 14:45 CT. That dispatch never showed up: GitHub's run
+history has one carry a day from 10-22 to 10-30, so nothing retried MRVL's expired exit
+on 10-29. Since 2026-10-31 the owner's second job runs at 14:50 CT. The 14:45 run is
+done in about 30 seconds, so it doesn't wait in the ledger-write concurrency group. It
+finds the book flat and does nothing, or retries an exit that failed, or acts if the
+14:45 run never started, and it is still outside the brief's last five minutes. If the
+11:30 cycle doesn't run on an early-close day, the 14:45 carry finds the market closed
+and records an error incident naming what is still held, and the next session's monitor
+closes it.
 
 **A `carry` dispatched more than 60 minutes before the close does nothing** (since
 2026-10-19; `run_carry`'s `near_close_only`): a warning incident, no orders. On
@@ -146,12 +150,12 @@ runs its own carry in the cycle where the real one hands over, and declines afte
 when the real cycle finds the market closed.
 
 **Two jobs fail on purpose over a position that should have closed** (since 2026-10-31).
-Carry closes at market on the real account, and fails if an exit doesn't go out, which
-leaves about 15 minutes to act by hand. `eod-review` fails if a position with no
-multi-day thesis is still held after the close. Both commit their ledger and report
-first. The failure email for either one means an intraday position may be going overnight
-without a stop, so check it before the next open. GitHub's late `eod-review` copy fails
-again if the position is still there.
+Carry closes at market on the real account, and fails if an exit doesn't go out. The
+14:50 run then retries it, and if that fails too there are about 10 minutes left to act
+by hand. `eod-review` fails if a position with no multi-day thesis is still held after
+the close. Both commit their ledger and report first. A failure email from `eod-review`
+means an intraday position is going overnight without a stop, so check it before the next
+open. GitHub's late `eod-review` copy fails again if the position is still there.
 
 ## Step 4 -- verify on the first trading day
 

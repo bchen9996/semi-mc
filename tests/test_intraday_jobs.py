@@ -2072,7 +2072,7 @@ def test_run_carry_keeps_closing_for_the_cap_past_a_rejected_exit(config, tmp_pa
 
     class _RejectsAmdExit(FakeBroker):
         def submit_order(self, request):
-            if request.client_order_id.endswith("-carry-AMD-0"):
+            if request.client_order_id.endswith("-carry-AMD-0-exit"):
                 raise BrokerError("simulated rejection")
             return super().submit_order(request)
 
@@ -2465,6 +2465,87 @@ def test_run_eod_review_measures_soxx_from_the_prior_close_and_from_the_open(
     assert f"prior close to close: {today_close / prior_close - 1:+.2%}" in text
     assert f"can trade): {today_close / today_open - 1:+.2%}" in text
     paper_ledger.close()
+    ledger.close()
+
+
+def _soxx_review(cfg, ledger, market, market_data):
+    paper_ledger = PaperLedger(cfg.path(cfg.intraday.reports_dir).parent / "paper.sqlite3")
+    today = market.last_date
+    _calls, client = _recording_llm_client(_result_json())
+    result = run_eod_review(
+        cfg,
+        market_data,
+        _FakeNewsClient(),
+        market,
+        paper_ledger,
+        None,
+        ledger,
+        client,
+        today,
+        "eod_review",
+        (today + pd.Timedelta(hours=20, minutes=15)).to_pydatetime(),
+    )
+    paper_ledger.close()
+    return Path(result.report_path).read_text(encoding="utf-8")
+
+
+def _soxx_figures(market, close: float | None = None) -> tuple[str, str]:
+    today = market.last_date
+    soxx = market.prices["SOXX"]
+    prior_close = float(soxx.loc[soxx.index < today].dropna().iloc[-1])
+    today_close = close if close is not None else float(market.ohlc["close"].loc[today, "SOXX"])
+    today_open = float(market.ohlc["open"].loc[today, "SOXX"])
+    return (
+        f"prior close to close: {today_close / prior_close - 1:+.2%}",
+        f"can trade): {today_close / today_open - 1:+.2%}",
+    )
+
+
+def test_run_eod_review_takes_soxx_s_close_from_the_session_not_the_cached_bar(
+    config, tmp_path, market
+):
+    """2026-10-30: the job's fetch, minutes after the bell, cached a bar still holding a
+    mid-afternoon price. SOXX read -10.19% for a -8.24% day and the attribution moved $290
+    to the sector."""
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    today = market.last_date
+    session_close = float(market.ohlc["close"].loc[today, "SOXX"]) * 1.02
+    last_bar = dt.datetime(today.year, today.month, today.day, 19, 55, tzinfo=dt.UTC)
+    market_data = _FakeMarketData(bars_by_symbol={"SOXX": [_bar_at(last_bar, session_close)]})
+
+    text = _soxx_review(cfg, ledger, market, market_data)
+
+    for figure in _soxx_figures(market, session_close):
+        assert figure in text
+    [warning] = [i for i in ledger.incidents() if "using the session close" in i["message"]]
+    assert warning["severity"] == "warning"
+    ledger.close()
+
+
+def test_run_eod_review_does_not_warn_when_the_session_and_the_bar_agree(config, tmp_path, market):
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    today = market.last_date
+    session_close = float(market.ohlc["close"].loc[today, "SOXX"]) * 1.001
+    last_bar = dt.datetime(today.year, today.month, today.day, 19, 55, tzinfo=dt.UTC)
+    market_data = _FakeMarketData(bars_by_symbol={"SOXX": [_bar_at(last_bar, session_close)]})
+
+    _soxx_review(cfg, ledger, market, market_data)
+
+    assert not any("using the session close" in i["message"] for i in ledger.incidents())
+    ledger.close()
+
+
+def test_run_eod_review_falls_back_to_the_cached_close_if_the_bars_fail(config, tmp_path, market):
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+
+    text = _soxx_review(cfg, ledger, market, _FakeMarketData(bars_raise=True))
+
+    for figure in _soxx_figures(market):
+        assert figure in text
+    assert any("SOXX session close unavailable" in i["message"] for i in ledger.incidents())
     ledger.close()
 
 
@@ -3774,6 +3855,36 @@ def test_a_tranched_entry_whose_second_piece_is_canceled_still_counts(config, tm
     assert len(third.orders_submitted) == 1  # the second piece again, at today's price
     assert ledger.get_order(third.orders_submitted[0])["tranche_index"] == 2
     assert [row["symbol"] for row in ledger.counted_proposals_for(AS_OF)] == ["NVDA"]
+    ledger.close()
+
+
+# -- a name closed this cycle (2026-10-31) ---------------------------------------------------
+
+
+def test_a_name_closed_this_cycle_is_hidden_from_the_trader_and_cant_be_added_to(config, tmp_path):
+    """2026-10-30: INTC's time stop closed it, the fill took a few seconds, and the Trader
+    still saw it as held. Its add 29 seconds later reused the exit's id, so nothing was
+    sent, and the accepted add spent INTC's last round trip."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday", time_stop_minutes=60)
+    broker.partial_fill_fraction = 0.0  # the close is sent, and its fill hasn't landed
+    later = NOW + dt.timedelta(minutes=61)
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0, at=later)})
+    add = {**_entry("NVDA", 190.0, 187.0), "action": "add"}
+    calls, client = _recording_llm_client(_result_json(structured_output={"proposals": [add]}))
+
+    result = run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, later)
+
+    assert [p.symbol for p in broker.list_positions()] == ["NVDA"]  # still listed
+    assert json.loads(calls[0]["stdin"])["sections"]["positions"] == {}
+    assert result.proposals_rejected == 1
+    [row] = [r for r in ledger.proposals_for(AS_OF) if r["action"] == "add"]
+    assert row["status"] == "rejected"
+    assert "being closed this cycle" in row["reason"]
+    assert ledger.open_orders_for("NVDA", leg="entry") == []
     ledger.close()
 
 

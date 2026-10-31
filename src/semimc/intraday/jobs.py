@@ -1036,6 +1036,10 @@ _NO_MARKET_ORDER_WINDOW = pd.Timedelta(minutes=5)
 # A position with one of these horizons on its opening proposal has a written multi-day
 # thesis, so it may stay open overnight. Anything else closes at carry.
 _CARRIED_HORIZONS = ("multi-day", "multi-week")
+# How far the cached daily bar's SOXX return may sit from the session close's before the
+# report says so. The session close was within 0.09% of the official one on all 24 sessions
+# checked to 2026-10-30; the cached bar's return that day was off by 1.95 points.
+_SOXX_BAR_TOLERANCE = 0.0025
 
 
 def _todays_close_ny(broker: Broker, now: dt.datetime) -> pd.Timestamp | None:
@@ -1470,6 +1474,14 @@ def run_cycle(
     _cancel_orphaned_stops(broker, ledger, positions, now)
     _protect_unguarded_positions(broker, ledger, positions, prices, as_of, cycle, now)
     positions_notional = {p.symbol: _signed(p, p.market_value) for p in positions}
+    # A close sent above stays listed until its fill lands, seconds later, and the Trader
+    # would read the name as held: on 2026-10-30 it added to INTC 29 seconds after INTC's
+    # time stop closed it. The caps below still count the position until it's gone.
+    trader_positions = {
+        symbol: notional
+        for symbol, notional in positions_notional.items()
+        if symbol not in monitor_result.closed
+    }
 
     watchlist = ledger.watchlist_for(as_of)
     tradable_watchlist, watchlist_prices, _dropped = _apply_spread_gate(
@@ -1492,7 +1504,7 @@ def run_cycle(
             intraday,
             ledger,
             tradable_watchlist,
-            positions_notional,
+            trader_positions,
             prices,
             headlines=headlines,
             session=session,
@@ -1591,6 +1603,7 @@ def run_cycle(
             spot_price=spot_price,
             next_earnings_date=next_earnings_date,
             tradable_symbols=frozenset(symbols_in_view),
+            exiting_symbols=frozenset(exiting),
         )
         failures = validate_proposal(proposal, validation_context)
         status = "rejected" if failures else "accepted"
@@ -2143,15 +2156,34 @@ def run_eod_review(
     # runs after the bell, so today's bar is in. The close-to-close one used to run from
     # the cache's latest close, already today's, to a live quote: about 0% every day
     # from 2026-10-01 (fixed 2026-10-19), then -0.01% on a -0.38% day, since after the
-    # bell the quote is the after-hours market (fixed 2026-10-20).
+    # bell the quote is the after-hours market (fixed 2026-10-20). Today's close comes
+    # from the session's own last bar, not that cached bar (2026-10-31): fetched minutes
+    # after the bell it can be unfinished. On 2026-10-30 it held a mid-afternoon price,
+    # SOXX read -10.19% for a -8.24% day, and the attribution moved $290 to the sector.
+    soxx_close = None
+    try:
+        soxx_close = session_closes(["SOXX"], market_data, as_of, now, broker).get("SOXX")
+    except Exception as exc:  # noqa: BLE001 -- a benchmark must never block the report
+        ledger.record_incident("warning", f"SOXX session close unavailable: {exc}")
     soxx_return = None
     try:
-        soxx_return = close_to_close_return(market_data_pit, "SOXX", as_of)
+        soxx_return = close_to_close_return(market_data_pit, "SOXX", as_of, close=soxx_close)
+        cached_return = close_to_close_return(market_data_pit, "SOXX", as_of)
+        if (
+            soxx_return is not None
+            and cached_return is not None
+            and abs(cached_return - soxx_return) > _SOXX_BAR_TOLERANCE
+        ):
+            ledger.record_incident(
+                "warning",
+                f"SOXX: the cached daily bar reads {cached_return:+.2%}, the session close "
+                f"{soxx_return:+.2%}; using the session close",
+            )
     except Exception as exc:  # noqa: BLE001 -- a benchmark must never block the report
         ledger.record_incident("warning", f"SOXX benchmark unavailable: {exc}")
     soxx_open_to_close = None
     try:
-        soxx_open_to_close = open_to_close_return(market_data_pit, "SOXX", as_of)
+        soxx_open_to_close = open_to_close_return(market_data_pit, "SOXX", as_of, close=soxx_close)
     except Exception as exc:  # noqa: BLE001 -- same reasoning
         ledger.record_incident("warning", f"SOXX open-to-close benchmark unavailable: {exc}")
 

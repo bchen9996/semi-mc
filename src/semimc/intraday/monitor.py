@@ -85,6 +85,10 @@ def check_invalidation_and_time_stops(
     came due at 12:01 rather than 11:31. Tranching is an execution technique, not a new
     decision. An `add` is one, with its own time stop, so it still restarts the clock.
 
+    **Within `schedule.time_stop_grace_minutes` of due counts as due** (2026-10-31). With
+    30-minute cycles a stop tended to come due just after a check: 12 of Stage 2's 15
+    time-stop exits ran 29 to 30 minutes late, so 60- and 90-minute stops ran 90 and 120.
+
     A position with no traceable entry/proposal is left alone and logged as an incident
     rather than guessed at -- the same "never act on incomplete information" caution
     `execution/pretrade.py` uses elsewhere.
@@ -144,7 +148,8 @@ def check_invalidation_and_time_stops(
             if filled_at is not None:
                 aware_now = now if now.tzinfo is not None else now.replace(tzinfo=dt.UTC)
                 elapsed_minutes = (aware_now - filled_at).total_seconds() / 60.0
-                if elapsed_minutes >= time_stop_minutes:
+                grace = config.schedule.time_stop_grace_minutes
+                if elapsed_minutes >= time_stop_minutes - grace:
                     timed_out = True
 
         if not stopped_out and not timed_out:

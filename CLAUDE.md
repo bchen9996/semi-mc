@@ -254,3 +254,10 @@ compared to a closed form, the closed form is written out in the test.
   changed the same (binary) ledger: intraday jobs fail on it; paper jobs, whose sleeves
   share one ledger and are idempotent, re-run. `tests/test_push_ledger.py` drives the
   script against local repos and pins which jobs keep a cron.
+- **A daily bar fetched just after the bell can be unfinished.** On 2026-10-30 eod-review's
+  `semimc fetch` cached a SOXX close about 2% off, from mid-afternoon, and the day's
+  benchmark and attribution were wrong. Today's close comes from `session_closes`.
+- **A broker answers a reused `client_order_id` with the old order, not an error.** So a
+  second order with the same id looks like a success and nothing is sent. Entries and exits
+  have separate ids, and `submit_order_with_fault_isolation` checks the side and symbol
+  that come back.

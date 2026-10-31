@@ -395,6 +395,107 @@ def test_mark_always_records_a_fresh_snapshot(config, ledger):
     assert ledger.latest_snapshot("s0") is not None
 
 
+def _sole_trader(ledger) -> FakeBroker:
+    """s3 holding 10 NVDA as the account's only trader, as the real account is."""
+    broker = FakeBroker(now=SUBMITTED_AT)
+    request = _request(client_order_id="s3-nvda-1")
+    submitted = broker.submit_order(request)
+    ledger.record_order("s3", "hash-1", request, submitted)
+    ledger.record_fill(
+        request.client_order_id,
+        qty=submitted.filled_qty,
+        price=submitted.filled_avg_price,
+        filled_at=SUBMITTED_AT,
+    )
+    return broker
+
+
+def test_mark_values_the_snapshot_at_closing_prices_after_the_bell(config, ledger):
+    """2026-10-31: GitHub's late mark, around 19:30 ET, wrote each day's one snapshot from
+    live equity. 2026-10-29 read 94,410 against an official close of 96,558."""
+    cfg = _tradeable_config(config)
+    broker = _sole_trader(ledger)
+    now = SUBMITTED_AT + dt.timedelta(hours=4)
+
+    run_mark("s3", cfg, broker, ledger, pd.Timestamp("2026-01-05"), now, closes={"NVDA": 200.0})
+
+    snap = ledger.latest_snapshot("s3")
+    cash = broker.get_account().cash
+    assert snap["equity"] == pytest.approx(cash + 10.0 * 200.0)
+    assert snap["cash"] == pytest.approx(cash)
+    assert snap["positions"]["NVDA"]["market_value"] == pytest.approx(2_000.0)
+
+
+def test_mark_values_a_short_at_its_closing_price_as_a_liability(config, ledger):
+    from semimc.execution.broker import Position
+    from semimc.live.mark import _at_closing_prices
+
+    short = Position(symbol="NVDA", qty=10.0, side="short", market_value=0.0, avg_entry_price=0.0)
+    account = dataclasses.make_dataclass("A", ["equity", "cash"])(0.0, 5_000.0)
+
+    equity, valued = _at_closing_prices("s3", account, {"NVDA": short}, {"NVDA": 200.0}, ledger)
+
+    assert equity == pytest.approx(3_000.0)
+    assert valued["NVDA"].qty == -10.0
+
+
+@pytest.mark.parametrize("closes", [None, {}, {"AMD": 150.0}])
+def test_mark_keeps_the_brokers_figures_without_a_close_for_everything_held(config, ledger, closes):
+    """During the session, or with a symbol's close missing: half the book at the close
+    and half after hours would be neither."""
+    cfg = _tradeable_config(config)
+    broker = _sole_trader(ledger)
+
+    run_mark("s3", cfg, broker, ledger, pd.Timestamp("2026-01-05"), SUBMITTED_AT, closes=closes)
+
+    assert ledger.latest_snapshot("s3")["equity"] == pytest.approx(broker.get_account().equity)
+    warned = any("no closing price for NVDA" in i["message"] for i in ledger.incidents("s3"))
+    assert warned == (closes == {"AMD": 150.0})
+
+
+def test_paper_closes_reads_the_session_only_once_the_market_has_closed(
+    config, ledger, monkeypatch
+):
+    from semimc.cli import _paper_closes
+
+    broker = _sole_trader(ledger)
+    monkeypatch.setattr(
+        "semimc.execution.market_data.AlpacaMarketDataClient.from_env",
+        classmethod(lambda cls: object()),
+    )
+    monkeypatch.setattr(
+        "semimc.intraday.jobs.session_closes",
+        lambda symbols, *a, **k: dict.fromkeys(symbols, 200.0),
+    )
+    as_of = pd.Timestamp("2026-01-05")
+
+    assert _paper_closes(config, broker, ledger, "s3", as_of, SUBMITTED_AT) is None
+    broker.market_open = False
+    closes = _paper_closes(config, broker, ledger, "s3", as_of, SUBMITTED_AT)
+
+    assert closes == {"NVDA": 200.0}
+
+
+def test_paper_closes_never_fails_a_mark(config, ledger, monkeypatch):
+    from semimc.cli import _paper_closes
+
+    broker = _sole_trader(ledger)
+    broker.market_open = False
+
+    def unreachable(cls):
+        raise RuntimeError("data endpoint unreachable")
+
+    monkeypatch.setattr(
+        "semimc.execution.market_data.AlpacaMarketDataClient.from_env", classmethod(unreachable)
+    )
+
+    assert (
+        _paper_closes(config, broker, ledger, "s3", pd.Timestamp("2026-01-05"), SUBMITTED_AT)
+        is None
+    )
+    assert any("closing prices unavailable" in i["message"] for i in ledger.incidents("s3"))
+
+
 class _AlpacaTimestampBroker(FakeBroker):
     """FakeBroker, but reporting `submitted_at` the way the real Alpaca adapter does:
     aware UTC (`execution/alpaca_broker.py`'s docstring). FakeBroker's own timestamps are

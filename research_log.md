@@ -375,3 +375,50 @@ number where it was. It does not make `garch_t` beat gbm at any horizon; nothing
 changes the earlier conclusion that the persistent error is the drift, not the shape.
 Binding frequency, measured: a median 1-5% of paths ever touch the cap over 252 days (up
 to 23% for the most extreme fits), ~0.02% of simulated days.
+
+## 2026-10-31 -- three-name z-score baskets, first look: no edge; July 2026 on unseen
+
+The owner asked for at least three tickers a day, a correlation study among them, z-score
+tracking and hedging. Tested once on 5-minute SIP bars, 2024-03-28 to 2026-06-30 (559
+sessions), rules fixed before any result and not changed after. **2026-07-01 onward was
+not fetched and is the untouched out-of-sample period.** Scratch scripts, not committed.
+
+Rules: each morning, from the trailing 60 sessions only, each name's beta to SOXX (30-minute
+returns) and the spread of its open-to-time residual at each time of day. z = (log move
+since the open - beta * SOXX's) / that spread. Decide every 30 minutes from 10:00 to 15:00
+ET; enter when the largest |z| reaches 2.0, fading it; exit at |z| <= 0.5, at |z| >= 3.5, or
+at 15:45 ET. Fills at the next bar's open, one basket at a time, two a day at most, nothing
+overnight, earnings names out. `$/yr` assumes $30,000 gross per basket.
+
+| variant | trades | gross bps | net at 8 bps a side | net at 2 bps a side | t (gross) | $/yr at 8 | $/yr at 2 |
+|---|---|---|---|---|---|---|---|
+| 3 tightest names, hedged with the other two | 181 | +1.1 | -14.9 | -2.9 | 0.37 | -3,649 | -712 |
+| same 3 names, hedged with SOXX | 181 | +0.8 | -15.2 | -3.2 | 0.24 | -3,718 | -781 |
+| any of the 14, hedged with SOXX | 464 | -7.5 | -23.5 | -11.5 | -2.68 | -14,766 | -7,236 |
+
+Day-resampled bootstrap (10,000 draws, seed 20261031), probability the mean day is positive:
+0% at 8 bps for all three; 15%, 18% and 0% at 2 bps. Three variants at two cost levels, so
+none of this is corrected for multiple looks.
+
+SOXX explains 61% of 30-minute variance. Mean pairwise correlation is 0.59 raw and -0.04
+after removing it, so there is no correlation left among names to hedge with on average.
+The "tightest" triple was AMAT+KLAC+LRCX on 509 of 559 days, and it traded on 175.
+
+Stage 2's trades, re-priced with a beta-sized SOXX hedge over each trade's own holding
+period (betas from the last 120 sessions to 2026-06-30, hedge cost 8 bps a side):
+
+| | closes | gross | net of modeled cost | daily P&L std |
+|---|---|---|---|---|
+| S4 unhedged | 26 | +147 | -95 | 184 |
+| S4 hedged | 26 | -403 | -884 | 84 |
+| placebo unhedged | 36 | -890 | -1,379 | 513 |
+| placebo hedged | 36 | -185 | -1,150 | 226 |
+
+MRVL's overnight short is most of S4's gap: +459 unhedged, -119 hedged. t of S4's hedged
+gross per trade: -1.59, on 12 sessions.
+
+**Read:** a hedge halves the daily swing and adds no return. Fading residual moves has no
+gross edge in the tight triple and loses before costs across all 14, so outliers tend to
+keep going. The mirror of the third row, following the outlier, is the one lead: +7.5 bps
+gross, -8.5 at 8 bps a side, +3.5 at 2. It came from reading this table, so it needs the
+unseen period, once, and is thin even if it holds.

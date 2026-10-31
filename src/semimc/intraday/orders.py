@@ -67,6 +67,15 @@ def intraday_client_order_id(
     return base if tranche == 1 else f"{base}-t{tranche}"
 
 
+def intraday_exit_order_id(as_of: pd.Timestamp, cycle: str, symbol: str, attempt: int = 0) -> str:
+    """:func:`intraday_client_order_id` for a close or trim, so an exit and an entry in the
+    same symbol and cycle never share an id (2026-10-31). On 2026-10-30 INTC's time stop
+    closed it and the Trader's add 29 seconds later got the same id; Alpaca refused it as a
+    duplicate, the adapter returned the exit as if it were the add, and the add was recorded
+    as sent."""
+    return f"{intraday_client_order_id(as_of, cycle, symbol, attempt)}-exit"
+
+
 def build_entry_order(
     proposal: TradeProposal,
     as_of: pd.Timestamp,
@@ -367,7 +376,7 @@ def build_close_order(
         side=side,
         type="limit" if price is not None else "market",
         time_in_force="day",
-        client_order_id=intraday_client_order_id(as_of, cycle, position.symbol, attempt),
+        client_order_id=intraday_exit_order_id(as_of, cycle, position.symbol, attempt),
         qty=abs(position.qty),
         limit_price=(
             collared_limit_price(price, side, config.risk.equity_cost_bps_per_side)
@@ -428,7 +437,7 @@ def build_trim_order(
         side=side,
         type="limit",
         time_in_force="day",
-        client_order_id=intraday_client_order_id(as_of, cycle, proposal.symbol, attempt),
+        client_order_id=intraday_exit_order_id(as_of, cycle, proposal.symbol, attempt),
         qty=qty,
         limit_price=collared_limit_price(price, side, config.risk.equity_cost_bps_per_side),
     )
@@ -522,6 +531,16 @@ def submit_order_with_fault_isolation(
     except BrokerError as exc:  # any other rejection, e.g. "insufficient qty available"
         ledger.record_incident(
             "error", f"{request.symbol}: {request.side} order rejected by the broker: {exc}"
+        )
+        return None
+
+    # A broker answers a reused id with the order already holding it. A re-run's own order
+    # matches; anything else means this request was never placed (2026-10-30).
+    if submitted.side != request.side or submitted.symbol != request.symbol:
+        ledger.record_incident(
+            "error",
+            f"{request.client_order_id} already belongs to a {submitted.side} "
+            f"{submitted.symbol} order; this {request.side} was not sent",
         )
         return None
 

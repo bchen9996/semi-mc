@@ -1646,6 +1646,31 @@ def paper_execute(
         raise typer.Exit(code=1)
 
 
+def _paper_closes(cfg, broker, ledger, sleeve, as_of, now):  # noqa: ANN001, ANN202
+    """The session's closing prices for what the account holds, once the market has
+    closed; `None` while it's open, so a mark during the session reads the broker as
+    ever (`live/mark.py`). A failed read is a warning and `None`: a mark never fails over
+    this. Before the open there are no bars yet, so nothing changes then either."""
+    from .execution.market_data import AlpacaMarketDataClient
+    from .intraday.jobs import session_closes
+    from .intraday.orders import market_is_open
+    from .live.mark import as_paper_local
+
+    if market_is_open(broker):
+        return None
+    try:
+        symbols = sorted(p.symbol for p in broker.list_positions())
+        if not symbols:
+            return None
+        market_data = AlpacaMarketDataClient.from_env()
+        return session_closes(symbols, market_data, as_of, as_paper_local(now, cfg), broker)
+    except Exception as exc:  # noqa: BLE001 - a mark must never fail over this
+        ledger.record_incident(
+            "warning", f"closing prices unavailable, marking at the broker's ({exc})", sleeve
+        )
+        return None
+
+
 @paper_app.command("mark")
 def paper_mark(
     sleeve: SleeveOption,
@@ -1667,7 +1692,8 @@ def paper_mark(
     ledger = Ledger(cfg.path(cfg.paper.ledger_path))
     broker = AlpacaPaperBroker.from_env()
     try:
-        result = run_mark(sleeve, cfg, broker, ledger, as_of_ts, now)
+        closes = _paper_closes(cfg, broker, ledger, sleeve, as_of_ts, now)
+        result = run_mark(sleeve, cfg, broker, ledger, as_of_ts, now, closes=closes)
     finally:
         ledger.close()
 

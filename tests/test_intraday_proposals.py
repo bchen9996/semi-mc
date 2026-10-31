@@ -200,6 +200,13 @@ def _mu_open(size_pct: float) -> TradeProposal:
     return _open(symbol="MU", size_pct=size_pct, limit_price=1081.0, invalidation_price=1065.0)
 
 
+def test_an_entry_in_a_name_being_closed_this_cycle_is_rejected(tmp_path):
+    context = _context(tmp_path, exiting_symbols=frozenset({"NVDA"}))
+
+    assert any("being closed this cycle" in f for f in validate_proposal(_open(), context))
+    assert validate_proposal(TradeProposal(action="close", symbol="NVDA"), context) == []
+
+
 def test_a_size_worth_less_than_one_whole_share_is_rejected_with_the_minimum(tmp_path):
     context = _context(tmp_path, prices={"MU": 1081.0})
     failures = validate_proposal(_mu_open(0.0075), context)  # $750 < one share

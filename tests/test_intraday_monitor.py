@@ -159,6 +159,22 @@ def test_closes_on_an_elapsed_time_stop_without_touching_the_price(tmp_path):
     ledger.close()
 
 
+@pytest.mark.parametrize(("held", "closed"), [(59.9, True), (58.0, True), (57.9, False)])
+def test_a_time_stop_within_the_grace_counts_as_due(tmp_path, held, closed):
+    """2026-10-31: stops came due just after a check, so at 30-minute cycles a 60-minute
+    stop ran 90 on 12 of Stage 2's 15 time-stop exits."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker()
+    _open_position(broker, ledger, time_stop_minutes=60, filled_at=NOW - dt.timedelta(minutes=held))
+
+    result = check_invalidation_and_time_stops(
+        IntradayConfig(), broker, ledger, {"NVDA": 190.0}, AS_OF, CYCLE, NOW
+    )
+
+    assert result.closed == (["NVDA"] if closed else [])
+    ledger.close()
+
+
 def test_a_time_stop_not_yet_elapsed_leaves_the_position_open(tmp_path):
     ledger = _ledger(tmp_path)
     broker = FakeBroker()

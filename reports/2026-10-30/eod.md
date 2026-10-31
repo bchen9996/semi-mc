@@ -1,5 +1,7 @@
 # S4 end-of-day report: 2026-10-30
 
+**Corrected 2026-10-31.** SOXX's close in this report came from a daily bar that hadn't finished updating: about 461.50 against the official 471.51. The SOXX figures and the attribution below are corrected. The Reviewer's narration is left as written, so where it says the gain was almost all sector, that picking names added no edge, or that SOXX fell 10.2%, it is working from the wrong numbers. As first published: sector 520.24, stock-specific -10.67, SOXX -10.19% and -3.72%.
+
 ## Blotter
 Proposals today (including rejected):
 - INTC no_trade [accepted]
@@ -70,15 +72,15 @@ Reflections:
 - Pessimistic (double modeled cost): 487.63
 
 ## Attribution
-- Sector (SOXX beta-of-1 approximation): 520.24
-- Stock-specific (selection + timing, combined): -10.67
+- Sector (SOXX beta-of-1 approximation): 229.42
+- Stock-specific (selection + timing, combined): 280.14
 - Options: 0.00
 
 The attribution split is sector +520.24, stock-specific -10.67 and options 0. Almost all of the day's result came from sector beta, meaning the short book rode the semiconductor collapse. Stock-specific selection was slightly negative, so the book had no real edge from picking names. Options contributed nothing because none were used. The MRVL short carried over from the prior day produced most of the gain (net +447). INTC added about +16 and AMD about +47.
 
 ## Benchmarks for the day
-- SOXX buy-and-hold, prior close to close: -10.19%
-- SOXX open to close (the session an intraday book can trade): -3.72%
+- SOXX buy-and-hold, prior close to close: -8.24%
+- SOXX open to close (the session an intraday book can trade): -1.64%
 - S0 control sleeve: +0.00%
 - Placebo (T6 control): -60.08
 - "Do nothing" (the day's entries held untouched to the close): -0.05%

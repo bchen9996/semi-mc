@@ -201,6 +201,9 @@ class ValidationContext:
     # from the same watchlist, a fair comparison. `None` skips the check (unit tests that
     # aren't about it); `jobs.py::run_cycle`, the only real caller, always sets it.
     tradable_symbols: frozenset[str] | None = None
+    # Closed, or failing to close, this cycle (`jobs.py::run_cycle`). A close's fill lands
+    # seconds after it's sent, so an entry now would be built on a position already going.
+    exiting_symbols: frozenset[str] = frozenset()
 
 
 def _accepted_proposals(context: ValidationContext) -> list[dict]:
@@ -248,6 +251,10 @@ def validate_proposal(proposal: TradeProposal, context: ValidationContext) -> li
                 f"{'a buy' if buying else 'a short'}: it is where the stop goes"
             )
 
+    if proposal.action in OPEN_OR_ADD_ACTIONS and proposal.symbol in context.exiting_symbols:
+        failures.append(
+            f"{proposal.symbol} is being closed this cycle; no new entry until that has filled"
+        )
     if context.tradable_symbols is not None and proposal.symbol not in context.tradable_symbols:
         failures.append(
             f"{proposal.symbol} is neither on this cycle's tradable watchlist nor held; "
