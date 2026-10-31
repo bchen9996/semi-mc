@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -20,6 +21,7 @@ from typer.testing import CliRunner
 from semimc.cli import app
 from semimc.execution.broker import Clock
 from semimc.execution.fake_broker import FakeBroker
+from semimc.intraday.jobs import CarryResult, EodReviewResult
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.llm import ClaudeCliClient
 
@@ -252,6 +254,20 @@ def test_carry_runs_cleanly_with_no_positions(tmp_path, fake_intraday_env, at_ca
     assert "Carried: (none)" in result.output
 
 
+def test_carry_fails_the_job_when_an_exit_did_not_go_out(
+    tmp_path, fake_intraday_env, at_carry_time, monkeypatch
+):
+    """2026-10-31: the failure email goes out with 15 minutes left to act on it."""
+    monkeypatch.setattr(
+        "semimc.intraday.jobs.run_carry", lambda *a, **k: CarryResult(exits_failed=["MRVL"])
+    )
+
+    result = runner.invoke(app, ["intraday", "carry"] + _tradeable_overrides(tmp_path))
+
+    assert result.exit_code == 1
+    assert "Exit failed, still held: MRVL" in result.output
+
+
 def test_carry_dispatched_mid_session_does_nothing(tmp_path, fake_intraday_env, at_carry_time):
     """2026-10-19: an 11:45 CT carry on a regular day closed AVGO three hours early."""
     at_carry_time(dt.datetime(2026, 9, 21, 16, 45))
@@ -482,6 +498,35 @@ def test_eod_review_on_a_quiet_day_writes_a_report_without_a_model_call(
     assert "Wrote" in result.output
     assert "No Reviewer narration: nothing to grade today" in result.output
     assert len(list((tmp_path / "reports").rglob("eod.md"))) == 1
+
+
+@pytest.mark.parametrize(
+    ("review", "printed"),
+    [
+        (EodReviewResult(report_path="eod.md", reflections_updated=2), "Wrote eod.md"),
+        (EodReviewResult(report_path="eod.md", reviewer_skipped_reason="x"), "Wrote eod.md"),
+        (EodReviewResult(skipped_reason="already ran"), "Skipped: already ran"),
+    ],
+)
+def test_eod_review_fails_the_job_on_a_position_held_after_the_close(
+    tmp_path, fake_intraday_env, monkeypatch, review, printed
+):
+    """2026-10-31. The workflow commits the report and ledger first, then exits with this
+    status, so the failure email is the alarm and nothing is lost."""
+    held = replace(review, held_after_close=("MRVL",))
+    monkeypatch.setattr("semimc.intraday.jobs.run_eod_review", lambda *a, **k: held)
+
+    result = runner.invoke(
+        app,
+        ["intraday", "eod-review"]
+        + _intraday_overrides(
+            tmp_path, **{"paper.ledger_path": (tmp_path / "paper.sqlite3").as_posix()}
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert printed in result.output
+    assert "Held after the close with no multi-day thesis: MRVL" in result.output
 
 
 def test_eod_review_grades_the_day_and_writes_a_full_report(

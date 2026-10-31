@@ -355,10 +355,11 @@ def build_close_order(
     calls this with the position as re-read once they're gone.
 
     `price=None` builds a market order instead of a collared limit: the exit a time stop
-    or carry sends on the real account when there is no current price to collar
-    (owner decision 2026-10-15, after that day's midday quote outage held both positions
-    past their time stops). Never for an entry, and only while the market is
-    open (:func:`market_is_open`), or it would wait at Alpaca for the next open.
+    sends on the real account when there is no current price to collar (owner decision
+    2026-10-15, after that day's midday quote outage held both positions past their time
+    stops), and every carry close there (owner decision 2026-10-31; `jobs.py::run_carry`).
+    Never for an entry, and only while the market is open (:func:`market_is_open`), or it
+    would wait at Alpaca for the next open.
     """
     side: OrderSide = "sell" if position.side == "long" else "buy"
     return OrderRequest(

@@ -367,6 +367,17 @@ def _original_proposal_payload(ledger: IntradayLedger, symbol: str) -> dict[str,
     return found[1]["payload"] if found is not None else None
 
 
+def _held_without_thesis(broker: Broker, ledger: IntradayLedger) -> list[str]:
+    """Every held symbol with no written multi-day thesis on file: what `run_carry` closes,
+    so what should be gone once the market has closed."""
+    return [
+        p.symbol
+        for p in broker.list_positions()
+        if (_original_proposal_payload(ledger, p.symbol) or {}).get("horizon")
+        not in _CARRIED_HORIZONS
+    ]
+
+
 def turnover_so_far_usd(ledger: IntradayLedger, as_of: pd.Timestamp, equity: float) -> float:
     """Approximates today's turnover from proposed (not filled) notional of every
     accepted proposal so far -- the same accepted-proposals-today read
@@ -1019,6 +1030,12 @@ _CARRY_LEAD = pd.Timedelta(minutes=15)
 # close. The window covers the scheduled run (15 minutes ahead) with room for a late
 # dispatch; the early-close handover below doesn't ask, since it checked already.
 _CARRY_WINDOW = pd.Timedelta(minutes=60)
+# BRIEF_INTRADAY.md's order style: "Never plain market orders in the first or last five
+# minutes." The scheduled carry is well clear of it; one dispatched late is not.
+_NO_MARKET_ORDER_WINDOW = pd.Timedelta(minutes=5)
+# A position with one of these horizons on its opening proposal has a written multi-day
+# thesis, so it may stay open overnight. Anything else closes at carry.
+_CARRIED_HORIZONS = ("multi-day", "multi-week")
 
 
 def _todays_close_ny(broker: Broker, now: dt.datetime) -> pd.Timestamp | None:
@@ -1361,13 +1378,14 @@ def run_cycle(
             market_data,
             as_of,
             now,
-            market_exit_without_price=not intraday.shadow_mode,
+            market_exit=not intraday.shadow_mode,
         )
         closed = carry.closed + carry.closed_for_cap
+        failed = f"; exit failed: {', '.join(carry.exits_failed)}" if carry.exits_failed else ""
         note = (
             f"{early_close_note_prefix(cycle)}{early_close:%H:%M} New York, before the next "
             f"cycle: ran carry instead of the Trader (closed: {', '.join(closed) or 'none'}; "
-            f"carried: {', '.join(carry.carried) or 'none'})"
+            f"carried: {', '.join(carry.carried) or 'none'}{failed})"
         )
         ledger.record_incident("info", note)
         result.skipped_reason = note.removeprefix(f"{cycle}: ")
@@ -1765,6 +1783,8 @@ class CarryResult:
     closed_for_cap: list[str] = field(default_factory=list)
     entries_canceled: list[str] = field(default_factory=list)
     skipped_reason: str | None = None
+    # No exit went out, so these are still held.
+    exits_failed: list[str] = field(default_factory=list)
 
 
 def run_carry(
@@ -1775,7 +1795,7 @@ def run_carry(
     as_of: pd.Timestamp,
     now: dt.datetime,
     *,
-    market_exit_without_price: bool = False,
+    market_exit: bool = False,
     near_close_only: bool = False,
 ) -> CarryResult:
     """At 14:45: closes every position whose opening proposal's `horizon` is
@@ -1796,11 +1816,16 @@ def run_carry(
     close before the bell); otherwise an info line, as for `run_cycle`'s own decline. A
     placebo `FakeBroker` has no real clock and always reads open.
 
-    A close with no current price is skipped (carried) by default. With
-    `market_exit_without_price` it goes out as a market order instead, the same fallback
-    as `monitor.py`'s time stop (added 2026-10-15). Only the real account's caller
-    (`cli.py`) sets it: the placebo runs this same function against a `FakeBroker` under
-    the same config.
+    By default a close goes out as a collared limit, and one with no current price is
+    skipped (carried). With `market_exit`, which only the real account's callers set (the
+    placebo runs this same function against a `FakeBroker` under the same config), every
+    close goes out as a market order (owner decision 2026-10-31). On 2026-10-29 carry
+    canceled MRVL's stops and sent a limit eight basis points past the last IEX trade; the
+    ask rose past it within seconds, nothing runs after carry to try again, and 35 shares
+    short sat overnight with no stop and no alarm. A carry within the last five minutes
+    (`_NO_MARKET_ORDER_WINDOW`) keeps the collared limit, per the brief, and goes to market
+    only with no price to collar, the fallback `monitor.py`'s time stop also has (added
+    2026-10-15). An exit that doesn't go out is reported in `exits_failed`, not `closed`.
 
     With `near_close_only` it also does nothing while today's close, from the broker's
     calendar, is more than `_CARRY_WINDOW` away (added 2026-10-19): a warning incident,
@@ -1816,12 +1841,7 @@ def run_carry(
     intraday = config.intraday
     if not market_is_open(broker):
         result.skipped_reason = "market is closed"
-        unclosed = [
-            p.symbol
-            for p in broker.list_positions()
-            if (_original_proposal_payload(ledger, p.symbol) or {}).get("horizon")
-            not in ("multi-day", "multi-week")
-        ]
+        unclosed = _held_without_thesis(broker, ledger)
         if unclosed:
             ledger.record_incident(
                 "error",
@@ -1832,18 +1852,21 @@ def run_carry(
             ledger.record_incident("info", "carry skipped: market is closed")
         return result
 
-    if near_close_only:
+    time_to_close = None
+    if near_close_only or market_exit:
+        close_at = None
         try:
             close_at = _todays_close_ny(broker, now)
         except Exception as exc:  # noqa: BLE001 - never strand a position over this check
             ledger.record_incident(
                 "warning", f"carry: market calendar unavailable ({exc}) -- going ahead"
             )
-            close_at = None
         now_ny = pd.Timestamp(now if now.tzinfo else now.replace(tzinfo=dt.UTC)).tz_convert(
             "America/New_York"
         )
-        if close_at is not None and close_at - now_ny > _CARRY_WINDOW:
+        if close_at is not None:
+            time_to_close = close_at - now_ny
+        if near_close_only and time_to_close is not None and time_to_close > _CARRY_WINDOW:
             window = int(_CARRY_WINDOW.total_seconds() // 60)
             result.skipped_reason = (
                 f"the close ({close_at:%H:%M} New York) is more than {window} minutes away"
@@ -1864,30 +1887,36 @@ def run_carry(
     ]
     positions = broker.list_positions()
     account = broker.get_account()
-    market_exit = market_exit_without_price
+    in_last_minutes = time_to_close is not None and time_to_close <= _NO_MARKET_ORDER_WINDOW
+    at_market = market_exit and not in_last_minutes
+
+    def close_price(symbol: str) -> float | None:
+        return None if at_market else current_prices({symbol}, market_data, now).get(symbol)
 
     carried_candidates: list[tuple[Position, dict[str, Any]]] = []
     for position in positions:
         payload = _original_proposal_payload(ledger, position.symbol)
         horizon = payload.get("horizon") if payload else None
-        if horizon in ("multi-day", "multi-week"):
+        if horizon in _CARRIED_HORIZONS:
             carried_candidates.append((position, payload or {}))
             continue
 
-        price = current_prices({position.symbol}, market_data, now).get(position.symbol)
+        price = close_price(position.symbol)
         if price is None and not market_exit:
             ledger.record_incident(
                 "error", f"{position.symbol}: carry could not price a close -- left open"
             )
             result.carried.append(position.symbol)
             continue
-        if price is None:
+        if price is None and not at_market:
             ledger.record_incident(
                 "warning",
                 f"{position.symbol}: carry has no current price -- closing with a market order",
             )
-        _carry_close(position.symbol, payload, price, config, broker, ledger, as_of, now)
-        result.closed.append(position.symbol)
+        if _carry_close(position.symbol, payload, price, config, broker, ledger, as_of, now):
+            result.closed.append(position.symbol)
+        else:
+            result.exits_failed.append(position.symbol)
 
     carried_candidates.sort(key=lambda item: item[1].get("confidence") or 0.0)
     overnight_notional = sum(abs(p.market_value) for p, _ in carried_candidates)
@@ -1897,19 +1926,21 @@ def run_carry(
         if overnight_notional <= cap:
             result.carried.append(position.symbol)
             continue
-        price = current_prices({position.symbol}, market_data, now).get(position.symbol)
+        price = close_price(position.symbol)
         if price is None and not market_exit:
             result.carried.append(position.symbol)
             continue
-        if price is None:
+        if price is None and not at_market:
             ledger.record_incident(
                 "warning",
                 f"{position.symbol}: carry has no current price -- closing with a market order "
                 "for the overnight cap",
             )
-        _carry_close(position.symbol, payload, price, config, broker, ledger, as_of, now)
-        overnight_notional -= abs(position.market_value)
-        result.closed_for_cap.append(position.symbol)
+        if _carry_close(position.symbol, payload, price, config, broker, ledger, as_of, now):
+            overnight_notional -= abs(position.market_value)
+            result.closed_for_cap.append(position.symbol)
+        else:
+            result.exits_failed.append(position.symbol)
 
     return result
 
@@ -1923,9 +1954,10 @@ def _carry_close(
     ledger: IntradayLedger,
     as_of: pd.Timestamp,
     now: dt.datetime,
-) -> None:
+) -> bool:
     """One carry close through `submit_exit`, with its mechanical reflection. `price=None`
-    sends a market order (`orders.py::build_close_order`)."""
+    sends a market order (`orders.py::build_close_order`). `False` if no exit went out, so
+    the position is still held."""
     intraday = config.intraday
     attempt = submit_exit(
         symbol,
@@ -1942,6 +1974,7 @@ def _carry_close(
         record_mechanical_reflection(
             symbol, attempt.order.client_order_id, "carry", ledger, intraday, as_of
         )
+    return attempt.failure is None
 
 
 # -- reconciliation (added 2026-10-16) ----------------------------------------------------
@@ -1995,6 +2028,8 @@ class EodReviewResult:
     skipped_reason: str | None = None
     # The report was written but the Reviewer deliberately not called (a quiet day).
     reviewer_skipped_reason: str | None = None
+    # Held with the market closed and no multi-day thesis. `cli.py` fails the job on these.
+    held_after_close: tuple[str, ...] = ()
 
 
 def run_eod_review(
@@ -2042,7 +2077,14 @@ def run_eod_review(
     account nothing else would record those fills or their reflections before this
     report reads them. Then the ledger is reconciled against it (`reconcile_positions`,
     2026-10-16), on every run, including one that finds the review already done.
+
+    Also on every run, a position held with the market closed and no multi-day thesis
+    (2026-10-31) is an error incident, the first thing in the report, and in
+    `held_after_close`, so the job fails and the failure email goes out once the report is
+    committed. On 2026-10-29 MRVL's carry exit expired unfilled; reconciliation passed,
+    since the ledger agreed the shares were still held, and the report said nothing.
     """
+    held_after_close: tuple[str, ...] = ()
     if broker is not None:
         sync_open_orders(broker, ledger, config.intraday, as_of, now)
         try:
@@ -2051,6 +2093,17 @@ def run_eod_review(
             # No reconciliation is recorded, so the Stage 3 check reports the day as
             # not reconciled.
             ledger.record_incident("warning", f"reconciliation unavailable ({exc})")
+        try:
+            if not market_is_open(broker):
+                held_after_close = tuple(_held_without_thesis(broker, ledger))
+        except Exception as exc:  # noqa: BLE001 - same reasoning
+            ledger.record_incident("warning", f"overnight position check unavailable ({exc})")
+        if held_after_close:
+            ledger.record_incident(
+                "error",
+                f"held after the close with no multi-day thesis: {', '.join(held_after_close)} "
+                "-- needs attention before the open",
+            )
     proposals_today = ledger.proposals_for(as_of)
     reflections_today = ledger.reflections_for(as_of)
     nothing_to_grade = not proposals_today and not reflections_today
@@ -2060,7 +2113,10 @@ def run_eod_review(
         # The graded-reflection check alone missed a day with proposals but no closes:
         # nothing gets graded, so a second trigger (external scheduler + late cron, added
         # 2026-09-27) would pay for a second Reviewer call. The recorded call covers it.
-        return EodReviewResult(skipped_reason=f"eod_review already ran for {as_of}")
+        return EodReviewResult(
+            skipped_reason=f"eod_review already ran for {as_of}",
+            held_after_close=held_after_close,
+        )
 
     # Local imports: `review.py` and `placebo.py` both import *from* this module at their
     # own top level (`turnover_so_far_usd`, `run_carry`/`current_prices`/...), so importing
@@ -2151,6 +2207,7 @@ def run_eod_review(
             process_scorecard=scorecard,
             attribution=attribution,
             reviewer_note=note,
+            held_after_close=held_after_close,
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(render_eod_markdown(report), encoding="utf-8")
@@ -2161,7 +2218,11 @@ def run_eod_review(
         report_path = write_mechanical_report(
             f"{reviewer_note} (no proposals and no closed trades)"
         )
-        return EodReviewResult(report_path=report_path, reviewer_skipped_reason=reviewer_note)
+        return EodReviewResult(
+            report_path=report_path,
+            reviewer_skipped_reason=reviewer_note,
+            held_after_close=held_after_close,
+        )
 
     # `news_lookback_hours` (16h, tuned for the Researcher's overnight coverage) reaches
     # well back past this session's own 08:30 open when called near the 15:15 close --
@@ -2234,7 +2295,11 @@ def run_eod_review(
         )
     except DailyBudgetExhausted as exc:
         report_path = write_mechanical_report(f"the daily model budget is spent ({exc})")
-        return EodReviewResult(report_path=report_path, reviewer_skipped_reason=str(exc))
+        return EodReviewResult(
+            report_path=report_path,
+            reviewer_skipped_reason=str(exc),
+            held_after_close=held_after_close,
+        )
     except ClaudeCliError as exc:
         # The report is written, then the job still fails: the brief's hard stop, and the
         # failure email. Added 2026-10-06, when the API account ran out of credits and the
@@ -2256,7 +2321,9 @@ def run_eod_review(
         ledger.record_incident("error", "malformed reviewer response: missing required keys")
         report_path = write_mechanical_report("the Reviewer's response was malformed")
         return EodReviewResult(
-            report_path=report_path, reviewer_skipped_reason="malformed reviewer response"
+            report_path=report_path,
+            reviewer_skipped_reason="malformed reviewer response",
+            held_after_close=held_after_close,
         )
 
     reflections_by_id = {row["id"]: row for row in reflections_today}
@@ -2330,6 +2397,7 @@ def run_eod_review(
         attribution_narrative=attribution_narrative,
         closing_market_report=closing_market_report,
         playbook_proposal=playbook_proposal,
+        held_after_close=held_after_close,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(render_eod_markdown(report), encoding="utf-8")
@@ -2338,6 +2406,7 @@ def run_eod_review(
         report_path=str(out_path),
         reflections_updated=updated,
         playbook_proposal_written=proposal_written,
+        held_after_close=held_after_close,
     )
 
 

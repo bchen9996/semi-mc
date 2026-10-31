@@ -2197,7 +2197,8 @@ def intraday_carry(
     verbose: VerboseOption = False,
 ) -> None:
     """End-of-session: closes anything without a written multi-day thesis, then closes
-    the lowest-confidence carried positions until back under the overnight gross cap."""
+    the lowest-confidence carried positions until back under the overnight gross cap.
+    Exits non-zero if an exit didn't go out, in time to act on it before the close."""
     cfg = _setup(config, set_, verbose)
     from .intraday.jobs import run_carry
     from .intraday.ledger import IntradayLedger
@@ -2215,7 +2216,7 @@ def intraday_carry(
             market_data,
             as_of_ts,
             now,
-            market_exit_without_price=not cfg.intraday.shadow_mode,
+            market_exit=not cfg.intraday.shadow_mode,
             # A dispatch at the wrong time of day does nothing (2026-10-19).
             near_close_only=True,
         )
@@ -2235,6 +2236,11 @@ def intraday_carry(
         typer.secho(
             f"Closed for overnight cap: {', '.join(result.closed_for_cap)}", fg=typer.colors.YELLOW
         )
+    if result.exits_failed:
+        typer.secho(
+            f"Exit failed, still held: {', '.join(result.exits_failed)}", fg=typer.colors.RED
+        )
+        raise typer.Exit(code=1)
 
 
 @intraday_app.command("eod-review")
@@ -2251,7 +2257,8 @@ def intraday_eod_review(
     blotter, P&L, attribution, benchmarks (SOXX, S0, the placebo, "do nothing"), closing
     market report, process scorecard, and any playbook proposal (`run_eod_review`,
     Phase 9b). Idempotent per trading day; on a quiet day (nothing to grade) it still
-    writes the mechanical report but makes no model call (see `run_eod_review`).
+    writes the mechanical report but makes no model call (see `run_eod_review`). Exits
+    non-zero if a position with no multi-day thesis is still held after the close.
     """
     cfg = _setup(config, set_, verbose)
     from .data import load_market_data
@@ -2292,14 +2299,20 @@ def intraday_eod_review(
 
     if result.skipped_reason is not None:
         typer.echo(f"Skipped: {result.skipped_reason}")
-        return
-    typer.echo(f"Wrote {result.report_path}")
-    if result.reviewer_skipped_reason is not None:
-        typer.echo(f"No Reviewer narration: {result.reviewer_skipped_reason}")
-        return
-    typer.echo(f"Reflections graded: {result.reflections_updated}")
-    if result.playbook_proposal_written:
-        typer.echo("Playbook proposal written to proposals/")
+    else:
+        typer.echo(f"Wrote {result.report_path}")
+        if result.reviewer_skipped_reason is not None:
+            typer.echo(f"No Reviewer narration: {result.reviewer_skipped_reason}")
+        else:
+            typer.echo(f"Reflections graded: {result.reflections_updated}")
+            if result.playbook_proposal_written:
+                typer.echo("Playbook proposal written to proposals/")
+    if result.held_after_close:
+        typer.secho(
+            f"Held after the close with no multi-day thesis: {', '.join(result.held_after_close)}",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
 
 
 @intraday_app.command("weekly-review")

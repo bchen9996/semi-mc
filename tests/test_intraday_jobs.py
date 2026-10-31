@@ -1944,18 +1944,16 @@ def _exit_order_types(broker: FakeBroker, ledger: IntradayLedger) -> list[str]:
 def test_run_carry_with_no_price_closes_with_a_market_order_only_on_the_real_account(
     config, tmp_path, market_exit
 ):
-    """Added 2026-10-15. Only `cli.py` sets `market_exit_without_price`, for the real
+    """Added 2026-10-15. Only `cli.py` and `run_cycle` set `market_exit`, for the real
     account; the placebo runs `run_carry` against a `FakeBroker` under the same config and
-    keeps the default. (With the market closed carry does nothing at all: next test.)"""
+    keeps the default. (With the market closed carry does nothing at all: see below.)"""
     cfg = _tradeable_config(config, tmp_path)
     ledger = _ledger(tmp_path)
     broker = FakeBroker(now=NOW)
     _seed_open_position(broker, ledger, cfg, horizon="intraday")
     broker.partial_fill_fraction = 0.0  # a real market order fills a moment after it's sent
 
-    result = run_carry(
-        cfg, broker, ledger, _FakeMarketData(), AS_OF, NOW, market_exit_without_price=market_exit
-    )
+    result = run_carry(cfg, broker, ledger, _FakeMarketData(), AS_OF, NOW, market_exit=market_exit)
 
     errors = [i for i in ledger.incidents() if i["severity"] == "error"]
     if market_exit:
@@ -1966,6 +1964,133 @@ def test_run_carry_with_no_price_closes_with_a_market_order_only_on_the_real_acc
         assert result.carried == ["NVDA"]
         assert _exit_order_types(broker, ledger) == []
         assert any("carry could not price a close" in i["message"] for i in errors)
+    ledger.close()
+
+
+@pytest.mark.parametrize(("market_exit", "order_type"), [(True, "market"), (False, "limit")])
+def test_run_carry_on_the_real_account_closes_at_market_even_with_a_quote(
+    config, tmp_path, market_exit, order_type
+):
+    """2026-10-31. On 2026-10-29 carry canceled MRVL's stops and sent a limit eight basis
+    points past the last trade. The ask rose past it within seconds, nothing runs after
+    carry, and the short sat overnight with no stop. The placebo keeps its limit."""
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday")
+    broker.partial_fill_fraction = 0.0
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+
+    result = run_carry(cfg, broker, ledger, market_data, AS_OF, NOW, market_exit=market_exit)
+
+    assert result.closed == ["NVDA"]
+    assert _exit_order_types(broker, ledger) == [order_type]
+    assert not any("no current price" in i["message"] for i in ledger.incidents())
+    ledger.close()
+
+
+def test_run_carry_closes_for_the_overnight_cap_at_market_on_the_real_account(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path, overnight_gross_cap_pct=0.01)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="multi-day")
+    broker.partial_fill_fraction = 0.0
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+
+    result = run_carry(cfg, broker, ledger, market_data, AS_OF, NOW, market_exit=True)
+
+    assert result.closed_for_cap == ["NVDA"]
+    assert _exit_order_types(broker, ledger) == ["market"]
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("minutes_to_close", "order_type"), [(6, "market"), (5, "limit"), (2, "limit")]
+)
+def test_run_carry_keeps_its_limit_in_the_last_five_minutes(
+    config, tmp_path, minutes_to_close, order_type
+):
+    """BRIEF_INTRADAY.md: "Never plain market orders in the first or last five minutes."
+    The scheduled carry runs 15 minutes before the bell; a late dispatch might not."""
+    now = dt.datetime(2026, 9, 21, 20, 0, tzinfo=dt.UTC) - dt.timedelta(minutes=minutes_to_close)
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = _ClosesAt(dt.time(16, 0), now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday")
+    broker.partial_fill_fraction = 0.0
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0, at=now)})
+
+    run_carry(cfg, broker, ledger, market_data, AS_OF, now, market_exit=True)
+
+    assert _exit_order_types(broker, ledger) == [order_type]
+    ledger.close()
+
+
+def test_run_carry_in_the_last_five_minutes_with_no_price_still_closes_at_market(config, tmp_path):
+    """The 2026-10-15 fallback stands: with nothing to collar, the alternative is holding
+    an intraday position overnight."""
+    now = dt.datetime(2026, 9, 21, 19, 58, tzinfo=dt.UTC)
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = _ClosesAt(dt.time(16, 0), now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday")
+    broker.partial_fill_fraction = 0.0
+
+    result = run_carry(cfg, broker, ledger, _FakeMarketData(), AS_OF, now, market_exit=True)
+
+    assert result.closed == ["NVDA"]
+    assert _exit_order_types(broker, ledger) == ["market"]
+    assert any("carry has no current price" in i["message"] for i in ledger.incidents())
+    ledger.close()
+
+
+class _RejectsCarryExits(FakeBroker):
+    """Accepts entries and stops; rejects carry's exit."""
+
+    def submit_order(self, request):
+        if "-carry-" in request.client_order_id and request.type != "stop":
+            raise BrokerError("simulated rejection")
+        return super().submit_order(request)
+
+
+def test_run_carry_does_not_call_a_rejected_exit_closed(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = _RejectsCarryExits(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday")
+
+    result = run_carry(cfg, broker, ledger, _FakeMarketData(), AS_OF, NOW, market_exit=True)
+
+    assert result.closed == []
+    assert result.exits_failed == ["NVDA"]
+    assert [p.symbol for p in broker.list_positions()] == ["NVDA"]
+    ledger.close()
+
+
+def test_run_carry_keeps_closing_for_the_cap_past_a_rejected_exit(config, tmp_path):
+    """A failed cap close leaves the book over the cap, so the next one still goes."""
+
+    class _RejectsAmdExit(FakeBroker):
+        def submit_order(self, request):
+            if request.client_order_id.endswith("-carry-AMD-0"):
+                raise BrokerError("simulated rejection")
+            return super().submit_order(request)
+
+    cfg = _tradeable_config(config, tmp_path, overnight_gross_cap_pct=0.05)
+    ledger = _ledger(tmp_path)
+    broker = _RejectsAmdExit(now=NOW)
+    _seed_open_position(
+        broker, ledger, cfg, symbol="NVDA", horizon="multi-day", confidence=0.9, price=190.0
+    )
+    _seed_open_position(
+        broker, ledger, cfg, symbol="AMD", horizon="multi-day", confidence=0.2, price=150.0
+    )
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0), "AMD": _quote(150.0)})
+
+    result = run_carry(cfg, broker, ledger, market_data, AS_OF, NOW, market_exit=True)
+
+    assert result.exits_failed == ["AMD"]
+    assert result.closed_for_cap == ["NVDA"]
     ledger.close()
 
 
@@ -1985,7 +2110,7 @@ def test_run_carry_does_nothing_while_the_market_is_closed(config, tmp_path, hor
     broker.market_open = False
     market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
 
-    result = run_carry(cfg, broker, ledger, market_data, AS_OF, NOW, market_exit_without_price=True)
+    result = run_carry(cfg, broker, ledger, market_data, AS_OF, NOW, market_exit=True)
 
     assert result.skipped_reason == "market is closed"
     assert (result.closed, result.carried, result.closed_for_cap) == ([], [], [])
@@ -2397,6 +2522,90 @@ def test_run_eod_review_handles_a_malformed_response_without_crashing(config, tm
     assert any("malformed reviewer response" in i["message"] for i in ledger.incidents())
     text = Path(result.report_path).read_text(encoding="utf-8")
     assert "No Reviewer narration today: the Reviewer's response was malformed." in text
+    paper_ledger.close()
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("horizon", "market_open", "held"),
+    [("intraday", False, ("NVDA",)), ("multi-day", False, ()), ("intraday", True, ())],
+)
+def test_run_eod_review_flags_a_position_held_after_the_close(
+    config, tmp_path, market, horizon, market_open, held
+):
+    """2026-10-31. On 2026-10-29 MRVL's carry exit expired unfilled. Reconciliation
+    passed, since the ledger agreed the shares were still held, and the report said
+    nothing. A written multi-day thesis may stay open; a run before the bell proves nothing."""
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon=horizon)
+    broker.market_open = market_open
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+
+    result = run_eod_review(
+        cfg,
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        market,
+        paper_ledger,
+        None,
+        ledger,
+        _sequenced_llm_client(_result_json(structured_output={"not": "the right shape"})),
+        AS_OF,
+        "eod_review",
+        NOW,
+        broker=broker,
+    )
+
+    assert result.held_after_close == held
+    incidents = [i for i in ledger.incidents() if "held after the close" in i["message"]]
+    text = Path(result.report_path).read_text(encoding="utf-8")
+    if held:
+        [incident] = incidents
+        assert incident["severity"] == "error"
+        assert "NVDA" in incident["message"]
+        assert text.index("Still held after the close") < text.index("## Blotter")
+    else:
+        assert incidents == []
+        assert "Still held after the close" not in text
+    paper_ledger.close()
+    ledger.close()
+
+
+def test_run_eod_review_flags_a_held_position_on_a_run_that_finds_the_review_done(
+    config, tmp_path, market
+):
+    """GitHub's late copy lands hours after the on-time run, and fails too if it's still held."""
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday")
+    broker.market_open = False
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+    client = _sequenced_llm_client(_result_json(structured_output={"not": "the right shape"}))
+
+    def review():
+        return run_eod_review(
+            cfg,
+            _FakeMarketData(),
+            _FakeNewsClient(),
+            market,
+            paper_ledger,
+            None,
+            ledger,
+            client,
+            AS_OF,
+            "eod_review",
+            NOW,
+            broker=broker,
+        )
+
+    review()
+    second = review()
+
+    assert second.skipped_reason is not None
+    assert second.held_after_close == ("NVDA",)
     paper_ledger.close()
     ledger.close()
 

@@ -82,6 +82,8 @@ class EodReport:
     # -- rendered in place of each Reviewer-only section, so the report says why a
     # section is empty instead of the "not yet built" placeholder, which would be false.
     reviewer_note: str | None = None
+    # Symbols still held after the close with no multi-day thesis (`run_eod_review`).
+    held_after_close: tuple[str, ...] = ()
 
 
 def close_to_close_return(market_data_pit: Any, ticker: str, as_of: pd.Timestamp) -> float | None:
@@ -205,6 +207,7 @@ def build_eod_report(
     closing_market_report: str | None = None,
     playbook_proposal: str | None = None,
     reviewer_note: str | None = None,
+    held_after_close: tuple[str, ...] = (),
 ) -> EodReport:
     proposals = ledger.proposals_for(as_of)
     reflections = ledger.reflections_for(as_of)
@@ -237,6 +240,7 @@ def build_eod_report(
         closing_market_report=closing_market_report,
         playbook_proposal=playbook_proposal,
         reviewer_note=reviewer_note,
+        held_after_close=held_after_close,
     )
 
 
@@ -253,6 +257,13 @@ def render_eod_markdown(report: EodReport) -> str:
     no_reviewer = (
         f"No Reviewer narration today: {report.reviewer_note}." if report.reviewer_note else None
     )
+
+    if report.held_after_close:
+        lines.append(
+            "**Still held after the close with no multi-day thesis: "
+            f"{', '.join(report.held_after_close)}.** Needs attention before the open."
+        )
+        lines.append("")
 
     lines.append("## Blotter")
     if report.proposals:

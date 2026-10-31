@@ -145,6 +145,14 @@ at 16:00 ET, so on an early close it follows the real cycle instead (since 2026-
 runs its own carry in the cycle where the real one hands over, and declines afterward,
 when the real cycle finds the market closed.
 
+**Two jobs fail on purpose over a position that should have closed** (since 2026-10-31).
+Carry closes at market on the real account, and fails if an exit doesn't go out, which
+leaves about 15 minutes to act by hand. `eod-review` fails if a position with no
+multi-day thesis is still held after the close. Both commit their ledger and report
+first. The failure email for either one means an intraday position may be going overnight
+without a stop, so check it before the next open. GitHub's late `eod-review` copy fails
+again if the position is still there.
+
 ## Step 4 -- verify on the first trading day
 
 - **During the session:** the Actions tab should show `workflow_dispatch` runs at the

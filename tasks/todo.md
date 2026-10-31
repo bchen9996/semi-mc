@@ -3074,6 +3074,29 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         trades, -$1,208.71 gross, 41% won, to 58, -$2,215.46, 36%: the wrong entries had
         also merged three trades into others in `round_trip_count`. Its sizes were 15%
         until 2026-10-22 (5% since), so its P&L before then is at three times the risk.
+  - [x] **2026-10-31: carry closes at market, and an intraday position held after the
+        close fails eod-review (owner's go).** On 2026-10-29 carry canceled MRVL's three
+        stops and sent a buy limit of 215.63, eight basis points past the last IEX
+        trade. The ask rose past it within about three seconds, MRVL's low to the close
+        was 215.68, and no job runs after carry, so 35 shares short (about $7,600) sat
+        overnight with no stop. It closed at the 10-30 open at 203.05, +$459 where a
+        filled carry would have made about +$19: about $440 of luck, without which the
+        week is about -$302 net rather than +$138. Nothing raised an alarm:
+        reconciliation passed (the ledger agreed the shares were held), the 10-29 report
+        didn't mention it, and the only error was GitHub's late carry at 18:36 CT, a run
+        that exits 0. 1 of Stage 2's 3 carry exits had expired this way.
+        (1) `run_carry(market_exit=True)`, set on the real account only, sends every
+        close as a market order, including closes for the overnight cap. The brief's
+        "never plain market orders in the first or last five minutes" still holds: a
+        carry within five minutes of the broker calendar's close keeps the collared
+        limit, and goes to market only with no price to collar (the 2026-10-15
+        fallback). (2) An exit that doesn't go out is now in `CarryResult.exits_failed`,
+        not `closed`, and fails the `carry` job while there's time to act by hand.
+        (3) `run_eod_review`, on every run, treats a position held on a closed market
+        with no multi-day thesis as an error incident (so the day isn't clean), puts it
+        at the top of the report, and fails the job after the report and ledger are
+        committed. A second failure email from GitHub's late copy is expected if the
+        position is still held. The placebo keeps its limit.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so
