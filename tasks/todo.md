@@ -3163,6 +3163,11 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         don't justify one yet, so nothing sends a SOXX order. The risk model reads recent
         bars for betas and spreads, which doesn't spend the unseen period for basket rules:
         no trade rule is tested on them.
+  - [x] **2026-10-31: following the outlier, the one out-of-sample test (owner's go; step 5
+        of the plan): dropped.** +2.66 bps gross per trade, std error 9.23, 49 trades over 86
+        sessions, against a bar of +4 fixed in advance. See `research_log.md`. That spends
+        July to October 2026 for basket, z-score and outlier rules; a later test needs bars
+        from 2026-11-02 on. Step 4, the Stage 3 decision, is the plan's only open item.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so

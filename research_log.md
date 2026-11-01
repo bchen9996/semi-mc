@@ -422,3 +422,34 @@ gross edge in the tight triple and loses before costs across all 14, so outliers
 keep going. The mirror of the third row, following the outlier, is the one lead: +7.5 bps
 gross, -8.5 at 8 bps a side, +3.5 at 2. It came from reading this table, so it needs the
 unseen period, once, and is thin even if it holds.
+
+## 2026-10-31 -- following the outlier, the one out-of-sample test: dropped
+
+Owner's go the same day. The rule, the data and the decision bands were written down before
+any bar from 2026-07-01 on was fetched. **This spends July to October 2026 for basket, z-score
+and outlier rules. The next unseen bars start 2026-11-02.**
+
+Rule: the third row of the entry above (any of the 14, hedged with SOXX), every parameter and
+exit unchanged, each trade's sign flipped. The two triple variants weren't run. The script first
+reproduced that row trade for trade (464 trades, -7.53 bps, t -2.68); only its data load and
+reporting differ from the original. 5-minute SIP bars, 86 full sessions, no gaps.
+
+Decision on gross bps per trade, fixed in advance: +4 or less, drop (doesn't cover 2 bps a
+side); above +4 up to +16, watch and build nothing; above +16, worth building (clears 8 bps a
+side).
+
+| variant | trades | gross bps | std error | t | net at 8 bps a side | net at 2 bps a side | $/yr at 8 | $/yr at 2 |
+|---|---|---|---|---|---|---|---|---|
+| follow, any of the 14, hedged with SOXX | 49 | +2.66 | 9.23 | 0.29 | -13.3 | -1.3 | -5,746 | -577 |
+
+Day-resampled bootstrap (10,000 draws, seed 20261031), probability the mean day is positive:
+7.1% at 8 bps, 44.3% at 2. Gross by month: July +15.4 (13 trades), August +8.9 (10), September
++13.7 (13), October -25.9 (13). Without the single best trade, -0.25. Exits: 43 at 15:45, 5
+stops, 1 target. 0.57 trades a session, against 0.83 before and a slowest earlier quarter of
+0.61, with entry |z| (median 2.32 against 2.35) and names much as before. 70 trades and a 7 bps
+error were expected; 49 and 9 bps is what the period gave.
+
+**Read:** dropped, by the band fixed in advance. With 49 trades the error bar also fits the
+earlier +7.5, so this doesn't show the effect is zero. It shows nothing here pays for its costs.
+The month split isn't a lead: picking July to September out of it would repeat how this lead
+was found. A z-score stays context for the Trader and not a signal.

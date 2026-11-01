@@ -960,5 +960,5 @@ to the one rule built on this module, the net-exposure cap, which uses only the 
 
 **The z-score.** A name's log move since the open, less its beta times SOXX's, over the
 standard deviation of that same residual at that time of day across the 60 sessions. It
-describes whether a move is the name's own. It isn't a signal: the 2026-10-31 entry in
-`research_log.md` found no edge in fading it.
+describes whether a move is the name's own. It isn't a signal: `research_log.md` found no
+edge in fading it (2026-10-31), and following it failed its one out-of-sample test the same day.
