@@ -934,3 +934,31 @@ centre (mean PIT 0.54-0.65 for every model), which a mean-preserving spread cann
 **A `garch_t` defect found along the way**, since fixed by the simulated-variance cap
 (section 3): with `nu` below 4 or persistence at 1, `garch_t`'s 252-day simulations
 occasionally contained explosive paths, which dominated the energy-form CRPS.
+
+## 19. Book risk (`intraday/book_risk.py`)
+
+S4 holds a few semiconductor names, and SOXX explains about 61% of what they do over 30
+minutes, so several positions can be one bet. Added 2026-10-31 to say how much of one.
+
+**The model.** Built by the day's first cycle from the last 60 full sessions of 30-minute
+bars, ending the night before, and stored in the ledger: a cycle's runner has no price
+cache. Intraday bars and not daily returns, because S4 holds through the session and not
+the overnight gap. Half days are left out. Each name's beta is the slope of its 30-minute
+returns on SOXX's. The session covariance is 13 times the 30-minute covariance, which
+assumes no autocorrelation between bars and spreads variance evenly through the day.
+
+**The simulation.** One draw to the close, with zero drift. Each log return is Student-t
+with 4 degrees of freedom, a round number and not a fit, coupled by a Gaussian copula (a
+Cholesky factor on t draws breaks the marginals), with variance scaled by the share of the
+session left. Dollars come from simple returns. A Gaussian copula with t marginals has a
+little less linear correlation than the matrix it was given, so a hedged book's simulated
+variance runs slightly above the closed form: 397 against 388 for MU long against AMAT short.
+
+**What it doesn't know.** It ignores stops, so its tail is what the book could lose if none
+held. It uses trailing volatility, so it understates a day like 2026-10-30. Neither matters
+to the one rule built on this module, the net-exposure cap, which uses only the betas.
+
+**The z-score.** A name's log move since the open, less its beta times SOXX's, over the
+standard deviation of that same residual at that time of day across the 60 sessions. It
+describes whether a move is the name's own. It isn't a signal: the 2026-10-31 entry in
+`research_log.md` found no edge in fading it.

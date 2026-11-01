@@ -207,6 +207,8 @@ def run_placebo_cycle(
         prices={**prices, symbol: price},
         turnover_so_far_usd=turnover_so_far_usd(shadow_ledger, as_of, account.equity),
         last_stopout_at=shadow_ledger.last_stopout_times(),
+        # The real cycle's model, so both books meet the same net-exposure cap.
+        betas=(real_ledger.risk_model_for(as_of) or {}).get("betas", {}),
     )
     failures = validate_proposal(proposal, validation_context)
     status = "rejected" if failures else "accepted"

@@ -16,13 +16,15 @@ from __future__ import annotations
 
 import datetime as dt
 import math
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..config import IntradayConfig, IntradayRiskConfig
+from .book_risk import net_beta_usd
 from .ledger import IntradayLedger
 
 if TYPE_CHECKING:
@@ -204,6 +206,9 @@ class ValidationContext:
     # Closed, or failing to close, this cycle (`jobs.py::run_cycle`). A close's fill lands
     # seconds after it's sent, so an entry now would be built on a position already going.
     exiting_symbols: frozenset[str] = frozenset()
+    # Each symbol's beta to SOXX, from the day's risk model (`book_risk.py`). Empty without
+    # one, and a symbol with none counts as 1, so the net-exposure cap never lapses.
+    betas: Mapping[str, float] = field(default_factory=dict)
 
 
 def _accepted_proposals(context: ValidationContext) -> list[dict]:
@@ -343,6 +348,18 @@ def validate_proposal(proposal: TradeProposal, context: ValidationContext) -> li
     if net_long / context.equity > risk.net_long_cap_pct:
         failures.append(
             f"net long exposure would exceed net_long_cap_pct ({risk.net_long_cap_pct:.4f})"
+        )
+    # Either way, and only an entry that adds to it: one that brings the book back toward
+    # flat is always allowed, even with the book already past the cap.
+    net_beta_before = net_beta_usd(context.positions, context.betas)
+    net_beta_after = net_beta_before + signed_notional * context.betas.get(proposal.symbol, 1.0)
+    if (
+        abs(net_beta_after) > abs(net_beta_before)
+        and abs(net_beta_after) / context.equity > risk.net_beta_cap_pct
+    ):
+        failures.append(
+            f"net SOXX exposure would reach {net_beta_after / context.equity:+.1%} of equity, "
+            f"past net_beta_cap_pct ({risk.net_beta_cap_pct:.0%})"
         )
 
     daily_pnl_pct = (

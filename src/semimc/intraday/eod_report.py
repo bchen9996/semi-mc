@@ -86,6 +86,8 @@ class EodReport:
     held_after_close: tuple[str, ...] = ()
     # `hedge.py`'s summaries under "today", "agent" and, with a shadow ledger, "placebo".
     hedged: dict[str, Any] | None = None
+    # `book_risk.py::summarize_book_risk`, the day's extremes. `None` if nothing measured.
+    book_risk: dict[str, Any] | None = None
 
 
 def close_to_close_return(
@@ -217,6 +219,7 @@ def build_eod_report(
     reviewer_note: str | None = None,
     held_after_close: tuple[str, ...] = (),
     hedged: dict[str, Any] | None = None,
+    book_risk: dict[str, Any] | None = None,
 ) -> EodReport:
     proposals = ledger.proposals_for(as_of)
     reflections = ledger.reflections_for(as_of)
@@ -251,6 +254,7 @@ def build_eod_report(
         reviewer_note=reviewer_note,
         held_after_close=held_after_close,
         hedged=hedged,
+        book_risk=book_risk,
     )
 
 
@@ -295,6 +299,25 @@ def _hedged_lines(hedged: dict[str, Any]) -> list[str]:
     lines.append(_hedged_since_line("Agent", hedged["agent"]))
     if "placebo" in hedged:
         lines.append(_hedged_since_line("Placebo", hedged["placebo"]))
+    return [*lines, ""]
+
+
+def _book_risk_lines(risk: dict[str, Any]) -> list[str]:
+    lines = [
+        "## Book risk (measured each cycle; only the net exposure is a limit)",
+        f"- Cycles measured: {risk['cycles']}",
+        f"- Peak net SOXX exposure: {risk['peak_net_beta_pct']:+.1%} of equity "
+        f"(cap {risk['net_beta_cap_pct']:.0%})",
+        f"- Largest simulated loss to the close, at {risk['tail_probability']:.0%} probability "
+        f"with no stop holding: {_money(risk['largest_tail_loss_usd'])}",
+        f"- Highest chance of ending past the soft loss limit: "
+        f"{risk['highest_soft_limit_probability']:.1%}",
+    ]
+    if risk["highest_sector_share"] is not None:
+        lines.append(f"- Highest share of book risk from SOXX: {risk['highest_sector_share']:.0%}")
+    if risk["largest_held_z"] is not None:
+        symbol, score = risk["largest_held_z"]
+        lines.append(f"- Largest z-score on a held name: {symbol} {score:+.1f}")
     return [*lines, ""]
 
 
@@ -359,6 +382,8 @@ def render_eod_markdown(report: EodReport) -> str:
     lines.append("")
     if report.hedged is not None:
         lines += _hedged_lines(report.hedged)
+    if report.book_risk is not None:
+        lines += _book_risk_lines(report.book_risk)
 
     lines.append("## Benchmarks for the day")
     lines.append(

@@ -3144,6 +3144,25 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         aren't distinguishable from the placebo's. Exits within a day aren't independent,
         so those errors are if anything too small. **Not done:** the weekly review doesn't show it
         yet. The first real run backfills Stage 2 at Monday's eod-review.
+  - [x] **2026-10-31: the book's risk, and a cap on its net SOXX exposure (owner's go; step
+        3 of the plan).** `intraday/book_risk.py`, maths in MODEL_NOTES section 19. The day's
+        first cycle builds a risk model from 60 sessions of 30-minute bars and stores it in
+        the ledger, since a cycle's runner has no price cache. Every cycle then measures
+        the book: net SOXX exposure, a Monte Carlo of P&L to the close (20,000 paths, 2-30
+        ms), the share of its risk that's the sector, and each name's beta, z-score and
+        correlation with the book. The Trader sees them as `book_risk`, the ledger keeps
+        them in `book_risk`, and the daily report shows the day's extremes.
+        **Only one rule:** `risk.net_beta_cap_pct`, 0.80 by default and 0.40 at the half
+        budget, against Stage 2 peaks of 30.5% (agent) and 32.2% (placebo). An entry past it
+        is rejected, an entry reducing it never is, a missing beta counts as 1, and the
+        placebo meets the same cap with the same betas. The simulation informs and blocks
+        nothing: at these sizes it rarely comes near a loss limit. Real-data check: three 15%
+        longs in MU, LRCX and AMAT are 48% net, past the cap, with 72% of their risk the
+        sector; MU long against AMAT short is 2.8% net and 1%. The Trader's prompt says a
+        z-score is context and not a signal. **Not built:** a real hedge. Step 2's numbers
+        don't justify one yet, so nothing sends a SOXX order. The risk model reads recent
+        bars for betas and spreads, which doesn't spend the unseen period for basket rules:
+        no trade rule is tested on them.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so

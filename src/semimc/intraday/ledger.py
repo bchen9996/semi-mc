@@ -193,6 +193,21 @@ CREATE TABLE IF NOT EXISTS monitor_checks (
     checked_at TEXT NOT NULL,
     gap_seconds REAL
 );
+
+CREATE TABLE IF NOT EXISTS risk_models (
+    as_of TEXT PRIMARY KEY,
+    model_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS book_risk (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    as_of TEXT NOT NULL,
+    cycle TEXT NOT NULL,
+    label TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 _OPEN_ORDER_STATUSES = ("new", "accepted", "partially_filled")
@@ -996,6 +1011,49 @@ class IntradayLedger:
         return out
 
     # -- monitor checks (S4, cadence telemetry, found 2026-09-23) ------------------------
+
+    def record_risk_model(self, as_of: pd.Timestamp, model: dict[str, Any]) -> None:
+        """The day's `book_risk.RiskModel`, one row a day (added 2026-10-31): a cycle's
+        runner has no price cache, so the model it reads has to live here."""
+        self._conn.execute(
+            """
+            INSERT INTO risk_models (as_of, model_json, created_at) VALUES (?, ?, ?)
+            ON CONFLICT(as_of) DO UPDATE SET model_json = excluded.model_json
+            """,
+            (str(pd.Timestamp(as_of)), _dumps(model), _now()),
+        )
+        self._conn.commit()
+
+    def risk_model_for(self, as_of: pd.Timestamp) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT model_json FROM risk_models WHERE as_of = ?", (str(pd.Timestamp(as_of)),)
+        ).fetchone()
+        return json.loads(row["model_json"]) if row is not None else None
+
+    def record_book_risk(
+        self, as_of: pd.Timestamp, cycle: str, label: str, payload: dict[str, Any]
+    ) -> None:
+        """One measurement of the book. `label` is `"book"` for the cycle's own, or names
+        the accepted entry it was measured after."""
+        self._conn.execute(
+            """
+            INSERT INTO book_risk (as_of, cycle, label, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (str(pd.Timestamp(as_of)), cycle, label, _dumps(payload), _now()),
+        )
+        self._conn.commit()
+
+    def book_risk_for(self, as_of: pd.Timestamp) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM book_risk WHERE as_of = ? ORDER BY id", (str(pd.Timestamp(as_of)),)
+        ).fetchall()
+        out = []
+        for row in rows:
+            data = dict(row)
+            data["payload"] = json.loads(data.pop("payload_json"))
+            out.append(data)
+        return out
 
     def record_monitor_check(
         self, as_of: pd.Timestamp, cycle: str, checked_at: dt.datetime

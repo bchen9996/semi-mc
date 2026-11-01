@@ -443,6 +443,10 @@ class IntradayRiskConfig(_Base):
     single_name_cap_pct: float = Field(0.15, gt=0)
     gross_cap_pct: float = Field(1.50, gt=0)
     net_long_cap_pct: float = Field(1.00, gt=0)
+    # The book's net SOXX exposure, beta-weighted, either way (`proposals.py`, 2026-10-31).
+    # An entry that would pass it is rejected; one that reduces it never is. Half this in
+    # Stage 2 is 0.40, against peaks of 30.5% (agent) and 32.2% (placebo) from 10-15 to 10-30.
+    net_beta_cap_pct: float = Field(0.80, gt=0)
     daily_loss_soft_pct: float = Field(0.02, gt=0)
     daily_loss_hard_pct: float = Field(0.03, gt=0)
     cooldown_minutes_after_stopout: int = Field(30, ge=0)
@@ -494,6 +498,19 @@ class IntradayHedgeConfig(_Base):
     # before the entry.
     beta_window_days: int = Field(90, gt=0)
     beta_min_observations: int = Field(30, gt=1)
+
+
+class IntradayBookRiskConfig(_Base):
+    """The daily risk model and each cycle's Monte Carlo (`intraday/book_risk.py`, added
+    2026-10-31). Information for the Trader and the report: the only rule is
+    `risk.net_beta_cap_pct`."""
+
+    lookback_sessions: int = Field(60, gt=1)
+    min_sessions: int = Field(30, gt=1)
+    mc_paths: int = Field(20_000, gt=0)
+    # Fat tails, not fitted: a round number in the range daily semiconductor returns show.
+    student_t_df: float = Field(4.0, gt=2)
+    tail_probability: float = Field(0.05, gt=0, lt=1)
 
 
 class IntradayOptionsConfig(_Base):
@@ -705,6 +722,7 @@ class IntradayConfig(_Base):
     risk: IntradayRiskConfig = Field(default_factory=IntradayRiskConfig)
     schedule: IntradayScheduleConfig = Field(default_factory=IntradayScheduleConfig)
     hedge: IntradayHedgeConfig = Field(default_factory=IntradayHedgeConfig)
+    book_risk: IntradayBookRiskConfig = Field(default_factory=IntradayBookRiskConfig)
     options: IntradayOptionsConfig = Field(default_factory=IntradayOptionsConfig)
     models: IntradayModelsConfig = Field(default_factory=IntradayModelsConfig)
     research: IntradayResearchConfig = Field(default_factory=IntradayResearchConfig)

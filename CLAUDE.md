@@ -92,6 +92,10 @@ Regenerate test fixtures with `uv run python tests/fixtures/make_fixtures.py`.
   (`forecasting/pipeline.py`) is the only place a Phase 4B panel is assembled in a loop; it
   calls `build_regression_row`, which calls `signal_panel`, which is the only caller of the
   four ticker-level signal builders. One choke point per data path, same as `training_window`.
+- **A z-score and the book's Monte Carlo inform; only the net SOXX cap is a rule.**
+  `intraday/book_risk.py` builds a daily model in the first cycle and stores it in the
+  ledger, because a cycle's runner has no price cache. `risk.net_beta_cap_pct` is enforced in
+  `validate_proposal`, for the placebo too. See MODEL_NOTES section 19.
 - **The sector hedge is measured, not traded.** `intraday/hedge.py` adds a `hedge` block
   to each reflection from `run_eod_review`; nothing sends a SOXX order. Compare sleeves in
   basis points (`HedgedSummary.mean_bps`), since their sizes differ.

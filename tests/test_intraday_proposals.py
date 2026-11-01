@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from semimc.config import IntradayConfig
+from semimc.config import IntradayConfig, IntradayRiskConfig
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.proposals import (
     TradeProposal,
@@ -198,6 +198,62 @@ def test_gross_cap_is_enforced(tmp_path):
 def _mu_open(size_pct: float) -> TradeProposal:
     # 2026-10-01's case: MU at $1,081 on a $100k account, invalidation ~1.5% away.
     return _open(symbol="MU", size_pct=size_pct, limit_price=1081.0, invalidation_price=1065.0)
+
+
+def _capped(tmp_path, positions, betas, cap=0.40):
+    config = IntradayConfig().model_copy(
+        update={"risk": IntradayRiskConfig(net_beta_cap_pct=cap, gross_cap_pct=5.0)}
+    )
+    return _context(tmp_path, config=config, positions=positions, betas=betas)
+
+
+def _net_beta_failures(failures) -> list[str]:
+    return [f for f in failures if "net_beta_cap_pct" in f]
+
+
+def test_an_entry_past_the_net_soxx_cap_is_rejected(tmp_path):
+    """Two 15% positions at beta 1.4 are 42% of equity in SOXX terms. That's one bet."""
+    context = _capped(
+        tmp_path, {"MU": 15_000.0, "AMD": 15_000.0}, {"MU": 1.4, "AMD": 1.4, "NVDA": 0.5}
+    )
+    # $5,000 more of NVDA at 0.5 takes 42.0% to 44.5%.
+
+    failures = _net_beta_failures(validate_proposal(_open(size_pct=0.05), context))
+
+    assert len(failures) == 1
+    assert "+44.5%" in failures[0]
+
+
+def test_the_cap_applies_to_a_short_book_too(tmp_path):
+    context = _capped(tmp_path, {"MU": -30_000.0}, {"MU": 1.4, "NVDA": 0.5})
+
+    failures = validate_proposal(
+        _open(side="sell", limit_price=190.0, invalidation_price=195.0, size_pct=0.05), context
+    )
+
+    assert _net_beta_failures(failures)
+
+
+def test_an_entry_that_brings_the_book_back_is_allowed_past_the_cap(tmp_path):
+    context = _capped(tmp_path, {"MU": 40_000.0}, {"MU": 1.4, "NVDA": 0.5})
+
+    failures = validate_proposal(
+        _open(side="sell", limit_price=190.0, invalidation_price=195.0, size_pct=0.05), context
+    )
+
+    assert _net_beta_failures(failures) == []
+
+
+def test_an_entry_within_the_cap_passes(tmp_path):
+    context = _capped(tmp_path, {"MU": 10_000.0}, {"MU": 1.4, "NVDA": 0.5})
+
+    assert _net_beta_failures(validate_proposal(_open(size_pct=0.05), context)) == []
+
+
+def test_without_a_risk_model_the_cap_still_holds_at_a_beta_of_one(tmp_path):
+    context = _capped(tmp_path, {"MU": 38_000.0}, {})
+
+    assert _net_beta_failures(validate_proposal(_open(size_pct=0.05), context))
 
 
 def test_an_entry_in_a_name_being_closed_this_cycle_is_rejected(tmp_path):

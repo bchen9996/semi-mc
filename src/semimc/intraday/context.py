@@ -99,6 +99,10 @@ TRADER_SECTIONS: dict[str, str] = {
         "trading so far today, from 5-minute bars, for each watchlist name, each open "
         "position and every name in market_panel; fields as in session_fields"
     ),
+    "book_risk": (
+        "the book's net SOXX exposure and simulated tail, and each name's beta, z-score and "
+        "correlation with the book"
+    ),
     "options_available": "whether option proposals are being priced this cycle",
 }
 """What each section of :func:`build_trader_context`'s payload holds, in words: the
@@ -116,6 +120,7 @@ def build_trader_context(
     prices: dict[str, float],
     headlines: list[dict[str, Any]] | None = None,
     session: dict[str, dict[str, Any]] | None = None,
+    book_risk: dict[str, Any] | None = None,
 ) -> ContextBundle:
     """The Trader's actual per-cycle payload.
 
@@ -139,6 +144,10 @@ def build_trader_context(
     each symbol's day so far -- open, opening range, high/low, VWAP, relative volume --
     without which a Researcher trigger about the opening range or volume could never be
     checked. Untrusted for the same reason `prices` is: it comes from the market-data feed.
+
+    `book_risk` (2026-10-31, default `None` -> `{}`) is `book_risk.py::trader_section`: the
+    book's net SOXX exposure and simulated tail, and each name's beta, z-score and
+    correlation with the book.
     """
     todays = ledger.proposals_for(as_of)
     # Less any whose entries were canceled with nothing filled (2026-10-22).
@@ -170,6 +179,7 @@ def build_trader_context(
         ],
         "headlines": headlines or [],
         "session": session or {},
+        "book_risk": book_risk or {},
         # Rollout Stage 4 (Phase 12b): tells the Trader whether an instrument="option"
         # proposal is even worth constructing this cycle -- config governs what the model
         # is told, not the model governing itself, same discipline every other switch in
@@ -183,7 +193,7 @@ def build_trader_context(
         as_of,
         cycle,
         sections,
-        untrusted_keys=["watchlist", "prices", "headlines", "session"],
+        untrusted_keys=["watchlist", "prices", "headlines", "session", "book_risk"],
     )
 
 

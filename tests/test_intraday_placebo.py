@@ -23,7 +23,7 @@ from semimc.intraday.jobs import closed_market_note, early_close_note_prefix
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.orders import build_entry_order, submit_order_with_fault_isolation
 from semimc.intraday.placebo import run_placebo_carry, run_placebo_cycle
-from semimc.intraday.proposals import TradeProposal
+from semimc.intraday.proposals import TradeProposal, stop_sized_pct
 
 AS_OF = pd.Timestamp("2026-09-21")
 NOW = dt.datetime(2026, 9, 21, 8, 35)
@@ -415,3 +415,32 @@ def test_the_placebo_runs_carry_when_the_real_cycle_did_before_an_early_close(
     assert broker.list_positions() == []
     real_ledger.close()
     shadow_ledger.close()
+
+
+@pytest.mark.parametrize(("beta", "status"), [(1.5, "rejected"), (0.5, "accepted")])
+def test_the_placebo_meets_the_same_net_cap_with_the_real_cycles_betas(
+    config, tmp_path, beta, status
+):
+    """Both books are measured against each other, so they play by one rule. The cap sits
+    between the entry's size at beta 0.5 and at 1.5, and above it at the fallback's 1."""
+    cfg = _placebo_config(config, tmp_path)
+    size = stop_sized_pct(
+        190.0, 190.0 * (1 - cfg.intraday.placebo.stop_distance_pct), cfg.intraday.risk
+    )
+    risk = cfg.intraday.risk.model_copy(update={"net_beta_cap_pct": size * 1.2})
+    cfg = cfg.model_copy(update={"intraday": cfg.intraday.model_copy(update={"risk": risk})})
+    real = IntradayLedger(tmp_path / "real.sqlite3")
+    shadow = IntradayLedger(tmp_path / "shadow.sqlite3")
+    real.record_watchlist_item(AS_OF, "NVDA", thesis="real watchlist")
+    real.record_risk_model(AS_OF, {"betas": {"NVDA": beta}})
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+    broker = FakeBroker(now=NOW)
+
+    run_placebo_cycle(
+        "cycle_1", cfg, broker, shadow, real, market_data, AS_OF, NOW, random.Random(1)
+    )
+
+    [row] = shadow.proposals_for(AS_OF)
+    assert row["status"] == status
+    real.close()
+    shadow.close()

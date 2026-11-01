@@ -134,10 +134,17 @@ class _FakeMarketData:
         return {s: source[s] for s in symbols if s in source}
 
     def bars(self, symbols, start, end, minutes=5):
-        self.bar_requests.append({"symbols": list(symbols), "start": start, "end": end})
+        self.bar_requests.append(
+            {"symbols": list(symbols), "start": start, "end": end, "minutes": minutes}
+        )
         if self.bars_raise:
             raise RuntimeError("bars endpoint unreachable")
         return {s: self.bars_by_symbol[s] for s in symbols if s in self.bars_by_symbol}
+
+
+def _session_requests(market_data: _FakeMarketData) -> list[dict]:
+    """The cycle's 5-minute request, not the risk model's 30-minute one."""
+    return [r for r in market_data.bar_requests if r["minutes"] == 5]
 
 
 def _quote(price: float, spread: float = 0.05, at: dt.datetime = NOW) -> _FakeQuote:
@@ -3214,7 +3221,7 @@ def test_run_cycle_gives_the_trader_session_data_for_symbols_in_view(config, tmp
 
     run_cycle("cycle_1", cfg, FakeBroker(), ledger, market_data, client, AS_OF, now)
 
-    assert market_data.bar_requests[0]["symbols"] == sorted({"NVDA", *market_panel(cfg)})
+    assert _session_requests(market_data)[0]["symbols"] == sorted({"NVDA", *market_panel(cfg)})
     session = json.loads(calls[0]["stdin"])["sections"]["session"]
     assert session["NVDA"]["open"] == 186
     assert session["NVDA"]["opening_range"]["complete"] is True
@@ -3304,7 +3311,7 @@ def test_run_cycle_trades_a_watchlist_name_outside_the_universe(config, tmp_path
 
     assert result.proposals_accepted == 1
     assert [p.symbol for p in broker.list_positions()] == ["JBL"]
-    assert "JBL" in market_data.bar_requests[0]["symbols"]
+    assert "JBL" in _session_requests(market_data)[0]["symbols"]
     ledger.close()
 
 
@@ -3722,7 +3729,7 @@ def test_session_closes_takes_the_last_bar_before_the_bell():
     now = dt.datetime(2026, 9, 21, 20, 15)
 
     assert session_closes(["SOXX", "AVGO"], market_data, AS_OF, now) == {"SOXX": 500.17}
-    [request] = market_data.bar_requests
+    [request] = _session_requests(market_data)
     assert request["end"] == dt.datetime(2026, 9, 21, 20, 0, tzinfo=dt.UTC)
 
 
@@ -3999,6 +4006,189 @@ def test_a_tranched_entry_whose_second_piece_is_canceled_still_counts(config, tm
     assert len(third.orders_submitted) == 1  # the second piece again, at today's price
     assert ledger.get_order(third.orders_submitted[0])["tranche_index"] == 2
     assert [row["symbol"] for row in ledger.counted_proposals_for(AS_OF)] == ["NVDA"]
+    ledger.close()
+
+
+# -- book risk (2026-10-31) ------------------------------------------------------------------
+
+
+def _thirty_minute_bars(symbols: dict[str, float], sessions: int = 40) -> dict[str, list]:
+    """Each symbol moving `beta` times SOXX, with a little noise of its own."""
+    rng = np.random.default_rng(7)
+    days = pd.bdate_range(end=AS_OF - pd.Timedelta(days=1), periods=sessions)
+    out: dict[str, list] = {symbol: [] for symbol in symbols}
+    for day in days:
+        opened = day.tz_localize("America/New_York") + pd.Timedelta(hours=9.5)
+        levels = dict.fromkeys(symbols, 100.0)
+        for bar in range(13):
+            at = (opened + pd.Timedelta(minutes=30 * bar)).tz_convert("UTC").to_pydatetime()
+            shock = float(rng.normal(0, 0.004))
+            for symbol, beta in symbols.items():
+                move = beta * shock + float(rng.normal(0, 0.001)) * (symbol != "SOXX")
+                close = levels[symbol] * float(np.exp(move))
+                out[symbol].append(_Ohlc(at, levels[symbol], close))
+                levels[symbol] = close
+    return out
+
+
+@dataclass
+class _Ohlc:
+    timestamp: dt.datetime
+    open: float
+    close: float
+    high: float = 0.0
+    low: float = 0.0
+    volume: float = 100.0
+    vwap: float | None = None
+
+
+def test_a_cycle_builds_the_days_model_once_and_shows_the_trader_the_book(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "AMD", thesis="test")
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday", time_stop_minutes=1000)
+    bars = _thirty_minute_bars({"NVDA": 1.5, "AMD": 1.2, "SOXX": 1.0})
+    market_data = _FakeMarketData(
+        quotes={"NVDA": _quote(190.0), "AMD": _quote(150.0)}, bars_by_symbol=bars
+    )
+    calls, client = _recording_llm_client(_result_json(structured_output={"proposals": []}))
+
+    run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+    run_cycle("cycle_2", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+
+    section = json.loads(calls[0]["stdin"])["sections"]["book_risk"]
+    assert section["net_beta_pct"] > 0
+    assert section["net_beta_cap_pct"] == cfg.intraday.risk.net_beta_cap_pct
+    assert section["tail_loss_usd"] < 0
+    assert set(section["betas"]) == {"NVDA", "AMD"}
+    assert section["correlation_with_book"]["AMD"] > 0.5
+    assert [r["label"] for r in ledger.book_risk_for(AS_OF)] == ["book", "book"]
+    assert sum(1 for r in market_data.bar_requests if r["minutes"] == 30) == 1
+    ledger.close()
+
+
+@pytest.mark.parametrize(("beta", "status"), [(1.5, "rejected"), (0.5, "accepted")])
+def test_the_net_cap_reads_the_days_betas(config, tmp_path, beta, status):
+    """The stop sizes this entry at 0.1% / (3/190) = 6.3% of equity. At beta 1.5 that's 9.5%
+    in SOXX terms, past an 8% cap; at 0.5 it's 3.2%. A beta of 1 passes, so only the model's
+    own beta can reject it."""
+    cfg = _tradeable_config(config, tmp_path, net_beta_cap_pct=0.08, entry_tranches=1)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    broker = FakeBroker(now=NOW)
+    market_data = _FakeMarketData(
+        quotes={"NVDA": _quote(190.0)},
+        bars_by_symbol=_thirty_minute_bars({"NVDA": beta, "SOXX": 1.0}),
+    )
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [_entry("NVDA", 190.0, 187.0)]})
+    )
+
+    run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+
+    [row] = [r for r in ledger.proposals_for(AS_OF) if r["action"] == "open"]
+    assert row["status"] == status
+    assert ("net_beta_cap_pct" in (row["reason"] or "")) == (status == "rejected")
+    ledger.close()
+
+
+def test_an_accepted_entry_is_measured_with_the_book_it_makes(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path, entry_tranches=1)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    broker = FakeBroker(now=NOW)
+    market_data = _FakeMarketData(
+        quotes={"NVDA": _quote(190.0)},
+        bars_by_symbol=_thirty_minute_bars({"NVDA": 1.5, "SOXX": 1.0}),
+    )
+    client = _sequenced_llm_client(
+        _result_json(structured_output={"proposals": [_entry("NVDA", 190.0, 187.0)]})
+    )
+
+    run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+
+    labels = [r["label"] for r in ledger.book_risk_for(AS_OF)]
+    assert labels == ["book", "after open NVDA"]
+    [_, after] = ledger.book_risk_for(AS_OF)
+    assert after["payload"]["positions"]["NVDA"] > 0
+    assert after["payload"]["net_beta_pct"] > 0
+    ledger.close()
+
+
+def test_a_cycle_runs_without_a_model_when_there_are_no_bars(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    broker = FakeBroker(now=NOW)
+    calls, client = _recording_llm_client(_result_json(structured_output={"proposals": []}))
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)})
+
+    run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+
+    assert json.loads(calls[0]["stdin"])["sections"]["book_risk"] == {}
+    assert ledger.book_risk_for(AS_OF) == []
+    ledger.close()
+
+
+def test_a_failure_in_the_risk_layer_costs_the_section_and_not_the_cycle(config, tmp_path):
+    cfg = _tradeable_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_watchlist_item(AS_OF, "NVDA", thesis="test")
+    broker = FakeBroker(now=NOW)
+    calls, client = _recording_llm_client(_result_json(structured_output={"proposals": []}))
+    market_data = _FakeMarketData(quotes={"NVDA": _quote(190.0)}, bars_raise=True)
+
+    run_cycle("cycle_1", cfg, broker, ledger, market_data, client, AS_OF, NOW)
+
+    assert len(calls) == 1
+    assert json.loads(calls[0]["stdin"])["sections"]["book_risk"] == {}
+    assert any("book risk unavailable" in i["message"] for i in ledger.incidents())
+    ledger.close()
+
+
+def test_the_eod_report_shows_the_days_book_risk(config, tmp_path):
+    cfg = _eod_review_config(config, tmp_path)
+    ledger = _ledger(tmp_path)
+    ledger.record_book_risk(
+        AS_OF,
+        "cycle_1",
+        "book",
+        {
+            "positions": {"NVDA": 5_000.0},
+            "net_beta_pct": 0.123,
+            "net_beta_cap_pct": 0.40,
+            "tail_probability": 0.05,
+            "tail_loss_usd": -640.0,
+            "soft_limit_probability": 0.002,
+            "sector_share": 0.72,
+            "z_scores": {"NVDA": -2.4},
+        },
+    )
+    ledger.record_proposal(AS_OF, "cycle_1", "NVDA", "no_trade", "accepted", payload={})
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+
+    result = run_eod_review(
+        cfg,
+        _FakeMarketData(),
+        _FakeNewsClient(),
+        _BetaMarket(),
+        paper_ledger,
+        None,
+        ledger,
+        _sequenced_llm_client(_result_json(structured_output={"not": "the right shape"})),
+        AS_OF,
+        "eod_review",
+        NOW,
+    )
+
+    text = Path(result.report_path).read_text(encoding="utf-8")
+    assert "## Book risk (measured each cycle; only the net exposure is a limit)" in text
+    assert "- Peak net SOXX exposure: +12.3% of equity (cap 40%)" in text
+    assert "with no stop holding: -640.00" in text
+    assert "- Highest share of book risk from SOXX: 72%" in text
+    assert "- Largest z-score on a held name: NVDA -2.4" in text
+    paper_ledger.close()
     ledger.close()
 
 

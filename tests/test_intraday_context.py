@@ -132,7 +132,13 @@ def test_build_trader_context_marks_feed_sourced_sections_as_untrusted(tmp_path)
     )
 
     # `session` (2026-09-30) comes from the same market-data feed as `prices`.
-    assert set(bundle.payload["untrusted"]) == {"watchlist", "prices", "headlines", "session"}
+    assert set(bundle.payload["untrusted"]) == {
+        "watchlist",
+        "prices",
+        "headlines",
+        "session",
+        "book_risk",  # built from those same bars
+    }
     assert "positions" not in bundle.payload["untrusted"]
     ledger.close()
 

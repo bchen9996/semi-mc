@@ -254,6 +254,7 @@ intraday:
     single_name_cap_pct: 0.15
     gross_cap_pct: 1.50
     net_long_cap_pct: 1.00
+    net_beta_cap_pct: 0.80
     daily_loss_soft_pct: 0.02
     daily_loss_hard_pct: 0.03
     cooldown_minutes_after_stopout: 30
@@ -272,6 +273,12 @@ intraday:
     instrument: SOXX
     beta_window_days: 90
     beta_min_observations: 30
+  book_risk:   # intraday/book_risk.py: information, except risk.net_beta_cap_pct
+    lookback_sessions: 60
+    min_sessions: 30
+    mc_paths: 20000
+    student_t_df: 4.0
+    tail_probability: 0.05
   options:
     enabled: false   # both gates unresolved -- see docs/alpaca_notes.md
     shadow_pricing: false   # Stage 4's own switch -- proposed, priced, logged, never traded

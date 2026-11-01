@@ -49,6 +49,14 @@ from ..execution.fake_broker import FakeBroker
 from ..execution.market_data import AlpacaMarketDataClient, AlpacaOptionsMarketDataClient
 from ..execution.news import AlpacaNewsClient
 from ..execution.orders import round_to_tick
+from .book_risk import (
+    RiskModel,
+    ensure_risk_model,
+    measure_book,
+    session_fraction_left,
+    summarize_book_risk,
+    trader_section,
+)
 from .context import (
     TRADER_SECTIONS,
     ReflectionUpdate,
@@ -1056,6 +1064,20 @@ def _todays_close_ny(broker: Broker, now: dt.datetime) -> pd.Timestamp | None:
     return pd.Timestamp(dt.datetime.combine(today, day.close)).tz_localize("America/New_York")
 
 
+def _fraction_of_session_left(broker: Broker, now: dt.datetime) -> float:
+    """From the broker's calendar. An unreadable one means a regular close, the right
+    default for a figure that only informs."""
+    now_ny = pd.Timestamp(now if now.tzinfo else now.replace(tzinfo=dt.UTC)).tz_convert(
+        "America/New_York"
+    )
+    close_at = None
+    with contextlib.suppress(Exception):
+        close_at = _todays_close_ny(broker, now)
+    if close_at is None:
+        close_at = now_ny.normalize() + pd.Timedelta(hours=16)
+    return session_fraction_left(now, close_at)
+
+
 def _signed(position: Position, value: float) -> float:
     """`value` (a position's qty or market value) signed by its side: a short negative
     (added 2026-10-21, before the first real short). The fake broker stores a short's qty
@@ -1498,6 +1520,36 @@ def run_cycle(
     session_symbols = sorted(symbols_in_view | set(market_panel(config)))
     session = _session_context(session_symbols, market_data, intraday, ledger, now)
 
+    # The book's risk (`book_risk.py`, 2026-10-31). It informs the Trader and the report;
+    # the one rule it feeds is the net-exposure cap below, which holds at a beta of 1
+    # without it. A failure here costs that information, never the cycle.
+    risk_model: RiskModel | None = None
+    book_section: dict[str, Any] | None = None
+    fraction_left = _fraction_of_session_left(broker, now)
+    try:
+        risk_model = ensure_risk_model(
+            ledger, market_data, intraday, config.universe.tickers, as_of
+        )
+        if risk_model is not None:
+            held_now = committed_notional(ledger, trader_positions, prices, account.equity)
+            measured = measure_book(
+                held_now,
+                account.equity,
+                equity_at_session_open,
+                risk_model,
+                fraction_left,
+                intraday,
+                as_of,
+                cycle,
+                "book",
+            )
+            book_section = trader_section(measured, risk_model, session, symbols_in_view, intraday)
+            ledger.record_book_risk(
+                as_of, cycle, "book", {**measured, "z_scores": book_section["z_scores"]}
+            )
+    except Exception as exc:  # noqa: BLE001 - missing context must not cost the cycle
+        ledger.record_incident("warning", f"book risk unavailable: {exc}")
+
     try:
         context = build_trader_context(
             as_of,
@@ -1509,6 +1561,7 @@ def run_cycle(
             prices,
             headlines=headlines,
             session=session,
+            book_risk=book_section,
         )
         response = invoke_role(
             "trader",
@@ -1605,6 +1658,7 @@ def run_cycle(
             next_earnings_date=next_earnings_date,
             tradable_symbols=frozenset(symbols_in_view),
             exiting_symbols=frozenset(exiting),
+            betas=risk_model.betas if risk_model is not None else {},
         )
         failures = validate_proposal(proposal, validation_context)
         status = "rejected" if failures else "accepted"
@@ -1640,6 +1694,27 @@ def run_cycle(
             committed[proposal.symbol] = committed.get(proposal.symbol, 0.0) + (
                 notional if proposal.side == "buy" else -notional
             )
+            if risk_model is not None:
+                label = f"after {proposal.action} {proposal.symbol}"
+                try:
+                    ledger.record_book_risk(
+                        as_of,
+                        cycle,
+                        label,
+                        measure_book(
+                            committed,
+                            account.equity,
+                            equity_at_session_open,
+                            risk_model,
+                            fraction_left,
+                            intraday,
+                            as_of,
+                            cycle,
+                            label,
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001 - same reasoning as above
+                    ledger.record_incident("warning", f"book risk unavailable: {exc}")
 
         if proposal.instrument == "option":
             # Stage 4 (BRIEF_INTRADAY.md rollout) -- priced and logged above, never
@@ -2249,6 +2324,7 @@ def run_eod_review(
         hedged["placebo"] = summarize_hedged(
             reflections_since(shadow_ledger.all_reflections(), hedging_from)
         )
+    book_risk = summarize_book_risk(ledger.book_risk_for(as_of))
     out_path = config.path(intraday.reports_dir) / str(pd.Timestamp(as_of).date()) / "eod.md"
 
     def write_mechanical_report(note: str) -> str:
@@ -2263,6 +2339,7 @@ def run_eod_review(
             reviewer_note=note,
             held_after_close=held_after_close,
             hedged=hedged,
+            book_risk=book_risk,
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(render_eod_markdown(report), encoding="utf-8")
@@ -2329,6 +2406,7 @@ def run_eod_review(
         **scorecard,
         "attribution": attribution,
         "sector_removed": {key: asdict(value) for key, value in hedged.items()},
+        "book_risk": book_risk,
     }
 
     try:
@@ -2458,6 +2536,7 @@ def run_eod_review(
         playbook_proposal=playbook_proposal,
         held_after_close=held_after_close,
         hedged=hedged,
+        book_risk=book_risk,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(render_eod_markdown(report), encoding="utf-8")

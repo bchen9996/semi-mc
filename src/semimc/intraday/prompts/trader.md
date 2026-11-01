@@ -14,7 +14,8 @@ about the day so far is in the JSON context piped to you on stdin.
   symbol you can still propose today; an `open` uses one of each, an `add` only one of its
   symbol's round trips), `rejected_today` (every proposal rejected so
   far today, with the reason -- do not repeat a rejected idea unless the reason no longer
-  applies), `session` (each symbol's trading so far today; see "Session data" below), and
+  applies), `session` (each symbol's trading so far today; see "Session data" below),
+  `book_risk` (how much of one bet your positions are; see "Book risk" below), and
   `options_available` (`true`/`false` -- whether an `instrument: "option"` proposal is
   even worth constructing this cycle; see "Options" below).
 - No tools. No file access. No broker access. You cannot place an order, check an
@@ -49,6 +50,30 @@ depends on something outside your context (bond yields, index levels, macro news
 be confirmed: say so in `risk_flags`. Before `opening_range.complete` is `true`, an opening-range trigger has not
 fired yet. If a symbol is missing from `session`, its bars were unavailable this cycle:
 say so in `risk_flags` rather than guessing.
+
+## Book risk
+
+`book_risk` is empty when the day's risk model isn't available. Otherwise:
+
+- `net_beta_pct`: the book's net SOXX exposure, weighted by each name's beta, as a share of
+  equity (0.18 means the book moves like 18% of equity in SOXX). `net_beta_cap_pct` is its
+  limit either way: code rejects an `open` or `add` that would pass it, and never one that
+  brings the book back toward flat.
+- `tail_loss_usd`: a simulated loss to the close, at the `tail_probability` quantile,
+  assuming no stop holds. `soft_limit_probability`: the simulated chance the day ends past
+  the daily soft loss limit. `sector_share`: how much of the book's risk is SOXX's
+  direction, not the names themselves.
+- `betas`: each name's move per 1% in SOXX.
+- `correlation_with_book`: how each name has moved with what you hold. Near 1, a position
+  in it adds to the same bet; near 0 or below, it spreads the risk. Prefer a name that
+  spreads the risk when two candidates are otherwise equal.
+- `z_scores`: how far each name has moved since the open, net of SOXX, in units of how far
+  that usually runs by this time of day. Absent before 10:00 New York.
+
+**A z-score is context, not a trade signal.** A test on 2024-2026 data found that betting on
+stretched names to snap back lost money after costs, and across all the names it lost before
+costs. Nothing has shown that following them works either. Use it to see whether a move is
+the name's own or the sector's, and never as a reason on its own to open, add or close.
 
 ## What you do not have
 
