@@ -3179,6 +3179,20 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
   - [ ] **2027-03-14: CDT begins.** Move those three crons and their `if:` lines 1 hour
         earlier, and update `tests/test_push_ledger.py`. cron-job.org follows each job's own
         timezone.
+  - [x] **2026-11-02: `time_stop_grace_minutes` from 2 to 4.** On the first live day with
+        the grace, INTC's entry rested 1:53, so its 60-minute stop was 2.48 minutes short at
+        the 10:00 CT check and ran 88. The placebo's NVDA ran 148 on a 120-minute stop:
+        open-batch fills reach a check 1.5 to 2.5 minutes short, right at the edge of 2. A
+        4-minute grace also covers the slowest Stage 2 fill (170 seconds). A stop can now
+        fire up to 4 minutes early.
+  - [x] **2026-11-02: `sector_shadow` gets its FRED series on the runner.** The file is
+        gitignored and no workflow fetched it, so the sleeve's three decisions so far fell
+        back to S0. A step in `decide-and-execute` now fetches it, for that matrix entry
+        only, and a failed download only warns. No weights change yet (T4 in `THESES.md`),
+        and November's decision stands.
+  - [ ] **2026-12-01: the first `sector_shadow` decision with the series.** Its
+        `diagnostics_json` should show `tilt_applied: true`, the first proof the download
+        works on a runner. `"reason": "unavailable..."` means it failed.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so

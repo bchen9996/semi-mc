@@ -485,8 +485,10 @@ class IntradayScheduleConfig(_Base):
     cycle_interval_minutes: int = Field(30, gt=0)
     # A time stop this close to due counts as due at a check (2026-10-31). Checks run about
     # 45 seconds into a half hour and fills land about a minute in, so at a 30-minute
-    # cadence a stop comes due just after a check and would wait for the next one.
-    time_stop_grace_minutes: int = Field(2, ge=0)
+    # cadence a stop comes due just after a check and would wait for the next one. 4, not 2
+    # (2026-11-02): open-batch fills land about 3 minutes in and a resting limit up to 3
+    # minutes later, which left stops just outside 2.
+    time_stop_grace_minutes: int = Field(4, ge=0)
 
 
 class IntradayHedgeConfig(_Base):

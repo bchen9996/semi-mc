@@ -134,4 +134,9 @@ do; `evaluate_t6` still doesn't exist.
   (`strategy/decide.py::decide_sector_shadow`, no `paper.sleeves` entry exists that could
   make it tradeable) and explicitly gets no verdict before the 12-month review
   (`paper.review_months[-1]`) -- see `tasks/todo.md`'s Phase 2 entry for the original
-  reasoning.
+  reasoning. Its first three decisions (2026-09-19, 10-01, 11-02) had no FRED series on the
+  runner and fell back to plain S0; the job fetches it since 2026-11-02. That changes no
+  weights yet: the multiplier is capped at 1.0, so only a negative forecast moves it. On
+  today's revised FRED data that happened at 6 of the last 95 month starts, all in 2019, by
+  at most 1.6% of exposure. While the forecast stays positive T4 is S0, and the review may
+  have nothing to compare.

@@ -87,6 +87,14 @@ jobs:
       - run: uv sync --locked
       - name: Refresh cached prices
         run: uv run semimc fetch --config config/paper.yaml
+      - name: Refresh the FRED industry series
+        # Only sector_shadow reads it, and it's gitignored, so a runner starts without it:
+        # the sleeve's first three decisions fell back to plain S0. A failed download leaves
+        # that same fallback, recorded in the decision's diagnostics, so it warns rather than
+        # fails. `git reset --hard` in the next step keeps the file: it's ignored, not tracked.
+        if: matrix.sleeve == 'sector_shadow'
+        continue-on-error: true
+        run: uv run semimc fetch --config config/paper.yaml --industry
       - name: Decide, execute, and commit the ledger
         # Decide (all sleeves, including shadow-only ones -- for the eventual T3/T4
         # comparison) and Execute (s0/s3 only -- the only sleeves with a paper.sleeves

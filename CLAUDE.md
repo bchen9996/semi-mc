@@ -268,3 +268,7 @@ compared to a closed form, the closed form is written out in the test.
   second order with the same id looks like a success and nothing is sent. Entries and exits
   have separate ids, and `submit_order_with_fault_isolation` checks the side and symbol
   that come back.
+- **A gitignored input doesn't exist on a runner.** `data/external/IPG3344S.csv` never
+  reached GitHub Actions, so `sector_shadow` fell back to S0 from its first decision, and
+  only `diagnostics_json` said so. Its job now fetches the series. Anything else a workflow
+  reads from a gitignored path needs the same.

@@ -200,3 +200,14 @@ def test_ledger_jobs_push_through_the_script_and_never_rerun_a_trading_command()
     paper = _workflow("paper_trading.yml")["jobs"]
     for name in ("decide-and-execute", "mark"):
         assert ".github/scripts/push_ledger.sh" in _scripts(paper[name]), name
+
+
+def test_only_sector_shadow_fetches_its_gitignored_series_and_a_failure_only_warns():
+    # A runner starts without `data/external/IPG3344S.csv`, and without this step the sleeve
+    # falls back to S0 with nothing but a diagnostics field to say so.
+    steps = _workflow("paper_trading.yml")["jobs"]["decide-and-execute"]["steps"]
+    [fetch] = [step for step in steps if "--industry" in step.get("run", "")]
+    assert fetch["if"] == "matrix.sleeve == 'sector_shadow'"
+    assert fetch["continue-on-error"] is True
+    decide = next(step for step in steps if "paper decide" in step.get("run", ""))
+    assert steps.index(fetch) < steps.index(decide)

@@ -268,7 +268,7 @@ intraday:
   schedule:
     timezone: America/Chicago
     cycle_interval_minutes: 30
-    time_stop_grace_minutes: 2
+    time_stop_grace_minutes: 4
   hedge:   # measured on every closed trade, never traded (intraday/hedge.py)
     instrument: SOXX
     beta_window_days: 90
