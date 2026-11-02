@@ -158,12 +158,15 @@ name: Intraday trading (S4)
     # runs the same invalidation/time-stop check, so shadow stops are enforced within
     # ~30 minutes; from Stage 2 on, real stop orders rest at Alpaca regardless. The job
     # stays available on demand via workflow_dispatch (job: monitor).
+    # These three are UTC, so they don't follow daylight saving: the values below are for
+    # CST. On 2027-03-14 (CDT begins) move each one, and its job's `if:`, 1 hour earlier. An
+    # unshifted eod-review or carry that landed on time would fall before the close.
     # carry: ~14:45 Central.
-    - cron: "45 19 * * 1-5"
+    - cron: "45 20 * * 1-5"
     # eod-review: ~15:15 Central.
-    - cron: "15 20 * * 1-5"
+    - cron: "15 21 * * 1-5"
     # weekly-review: Friday ~15:45 Central.
-    - cron: "45 20 * * 5"
+    - cron: "45 21 * * 5"
 
 permissions:
   contents: write
@@ -479,7 +482,7 @@ jobs:
           exit "$status"
 
   carry:
-    if: github.event.schedule == '45 19 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'carry')
+    if: github.event.schedule == '45 20 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'carry')
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write
@@ -519,7 +522,7 @@ jobs:
           exit "$status"
 
   eod-review:
-    if: github.event.schedule == '15 20 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'eod-review')
+    if: github.event.schedule == '15 21 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'eod-review')
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write
@@ -574,7 +577,7 @@ jobs:
           exit "$status"
 
   weekly-review:
-    if: github.event.schedule == '45 20 * * 5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'weekly-review')
+    if: github.event.schedule == '45 21 * * 5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'weekly-review')
     runs-on: ubuntu-latest
     concurrency:
       group: intraday-trading-ledger-write

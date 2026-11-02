@@ -3168,6 +3168,17 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         sessions, against a bar of +4 fixed in advance. See `research_log.md`. That spends
         July to October 2026 for basket, z-score and outlier rules; a later test needs bars
         from 2026-11-02 on. Step 4, the Stage 3 decision, is the plan's only open item.
+  - [x] **2026-11-02: the GitHub crons moved to CST (the 2026-11-01 reminder above).** Of the
+        seven it listed, four lost their crons on 2026-10-08, and `carry`, `eod-review` and
+        `weekly-review` moved 1 hour later in UTC. Left alone, an eod-review landing on time
+        would grade a session 45 minutes short of the close and block the real one, and a
+        carry landing within an hour of the close would act early. Unlikely: every late copy
+        from 10-01 to 10-30 landed at 22:12 UTC or later. All cycle, carry and report times in
+        the code go through named time zones, so nothing else moves. `paper_trading.yml`'s
+        crons stay, as that reminder chose.
+  - [ ] **2027-03-14: CDT begins.** Move those three crons and their `if:` lines 1 hour
+        earlier, and update `tests/test_push_ledger.py`. cron-job.org follows each job's own
+        timezone.
 - [ ] Stage 3 -- equities, full budget. **Promotion rule set 2026-10-16, before Stage 2's
       results (owner chose option A of three):** promote once (1) Stage 2 has run 10
       sessions (`readiness.stage_3_sessions`; from `stage_2_started` 2026-10-15, so

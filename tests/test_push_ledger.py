@@ -181,7 +181,7 @@ def test_intraday_keeps_crons_only_for_jobs_a_late_copy_still_helps():
     # to do if the on-time run failed.
     workflow = _workflow("intraday_trading.yml")
     crons = {entry["cron"] for entry in workflow["on"]["schedule"]}
-    assert crons == {"45 19 * * 1-5", "15 20 * * 1-5", "45 20 * * 5"}
+    assert crons == {"45 20 * * 1-5", "15 21 * * 1-5", "45 21 * * 5"}
     for name, job in workflow["jobs"].items():
         condition = job["if"]
         if "github.event.schedule" in condition:
