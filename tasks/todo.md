@@ -3212,6 +3212,13 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
   - [x] **2026-11-02: all 13 workflow jobs pinned to `ubuntu-24.04`.** `ubuntu-latest`
         began moving to Ubuntu 26 on 2026-10-19. GitHub's API reports only the label, so
         whether jobs had already moved is unknown.
+  - [x] **2026-11-02: S4's daily model-spend cap is $1 in `config/paper.yaml` (owner's
+        go).** Spend ran $0.12-0.22 a day from 10-08 to 11-02, and the Console agreed with
+        the ledger ($0.21 against $0.215 on 11-02). It follows the day's proposal count,
+        since the Reviewer reads every proposal, and nothing carries over between days.
+        The default stays the brief's $10. The readiness report's peak-spend check now
+        fails on 10-02 ($1.11, before the 10-07 cost cuts); the Stage 3 checks don't
+        read the cap.
   - [ ] **2026-12-01: the first `sector_shadow` decision with the series.** Its
         `diagnostics_json` should show `tilt_applied: true`, the first proof the download
         works on a runner. `"reason": "unavailable..."` means it failed.

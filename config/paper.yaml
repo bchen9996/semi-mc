@@ -216,7 +216,9 @@ intraday:
   shadow_starting_equity: 100000.0
   budget:
     max_cost_usd_per_call: 1.0
-    max_cost_usd_per_day: 10.0   # placeholder -- recalibrate from real shadow-mode logging
+    # Owner decision 2026-11-02: about five times a normal day ($0.12-0.22 from 10-08 to
+    # 11-02). Checked before each call, so a day can end one call over it.
+    max_cost_usd_per_day: 1.0
   risk:
     # Stage 2's half budget (owner decision 2026-10-14): the five count/exposure limits
     # are halved from the brief's defaults; per-trade risk and the single-name cap are

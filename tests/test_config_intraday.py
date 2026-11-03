@@ -129,6 +129,8 @@ def test_paper_yaml_loads_intraday_at_rollout_stage_2():
     assert str(cfg.intraday.readiness.stage_2_started) == "2026-10-15"
     assert load_config().intraday.readiness.stage_2_started is None
     assert cfg.intraday.models.trader_max_thinking_tokens == 1500
+    # The daily model-spend cap (owner decision 2026-11-02); the default stays the brief's.
+    assert cfg.intraday.budget.max_cost_usd_per_day == pytest.approx(1.0)
     assert cfg.intraday.schedule.cycle_interval_minutes == 30
     assert cfg.intraday.readiness.max_cycle_gap_minutes == pytest.approx(45.0)
 

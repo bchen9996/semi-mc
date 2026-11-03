@@ -62,7 +62,7 @@ from typing import Any
 
 import pandas as pd
 
-from ..config import IntradayConfig
+from ..config import IntradayBudgetConfig, IntradayConfig
 from .hedge import HedgedSummary, summarize_hedged
 from .ledger import IntradayLedger
 from .reflect import round_trip_count
@@ -744,8 +744,13 @@ def render_stage_readiness_markdown(report: StageReadiness) -> str:
         )
     else:
         lines.append("- No model calls in the window.")
+    placeholder = IntradayBudgetConfig.model_fields["max_cost_usd_per_day"].default
     lines.append(
         f"- Configured cap: ${report.spend_cap_usd:.2f}/day "
-        "(a placeholder; the brief says to recalibrate it from this logging)"
+        + (
+            "(a placeholder; the brief says to recalibrate it from this logging)"
+            if report.spend_cap_usd == placeholder
+            else "(set by the owner from this logging)"
+        )
     )
     return "\n".join(lines) + "\n"

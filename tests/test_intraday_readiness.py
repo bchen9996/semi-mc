@@ -230,6 +230,20 @@ def test_spend_above_the_daily_cap_fails_its_check(tmp_path, pinned_clock):
     assert "$2.50" in check.detail
 
 
+@pytest.mark.parametrize(("cap", "placeholder"), [(None, True), (1.0, False)])
+def test_the_cap_is_called_a_placeholder_only_while_it_is_the_default(
+    tmp_path, pinned_clock, cap, placeholder
+):
+    ledger = IntradayLedger(tmp_path / "intraday.sqlite3")
+    config = IntradayConfig(budget={} if cap is None else {"max_cost_usd_per_day": cap})
+
+    text = render_stage_readiness_markdown(
+        stage_readiness(ledger, None, config, tmp_path, MON, MON)
+    )
+
+    assert ("a placeholder" in text) is placeholder
+
+
 def test_render_includes_every_section_and_keeps_the_day_table_rectangular(tmp_path, pinned_clock):
     ledger = IntradayLedger(tmp_path / "intraday.sqlite3")
     _active_day(ledger, MON)  # TUE silent
