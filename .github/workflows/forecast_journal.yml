@@ -33,7 +33,7 @@ permissions:
 
 jobs:
   record-and-score:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: forecast-journal-write
       cancel-in-progress: false

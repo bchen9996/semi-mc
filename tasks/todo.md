@@ -3209,6 +3209,9 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         from before this date is an old hash, and so are older hashes quoted in this file.
         `docs/commit_hash_map_2026-11-02.csv` maps old to new. Attribution is off in
         `.claude/settings.json`, and `CLAUDE.md` forbids it.
+  - [x] **2026-11-02: all 13 workflow jobs pinned to `ubuntu-24.04`.** `ubuntu-latest`
+        began moving to Ubuntu 26 on 2026-10-19. GitHub's API reports only the label, so
+        whether jobs had already moved is unknown.
   - [ ] **2026-12-01: the first `sector_shadow` decision with the series.** Its
         `diagnostics_json` should show `tilt_applied: true`, the first proof the download
         works on a runner. `"reason": "unavailable..."` means it failed.

@@ -61,7 +61,7 @@ permissions:
 jobs:
   decide-and-execute:
     if: github.event.schedule == '0 14 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'decide-and-execute')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       # Shared with the mark job below -- both write ledger/paper.sqlite3 and commit it,
       # and this cron and the mark cron both match minute :00 of every hour they overlap,
@@ -158,7 +158,7 @@ jobs:
 
   mark:
     if: github.event.schedule == '*/30 14-20 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'mark')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: paper-trading-ledger-write
       cancel-in-progress: false
@@ -215,7 +215,7 @@ jobs:
 
   report:
     if: github.event.schedule == '30 21 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'report')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         sleeve: [s0, s3]

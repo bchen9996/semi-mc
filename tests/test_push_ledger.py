@@ -202,6 +202,14 @@ def test_ledger_jobs_push_through_the_script_and_never_rerun_a_trading_command()
         assert ".github/scripts/push_ledger.sh" in _scripts(paper[name]), name
 
 
+def test_every_job_runs_on_the_pinned_runner_image():
+    # `ubuntu-latest` began moving to Ubuntu 26 on 2026-10-19. A trading job's operating
+    # system should change because someone decided to, not because a label moved.
+    for path in WORKFLOWS.glob("*.yml"):
+        for name, job in _workflow(path.name)["jobs"].items():
+            assert job["runs-on"] == "ubuntu-24.04", (path.name, name)
+
+
 def test_only_sector_shadow_fetches_its_gitignored_series_and_a_failure_only_warns():
     # A runner starts without `data/external/IPG3344S.csv`, and without this step the sleeve
     # falls back to S0 with nothing but a diagnostics field to say so.

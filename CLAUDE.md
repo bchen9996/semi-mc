@@ -204,7 +204,7 @@ compared to a closed form, the closed form is written out in the test.
   2026-09-19. Workaround: `uv run python -m semimc.cli ...` instead of `uv run semimc
   ...` -- runs the identical `typer` app without going through the blocked `.exe`.
   Unaffected: the GitHub Actions workflow (`.github/workflows/paper_trading.yml`), which
-  runs on Linux (`ubuntu-latest`), where this Windows-only policy doesn't exist. Same
+  runs on Linux (`ubuntu-24.04`), where this Windows-only policy doesn't exist. Same
   mechanism as the next gotcha: the Code Integrity log records Smart App Control blocking
   `semimc.exe` twice on 2026-09-19, with no later attempts logged, since everything has
   used `python -m` since then.
@@ -280,6 +280,10 @@ compared to a closed form, the closed form is written out in the test.
   traded. `run_decide` now refuses a same-day rerun only if a weight moved by
   `minimum_trade_pct`. Only a month's first decision can reach that check: `s0` and
   `sector_shadow` passed because their weights don't depend on prices.
+- **Runners are pinned to `ubuntu-24.04`, not `ubuntu-latest`.** That label began moving to
+  Ubuntu 26 on 2026-10-19, and a trading job's operating system should change because
+  someone decided to. `tests/test_push_ledger.py` holds every job to the pin. When GitHub
+  announces 24.04's retirement, move them all together.
 - **A gitignored input doesn't exist on a runner.** `data/external/IPG3344S.csv` never
   reached GitHub Actions, so `sector_shadow` fell back to S0 from its first decision, and
   only `diagnostics_json` said so. Its job now fetches the series. Anything else a workflow

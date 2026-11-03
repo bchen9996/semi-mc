@@ -114,7 +114,7 @@ name: Intraday trading (S4)
 # i.e. the ones with ANTHROPIC_API_KEY in their env below) install the `claude` CLI itself
 # via
 # Anthropic's own native installer (code.claude.com/docs/en/setup's "Recommended" tab) --
-# a bare `ubuntu-latest` runner has no more claim to it than the S4 Alpaca/Anthropic
+# a bare `ubuntu-24.04` runner has no more claim to it than the S4 Alpaca/Anthropic
 # secrets did before those were added, and this went undiscovered until the first real
 # run actually tried to spawn `claude` as a subprocess (`intraday/llm.py`). The installer
 # has zero dependencies (unlike the alternative npm package, which needs Node.js 22+) and
@@ -174,7 +174,7 @@ permissions:
 jobs:
   preflight:
     if: github.event_name == 'workflow_dispatch' && inputs.job == 'preflight'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: intraday-trading-ledger-write
       cancel-in-progress: false
@@ -223,7 +223,7 @@ jobs:
 
   research:
     if: github.event_name == 'workflow_dispatch' && inputs.job == 'research'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: intraday-trading-ledger-write
       cancel-in-progress: false
@@ -271,7 +271,7 @@ jobs:
 
   preopen:
     if: github.event_name == 'workflow_dispatch' && inputs.job == 'preopen'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: intraday-trading-ledger-write
       cancel-in-progress: false
@@ -310,7 +310,7 @@ jobs:
 
   monitor:
     if: github.event_name == 'workflow_dispatch' && inputs.job == 'monitor'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 340
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -390,7 +390,7 @@ jobs:
 
   open-batch:
     if: github.event_name == 'workflow_dispatch' && inputs.job == 'open-batch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: intraday-trading-ledger-write
       cancel-in-progress: false
@@ -436,7 +436,7 @@ jobs:
 
   cycle:
     if: github.event_name == 'workflow_dispatch' && inputs.job == 'cycle'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: intraday-trading-ledger-write
       cancel-in-progress: false
@@ -483,7 +483,7 @@ jobs:
 
   carry:
     if: github.event.schedule == '45 20 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'carry')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: intraday-trading-ledger-write
       cancel-in-progress: false
@@ -523,7 +523,7 @@ jobs:
 
   eod-review:
     if: github.event.schedule == '15 21 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'eod-review')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: intraday-trading-ledger-write
       cancel-in-progress: false
@@ -578,7 +578,7 @@ jobs:
 
   weekly-review:
     if: github.event.schedule == '45 21 * * 5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'weekly-review')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: intraday-trading-ledger-write
       cancel-in-progress: false
