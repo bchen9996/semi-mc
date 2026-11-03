@@ -3190,6 +3190,18 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         back to S0. A step in `decide-and-execute` now fetches it, for that matrix entry
         only, and a failed download only warns. No weights change yet (T4 in `THESES.md`),
         and November's decision stands.
+  - [x] **2026-11-02: a same-day rerun of `paper decide` no longer fails on download
+        noise.** GitHub's late copy (17:34 ET) failed for `s3` and `vol_twin_shadow`. Their
+        weights came out at most 0.00000007 from the morning's, but the hash compares every
+        digit, and Yahoo's dividend-adjusted closes differ around the seventh decimal
+        between downloads. Nothing was written or traded: the morning's decisions and
+        fills stand. This was the first rebalance day since the 10-01 partial-bar fix, and
+        only a month's first decision reaches the check, so it would have failed every
+        month. `run_decide` now skips a rerun that moves no weight by `minimum_trade_pct`
+        and refuses one that does. A tighter tolerance doesn't hold: with noise about three
+        times today's size, 1 of 10 `s3` fits landed elsewhere and moved weights 0.00006.
+        The 0.5% line means a rerun difference below it goes unreported. The hash stays
+        exact: rounding it would still flip for a value near a rounding edge.
   - [ ] **2026-12-01: the first `sector_shadow` decision with the series.** Its
         `diagnostics_json` should show `tilt_applied: true`, the first proof the download
         works on a runner. `"reason": "unavailable..."` means it failed.

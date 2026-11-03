@@ -8,6 +8,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import replace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -108,6 +109,49 @@ def test_a_decision_ignores_its_own_days_bar(config, market, ledger):
     rerun = run_decide("s3", replace(market, prices=wild), config, tickers, as_of, ledger)
 
     assert rerun.decision.snapshot_hash == first.decision.snapshot_hash
+
+
+@pytest.mark.parametrize(("share", "refused"), [(1e-5, False), (0.99, False), (1.01, True)])
+def test_a_rerun_is_refused_only_if_a_weight_moved_by_a_tradable_amount(
+    config, market, ledger, share, refused
+):
+    from semimc.strategy.decide import decide_s0
+
+    as_of = pd.Timestamp("2023-01-05")
+    base = decide_s0(["NVDA", "AMD"], as_of)
+    moved = share * config.paper.minimum_trade_pct
+    frozen = replace(base, weights=base.weights + pd.Series({"NVDA": moved, "AMD": 0.0}))
+    ledger.record_decision(frozen)
+
+    if refused:
+        with pytest.raises(ValueError, match="different decision already exists"):
+            run_decide("s0", market, config, ["NVDA", "AMD"], as_of, ledger)
+    else:
+        result = run_decide("s0", market, config, ["NVDA", "AMD"], as_of, ledger)
+        assert result.decision is None
+        assert "decision stands" in result.skipped_reason
+    assert ledger.get_decision("s0", as_of)["snapshot_hash"] == frozen.snapshot_hash
+
+
+def test_download_noise_in_closes_does_not_fail_a_late_rerun(config, market, ledger):
+    """2026-11-02: the late copy refused s3 and vol_twin_shadow because two downloads of the
+    same closes differed around the seventh decimal. The noise here is that size, and s3
+    must really size off its forecast: at its leverage cap the hash wouldn't change at all,
+    and this would pass without testing anything."""
+    tickers = ["NVDA", "AMD"]
+    as_of = pd.Timestamp("2023-01-05")
+    config = config.model_copy(
+        update={"paper": config.paper.model_copy(update={"s3_target_vol": 0.05})}
+    )
+    first = run_decide("s3", market, config, tickers, as_of, ledger)
+    assert first.decision.weights.sum() < config.paper.s3_max_leverage
+
+    rng = np.random.default_rng(0)
+    noisy = market.prices * np.exp(3e-7 * rng.standard_normal(market.prices.shape))
+    rerun = run_decide("s3", replace(market, prices=noisy), config, tickers, as_of, ledger)
+
+    assert rerun.decision is None
+    assert ledger.get_decision("s3", as_of)["snapshot_hash"] == first.decision.snapshot_hash
 
 
 def test_market_data_before_drops_the_day_and_everything_after(market):

@@ -268,6 +268,14 @@ compared to a closed form, the closed form is written out in the test.
   second order with the same id looks like a success and nothing is sent. Entries and exits
   have separate ids, and `submit_order_with_fault_isolation` checks the side and symbol
   that come back.
+- **Two downloads of the same closes don't match exactly.** Yahoo's dividend-adjusted
+  prices differ around the seventh decimal between fetches (AMD, which pays no dividend,
+  matches to the digit), so anything hashed or compared exactly across runs will differ. On
+  2026-11-02, the first rebalance day after the 10-01 partial-bar fix, GitHub's late copy of
+  `paper decide` failed for `s3` and `vol_twin_shadow` on weights 0.00000007 apart. Nothing
+  traded. `run_decide` now refuses a same-day rerun only if a weight moved by
+  `minimum_trade_pct`. Only a month's first decision can reach that check: `s0` and
+  `sector_shadow` passed because their weights don't depend on prices.
 - **A gitignored input doesn't exist on a runner.** `data/external/IPG3344S.csv` never
   reached GitHub Actions, so `sector_shadow` fell back to S0 from its first decision, and
   only `diagnostics_json` said so. Its job now fetches the series. Anything else a workflow

@@ -58,6 +58,13 @@ def seed_for(base_seed: int, as_of: pd.Timestamp) -> np.random.Generator:
     return np.random.default_rng([base_seed, int(pd.Timestamp(as_of).value)])
 
 
+def _largest_weight_move(frozen_row: dict, decision: Decision) -> float:
+    """The most any one name's weight differs between a ledger row and ``decision``. A name
+    only one of them holds counts at its full weight."""
+    frozen = pd.Series(frozen_row["weights"], dtype=float)
+    return float(frozen.sub(decision.weights, fill_value=0.0).abs().max())
+
+
 @dataclass(frozen=True)
 class DecideResult:
     """``decision`` is ``None`` exactly when ``skipped_reason`` explains why -- a routine
@@ -79,15 +86,24 @@ def run_decide(
 ) -> DecideResult:
     """Compute and freeze one sleeve's decision for ``as_of``, unless it's already been
     decided this rebalance period (skip) or a *different* decision already exists for this
-    exact day (refuse, unless ``force``).
+    exact day (refuse, unless ``force``). Different means a weight moved by at least
+    ``minimum_trade_pct``; a smaller gap is skipped too.
 
     The decision sees closes strictly before ``as_of`` (``MarketData.before``), never
     ``as_of``'s own row: the job runs at 10:05 New York, when that row is a partial bar
     whose "close" is just the latest trade. Found 2026-10-01: s3's decision was built on a
     35-minute-old bar, and GitHub's late copy of the same job that afternoon saw a
-    different bar, computed a different decision, and failed on the refusal below. Using
-    the last completed close makes every run for a day agree, whenever it runs.
-    ``data_vintage`` records that close."""
+    different bar, computed a different decision, and failed on the refusal below.
+    ``data_vintage`` records that close.
+
+    Completed closes still don't repeat exactly. Found 2026-11-02, the first rebalance day
+    after that fix: Yahoo's dividend-adjusted closes differ around the seventh decimal
+    between downloads, so the late copy failed again, on s3 weights 0.00000007 apart.
+    Rounding the hash wouldn't help, since a value near a rounding edge still flips, so the
+    refusal compares weights against ``minimum_trade_pct``, the smallest trade a sleeve
+    sends. Nothing tighter holds up: with noise about three times that size, s3's fit
+    landed elsewhere in 1 of 10 trials and moved weights 0.00006, more than a real 1%
+    change to one close does (0.00004 at most)."""
     as_of = pd.Timestamp(as_of)
     market = market.before(as_of)
     sleeve_config = config.paper.sleeves.get(sleeve)
@@ -117,10 +133,18 @@ def run_decide(
 
     existing = ledger.get_decision(sleeve, as_of)
     if existing is not None and existing["snapshot_hash"] != decision.snapshot_hash and not force:
+        moved = _largest_weight_move(existing, decision)
+        if moved < config.paper.minimum_trade_pct:
+            return DecideResult(
+                None,
+                f"sleeve {sleeve!r} already decided {as_of.date()}; this rerun moves a weight "
+                f"by at most {moved:.1e}, below minimum_trade_pct, so that decision stands",
+            )
         raise ValueError(
             f"a different decision already exists for {sleeve!r} on {as_of.date()} "
             f"(existing snapshot_hash={existing['snapshot_hash'][:16]}, new="
-            f"{decision.snapshot_hash[:16]}) -- pass force=True to record it anyway"
+            f"{decision.snapshot_hash[:16]}, largest weight move {moved:.4f}) -- pass "
+            "force=True to record it anyway"
         )
 
     ledger.record_decision(
