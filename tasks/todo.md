@@ -2749,8 +2749,8 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       playbook's 20-trade evidence threshold would never be reached). Takes effect with
       the 2026-10-15 07:30 CT research run, the same day Stage 2 could start: read day
       one's trade count with both changes in mind.
-- [ ] Stage 2 -- equities, half budget, 2 weeks. **Owner's go 2026-10-14; starts
-      2026-10-15** (06:45 CT preflight). `config/paper.yaml`: `intraday.shadow_mode:
+- [x] Stage 2 -- equities, half budget, 2 weeks. **Owner's go 2026-10-14; starts
+      2026-10-15** (06:45 CT preflight). **Ended 2026-11-03**, 14 sessions. `config/paper.yaml`: `intraday.shadow_mode:
       false`, so open-batch/cycle/carry/monitor submit real orders to PA33HJGNHLI7 (owner
       confirmed the number 2026-10-14; code has never checked it, since shadow mode skips
       the account check -- a wrong number fails preflight and every cycle refuses to
@@ -3219,6 +3219,18 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         The default stays the brief's $10. The readiness report's peak-spend check now
         fails on 10-02 ($1.11, before the 10-07 cost cuts); the Stage 3 checks don't
         read the cap.
+  - [x] **2026-11-03, Stage 2's last day: clean, so the Stage 3 rule passed 6/6.** MU short
+        +$101 gross (10 shares in two tranches) and INTC short +$26 (63 shares), both out
+        on 90-minute time stops. The first full day at the 4-minute grace: all five time
+        stops, agent and placebo, closed within 3 minutes of due, and three of them (MU,
+        INTC, the placebo's LRCX) would have run 27 to 29 minutes over without it. Spend
+        $0.20; every job since the pin ran on `ubuntu-24.04`. Since 09-24: 31 closed
+        trades, +$372 gross, +$95 net; with the sector removed, -27.7 bps per exit
+        (standard error 13.5) against the placebo's -21.8 (15.6). **The owner kept the
+        size at 0.1% of equity at the stop.** In paper, unused capital costs nothing,
+        each trade is judged in percent, and Alpaca's paper fills model no market impact,
+        so bigger trades would make the dollars bigger, not the evidence. Not chosen:
+        0.25%, which puts most trades at the 15% single-name cap.
   - [ ] **2026-12-01: the first `sector_shadow` decision with the series.** Its
         `diagnostics_json` should show `tilt_applied: true`, the first proof the download
         works on a runner. `"reason": "unavailable..."` means it failed.
@@ -3236,6 +3248,13 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       Stage 2 continues day by day. Not chosen: calendar only (B; could promote on 3-5
       trades) and 20 trades plus 5 clean days (C; likely early November at half
       budget). The readiness report has a "Stage 3 rule" section checking these.
+      **Owner's go 2026-11-03; starts 2026-11-04** (06:45 CT preflight), after the rule
+      passed on the clean days 10-30, 11-02 and 11-03. `config/paper.yaml`'s risk block is
+      now the brief's defaults: `new_positions_per_day` 6, `daily_turnover_pct` 1.50,
+      `gross_cap_pct` 1.50, `net_beta_cap_pct` 0.80, `overnight_gross_cap_pct` 1.00. Size
+      per trade is unchanged. Over Stage 2 the 3-a-day limit turned down 1 agent entry
+      and 136 placebo entries (on all 14 days), so expect the agent to trade about as
+      before and the placebo about twice as often, under the same limits.
       **Built with it: S4 reconciliation.** Nothing in S4 ever recorded one, so
       preflight's "yesterday reconciled" check (the brief's) passed vacuously, on the
       real account too. `jobs.py::reconcile_positions` compares the ledger's net fills

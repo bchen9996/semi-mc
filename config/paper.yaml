@@ -210,6 +210,8 @@ intraday:
   # Stage 2 rule passed (5 clean days, 10-08..10-14): shadow_mode: false submits real
   # orders to the paper account below; the risk block carries the half budget -- see
   # tasks/todo.md's "Rollout stages from the brief" entry.
+  # Stage 3 ("equities, full budget") starts 2026-11-04, owner's go 2026-11-03 after the
+  # Stage 3 rule passed 6/6 (clean 10-30, 11-02, 11-03; 27 closed trades).
   trading_enabled: true
   registered_account: PA33HJGNHLI7
   shadow_mode: false
@@ -220,22 +222,23 @@ intraday:
     # 11-02). Checked before each call, so a day can end one call over it.
     max_cost_usd_per_day: 1.0
   risk:
-    # Stage 2's half budget (owner decision 2026-10-14): the five count/exposure limits
-    # are halved from the brief's defaults; per-trade risk and the single-name cap are
-    # not, so each trade is the same size as Stage 3's, just fewer of them at once.
-    new_positions_per_day: 3          # default 6
+    # Stage 3's full budget: every limit is the brief's default. The five count/exposure
+    # limits doubled from Stage 2's half (new positions, turnover, gross, net beta,
+    # overnight gross); per-trade size didn't change, and the owner kept it at 0.1% of
+    # equity at the stop on 2026-11-03.
+    new_positions_per_day: 6
     round_trips_per_symbol_per_day: 2
-    daily_turnover_pct: 0.75          # default 1.50
+    daily_turnover_pct: 1.50
     risk_per_trade_pct: 0.0075
     target_risk_per_trade_pct: 0.001   # owner decision 2026-10-22: entries sized from their stop
     single_name_cap_pct: 0.15
-    gross_cap_pct: 0.75               # default 1.50
+    gross_cap_pct: 1.50
     net_long_cap_pct: 1.00
-    net_beta_cap_pct: 0.40            # default 0.80
+    net_beta_cap_pct: 0.80
     daily_loss_soft_pct: 0.02
     daily_loss_hard_pct: 0.03
     cooldown_minutes_after_stopout: 30
-    overnight_gross_cap_pct: 0.50     # default 1.00
+    overnight_gross_cap_pct: 1.00
     min_edge_multiple: 2.0
     equity_cost_bps_per_side: 8.0
     entry_tranches: 2

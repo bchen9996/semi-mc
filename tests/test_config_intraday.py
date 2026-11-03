@@ -101,14 +101,13 @@ def test_intraday_settings_are_overridable_with_set():
     assert cfg.intraday.budget.max_cost_usd_per_day == pytest.approx(5.0)
 
 
-def test_paper_yaml_loads_intraday_at_rollout_stage_2():
+def test_paper_yaml_loads_intraday_at_rollout_stage_3():
     """`config/paper.yaml` is the shared config root for both s0/s3 and S4. Rollout Stage
-    1 (shadow) started 2026-09-23; Stage 2 starts 2026-10-15 (owner's go 2026-10-14, after
-    the Stage 2 rule passed): `shadow_mode: false` submits real orders to the registered
-    paper account, under half the brief's budget. Half means the four count and exposure
-    limits; per-trade risk and the single-name cap stay at the defaults, so each trade is
-    full size, just fewer at once -- see `tasks/todo.md`'s "Rollout stages from the
-    brief" entry."""
+    1 (shadow) started 2026-09-23 and Stage 2 (real paper orders, half budget) 2026-10-15.
+    Stage 3 starts 2026-11-04 (owner's go 2026-11-03, after the Stage 3 rule passed): the
+    full budget, so every risk limit is the brief's default, including the per-trade
+    size the owner kept at 0.1% of equity at the stop -- see `tasks/todo.md`'s "Rollout
+    stages from the brief" entry."""
     cfg = load_config(PROJECT_ROOT / "config" / "paper.yaml")
     defaults = load_config().intraday.risk
     assert cfg.intraday.trading_enabled is True
@@ -118,13 +117,9 @@ def test_paper_yaml_loads_intraday_at_rollout_stage_2():
     assert cfg.intraday.options.enabled is False
     assert cfg.intraday.options.shadow_pricing is False
     assert cfg.intraday.shadow_mode is False
-    risk = cfg.intraday.risk
-    assert risk.new_positions_per_day == defaults.new_positions_per_day // 2 == 3
-    assert risk.daily_turnover_pct == pytest.approx(defaults.daily_turnover_pct / 2)
-    assert risk.gross_cap_pct == pytest.approx(defaults.gross_cap_pct / 2)
-    assert risk.overnight_gross_cap_pct == pytest.approx(defaults.overnight_gross_cap_pct / 2)
-    assert risk.risk_per_trade_pct == pytest.approx(defaults.risk_per_trade_pct)
-    assert risk.single_name_cap_pct == pytest.approx(defaults.single_name_cap_pct)
+    assert cfg.intraday.risk == defaults
+    assert cfg.intraday.risk.new_positions_per_day == 6
+    assert cfg.intraday.risk.target_risk_per_trade_pct == pytest.approx(0.001)
     # The Stage 2 -> 3 rule's start date (owner decision 2026-10-16).
     assert str(cfg.intraday.readiness.stage_2_started) == "2026-10-15"
     assert load_config().intraday.readiness.stage_2_started is None
