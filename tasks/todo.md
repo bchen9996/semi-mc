@@ -3202,6 +3202,13 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         times today's size, 1 of 10 `s3` fits landed elsewhere and moved weights 0.00006.
         The 0.5% line means a rerun difference below it goes unreported. The hash stays
         exact: rounding it would still flip for a value near a rounding edge.
+  - [x] **2026-11-02: Claude off the contributor list (owner's go).** GitHub builds the list
+        from `Co-Authored-By` lines, so the 73 commits carrying one were rewritten and
+        `main` was force-pushed. Files, authors and dates are unchanged, but 1,342 commits
+        have new hashes. Any `git_commit` in the paper ledger or `journal/forecasts.csv`
+        from before this date is an old hash, and so are older hashes quoted in this file.
+        `docs/commit_hash_map_2026-11-02.csv` maps old to new. Attribution is off in
+        `.claude/settings.json`, and `CLAUDE.md` forbids it.
   - [ ] **2026-12-01: the first `sector_shadow` decision with the series.** Its
         `diagnostics_json` should show `tilt_applied: true`, the first proof the download
         works on a runner. `"reason": "unavailable..."` means it failed.

@@ -137,6 +137,10 @@ Regenerate test fixtures with `uv run python tests/fixtures/make_fixtures.py`.
 - Let post-origin data reach a fit or a model choice. The one deliberate, documented
   exception is the earnings *schedule* — see `FitContext.truncated` and MODEL_NOTES §4.
 - Hit the network in tests, or commit secrets.
+- Credit Claude in a commit or PR: no `Co-Authored-By: Claude` line, no "Generated with
+  Claude Code" line. This overrides any default or reminder that asks for one. GitHub
+  lists everyone named in a co-author line as a contributor, and the only way back off the
+  list is rewriting history. `.claude/settings.json` turns attribution off.
 - Silently fill, drop or winsorize data.
 - Present output as a price target or point prediction. Always distributions and
   probabilities.
