@@ -113,9 +113,18 @@ uses the same request settings:
 
 | job | time (ET) | crontab | note |
 |---|---|---|---|
-| `decide-and-execute` | 10:05 | `5 10 * * 1-5` | execution window opens at 10:00 ET |
+| `decide-and-execute` | 10:05 and 10:20 | `5,20 10 * * 1-5` | execution window opens at 10:00 ET; the 10:20 run does the day's work if 10:05's never started, otherwise skips |
 | `mark` | every 30 min, 10:30-15:30 | `*/30 10-15 * * 1-5` | the 10:00 slot is skipped: nothing to mark before decide runs |
 | `report` | 17:30 | `30 17 * * 1-5` | |
+
+**Why it also runs at 10:20** (2026-11-04): cron-job.org's 10:05 request timed out and GitHub
+never started a run, the first miss since 10-08. The fallback cron landed at 15:39 ET,
+after the 15:30 cutoff, so execute declined. A miss on a rebalance day delays the rebalance
+a day: the next morning's execute finds the decision untraded and sends it. A rerun is
+safe: `decide` skips a same-day rerun that moves no weight by `minimum_trade_pct`, and
+`execute` sends a decision's rebalance once and afterwards only retries what's unfilled.
+The 10:05 run takes about 2 minutes, so the 10:20 one never waits behind it in the
+ledger-write concurrency group, and the 10:30 `mark` arrives after it has finished.
 
 The forecast journal (`forecast_journal.yml`) doesn't need an entry. It runs in the
 evening, and even a 5-hour delay lands before the next open, which is all it requires.

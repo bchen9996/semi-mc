@@ -3231,6 +3231,15 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         each trade is judged in percent, and Alpaca's paper fills model no market impact,
         so bigger trades would make the dollars bigger, not the evidence. Not chosen:
         0.25%, which puts most trades at the 15% single-name cap.
+  - [x] **2026-11-04, Stage 3 day 1: clean.** AMAT short, +$103 gross, +$80 net, all of
+        it the sector (SOXX -3.0%; sector +$228, stock-specific -$148). The 11:31 CT add's
+        stop sat at VWAP, 0.9% away, so it was sized to the 15% single-name cap: 40 shares,
+        $14.7k, the largest position yet. It is the first case of what 10-22 said to
+        watch, a tighter stop buying size. The placebo used its 6 new positions, -$267.
+        **Paper `decide-and-execute` never ran at 10:05 ET:** cron-job.org's request timed
+        out and GitHub started nothing. The first miss since 10-08, and harmless on a
+        day with no rebalance. Fix: the same cron-job.org job now also fires at 10:20 ET
+        (`5,20 10 * * 1-5`), a retry that skips if 10:05 ran (`docs/external_scheduler.md`).
   - [ ] **2026-12-01: the first `sector_shadow` decision with the series.** Its
         `diagnostics_json` should show `tilt_applied: true`, the first proof the download
         works on a runner. `"reason": "unavailable..."` means it failed.
