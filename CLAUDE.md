@@ -2,8 +2,9 @@
 
 Working notes for this repo. Read `BRIEF.md` for what the project is for and
 `BRIEF_ADDENDUM.md` for the Phase 4/4B extensions; this file is the how.
-`BRIEF_INTRADAY.md` is the S4 intraday-agent brief -- filed 2026-09-19, **not started**,
-see `tasks/todo.md`'s S4 section for its prerequisites. Note that
+`BRIEF_INTRADAY.md` is the S4 intraday-agent brief -- filed 2026-09-19, in rollout Stage 3
+(real paper orders, full budget) since 2026-11-04; see `tasks/todo.md`'s S4 section and
+`THESES.md`'s T6 for how it will be judged. Note that
 `semis_paper_trading_brief.md`, cited by every `paper`/`execution`/`live`/`strategy`
 docstring, was never committed and does not exist in this repo -- those citations are
 dangling, and `tasks/todo.md`'s paper-trading section plus `THESES.md` are the closest

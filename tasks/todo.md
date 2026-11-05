@@ -3271,6 +3271,23 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
       every run. A mismatch is an error incident and fails the next preflight; an
       unreachable broker is a warning and leaves the day unreconciled. First real run:
       eod-review on 2026-10-19.
+  - [x] **2026-11-04: T6's verdict rule is set (owner's go).** `THESES.md` had "decided
+        by: not yet set". Now: sector-removed P&L per exit net of modeled costs, agent
+        minus placebo, errors clustered by day; on 2027-01-15, 2 standard errors ahead
+        runs on, 2 behind stops S4, in between runs on; on 2027-04-15 anything short of 2
+        ahead stops it. About 25 bps per trade is detectable by January, about 17 by
+        April. Written after 30 agent exits had been seen, which `THESES.md` says.
+  - [x] **2026-11-04: the repo is public (owner).** GitHub-hosted runners are free there, so
+        `docs/external_scheduler.md`'s minutes budget no longer binds. A scan of every text
+        diff on every ref, and of HEAD's files including the ledgers, found no key, token or
+        private key; the only env file ever committed is `.env.example`, with empty values.
+        Not scanned: older versions of the binary ledgers.
+  - [ ] **Before 2027-01-15: build T6's measure.** The readiness report's sector-removed
+        table is the mean before costs with an unclustered error. Add the net figure, the
+        day-clustered errors and the agent-minus-placebo difference, and test them on
+        made-up exits, not the real ones.
+  - [ ] **2027-01-15: T6's 3-month verdict**, by the rule in `THESES.md`.
+  - [ ] **2027-04-15: T6's 6-month verdict**, if January didn't settle it.
 - [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded). **Built
       ahead of turn, 2026-09-26**: schema/config/gates (Phase 12a) and the real Alpaca
       options market-data fetch plus `jobs.py` wiring (Phase 12b) are both done -- Stage 4

@@ -23,9 +23,13 @@ an authenticated POST at set times works the same way.
 
 ## Step 0 -- check your GitHub Actions minutes first
 
-The repo is **private**, so Actions minutes are metered: 2,000 a month on GitHub Free,
-3,000 on Pro. Past that, runs either stop or are billed at about $0.008 a minute, depending
-on your spending limit (**Settings -> Billing and plans -> Plans and usage**).
+The repo is **public** (owner, 2026-11-04), and GitHub-hosted runners are free for public
+repositories, so minutes don't limit this schedule. It was private when this guide was
+written, and a private repo's minutes are metered: 2,000 a month on GitHub Free, 3,000 on
+Pro, then runs stop or are billed at about $0.008 a minute, depending on your spending
+limit (**Settings -> Billing and plans -> Plans and usage**). The estimate below matters
+again if it goes private. Public also means anyone can read the ledgers, prompts and
+reports; a scan on 2026-11-04 found no key, token or `.env` value anywhere in the history.
 
 A rough estimate of what the schedule below uses, per trading day:
 
@@ -38,7 +42,8 @@ A rough estimate of what the schedule below uses, per trading day:
 
 That's about **2,100 minutes a month**: around GitHub Free's allowance, inside Pro's.
 (Cycles ran every 20 minutes until 2026-10-06, about 2,500 minutes a month.) The `monitor` loop would add ~385 minutes a day (~8,000 a month), which is why it
-has no schedule (owner decision 2026-09-27; see "The monitor loop" at the end). Late
+had no schedule (owner decision 2026-09-27; see "The monitor loop" at the end). Public
+minutes are free, but the loop still isn't safe as built, and real stops rest at Alpaca. Late
 fallback-cron runs add a little on top: fewer since 2026-10-08, when five intraday crons
 were removed (about six late copies a trading day).
 

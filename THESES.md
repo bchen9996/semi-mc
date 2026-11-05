@@ -107,17 +107,42 @@ comparing S4's real equity curve, the placebo's shadow equity curve, and SOXX bu
 on net P&L per trade, expectancy, hit rate, average win vs. average loss, exposure-
 adjusted return, beta to SOXX, turnover, slippage vs. arrival price, time in market,
 confidence calibration, and process scores (per `BRIEF_INTRADAY.md`'s "Evaluation"
-section).
+section). The verdict rests on one measure, below; the rest are reported alongside it.
 
-**Decided by**: not yet set -- to be derived from a power analysis against the metrics
-above once S4 is far enough along to estimate their variance, the same "set it from a
-power analysis, don't guess" instruction the brief itself gives, mirroring how this
-project already treats minimum-sample gates elsewhere.
+**Decided by** (owner decision 2026-11-04, from a power analysis on the first exits; see
+the caveat):
 
-**Minimum history**: monthly review once trading; a formal verdict at 3 and 6 months
-(`BRIEF_INTRADAY.md`'s own review cadence, distinct from `paper.review_months`).
+- **Measure.** Every exit since Stage 2 began (2026-10-15) that `intraday/hedge.py` can
+  price: P&L net of modeled costs plus the measured SOXX hedge's P&L, in basis points of
+  the exit's entry notional. The hedge is measured, not traded, so its cost isn't charged.
+  The statistic is the agent's mean minus the placebo's. Each mean's standard error is
+  clustered by trading day, since exits on one day aren't independent; the difference's
+  is the root of their sum of squares.
+- **Power.** Over the first exits each trade's sector-removed result varied by about 72
+  bps (agent) and 97 bps (placebo). At about 2 agent and 6 placebo exits a session,
+  2027-01-15 should hold about 125 and 340 exits, enough to detect a gap of about 25 bps
+  per trade (80% power at 2 standard errors), against a 16 bps modeled round trip. By
+  2027-04-15, about 250 and 700 exits: about 17 bps. Clustering by day widens both.
+- **2027-01-15, 3 months after Stage 2 began.** Agent ahead by 2 or more standard errors:
+  the loop adds something, and it runs on to the 6-month verdict. Behind by 2 or more: S4
+  stops trading (`intraday.trading_enabled: false`). In between: it runs on to 6 months.
+- **2027-04-15, 6 months.** Anything short of 2 standard errors ahead: S4 stops trading. A
+  pass decides nothing further; more size or real money would be a separate owner decision.
+- **Caveat.** Written after 30 agent exits (-26.8 bps per exit before costs, standard error
+  13.1) and 48 placebo exits (-27.8, 14.0) had been seen. Their spread set the power
+  figures, but their means were in view too. The rule is fixed now so later results can't
+  move it.
 
-**Status**: not yet evaluated. As of 2026-09-21, the placebo agent itself is built and
+**Minimum history**: monthly review once trading; formal verdicts at 3 and 6 months
+(`BRIEF_INTRADAY.md`'s own review cadence, distinct from `paper.review_months`):
+2027-01-15 and 2027-04-15, above.
+
+**Status**: not yet evaluated. Real paper orders since Stage 2 (2026-10-15); Stage 3, the
+full budget, since 2026-11-04. `evaluate_t6` still doesn't exist: the readiness report's
+sector-removed table gives each sleeve's mean before costs with an unclustered error.
+The net figure, the day-clustered errors and the difference are to be built before
+2027-01-15 (`tasks/todo.md`). The rest of this paragraph is the 2026-09-21 record.
+As of 2026-09-21, the placebo agent itself is built and
 running on schedule (`intraday/placebo.py`, `semimc intraday placebo open-batch|cycle|
 carry`, S4 Phase 7) on its own shadow ledger (`ledger/intraday_shadow.sqlite3`) -- but
 S4's real account is still `trading_enabled: false` (`tasks/todo.md`'s "Remaining
