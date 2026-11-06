@@ -265,7 +265,12 @@ compared to a closed form, the closed form is written out in the test.
   would have discarded the ledger rows of orders already sent. Exit 3 means another run
   changed the same (binary) ledger: intraday jobs fail on it; paper jobs, whose sleeves
   share one ledger and are idempotent, re-run. `tests/test_push_ledger.py` drives the
-  script against local repos and pins which jobs keep a cron.
+  script against local repos and pins which jobs keep a cron. Each retry waits longer,
+  about 2.5 minutes in all: on 2026-11-05 GitHub refused two pushes a second apart
+  ("Internal Server Error"), the old three quick attempts ran out, and a cycle's rows
+  were lost after its orders had reached Alpaca. **A lost push leaves the broker ahead of
+  the ledger**, and nothing yet notices: every later exit is built from a ledger that's
+  missing orders.
 - **A daily bar fetched just after the bell can be unfinished.** On 2026-10-30 eod-review's
   `semimc fetch` cached a SOXX close about 2% off, from mid-afternoon, and the day's
   benchmark and attribution were wrong. Today's close comes from `session_closes`.

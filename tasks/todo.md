@@ -3282,6 +3282,30 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         diff on every ref, and of HEAD's files including the ledgers, found no key, token or
         private key; the only env file ever committed is `.env.example`, with empty values.
         Not scanned: older versions of the binary ledgers.
+  - [x] **2026-11-05: a lost push left Alpaca 6 LRCX shares ahead of the ledger (30
+        errors).** SOXX fell about 10%. The 10:00 CT cycle sent LRCX's second tranche
+        (sell 6, OTO stop at 205.64) and a QCOM short (sell 5), then GitHub refused its
+        push: a race, then "Internal Server Error" twice a second apart, which spent
+        `push_ledger.sh`'s three attempts in two seconds. At 10:30 LRCX's time stop came
+        due; the exit for Alpaca's 11 shares was refused ("requested 11, available 5")
+        because the unknown 6-share stop still held them, and so was the replacement
+        stop. Two refusals a cycle until the close, then both carries and the review's
+        reconciliation (ledger -5, Alpaca -11) failed. QCOM's unknown stop bought it
+        back at 158.326, -$44.34, by 13:30. MU's two shorts were fine, about +$220.
+        **Fixed:** `push_ledger.sh` now makes seven attempts with growing waits (2.5
+        minutes in all). **Repaired by hand** from Alpaca's order history (an incident row
+        says so): LRCX's second tranche (fill 191.003333) and its expired stop, and
+        QCOM's short and its filled stop, so the ledger's fills match the account.
+        Replayed on a copy, the 11-06 open batch buys back all 11 LRCX shares on the
+        overdue time stop. QCOM's stop fill is dated at the latest it can have happened,
+        13:30:47 CT. **Not restored:** QCOM's proposal (thesis, time stop) was lost and
+        isn't invented, so its orders carry none, it gets no reflection, and T6 misses
+        this one exit (-$44.34 before costs); nor that cycle's Trader call, its monitor
+        check, or the placebo's 10:00 entry, which only ever existed in the lost rows.
+  - [ ] **Make a cycle notice what the broker has that the ledger doesn't (owner to
+        decide).** Record any S4 order Alpaca holds that the ledger lacks, and have an
+        exit cancel every open order Alpaca has in the symbol, not only the ledger's, so
+        a lost push heals at the next cycle instead of failing every exit until the close.
   - [ ] **Before 2027-01-15: build T6's measure.** The readiness report's sector-removed
         table is the mean before costs with an unclustered error. Add the net figure, the
         day-clustered errors and the agent-minus-placebo difference, and test them on

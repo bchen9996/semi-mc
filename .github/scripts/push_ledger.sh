@@ -10,15 +10,28 @@
 # rebase conflict means another run changed the same file, and a binary SQLite ledger
 # can't be merged: the rebase is aborted and the caller decides what to do.
 #
+# GitHub itself sometimes refuses a push. On 2026-11-05 it answered two pushes a second
+# apart with "Internal Server Error"; the three attempts were spent within two seconds,
+# and the 10:00 CT cycle's rows were lost after its orders had reached Alpaca. So each
+# retry now waits longer than the last: PUSH_LEDGER_WAITS, in seconds (tests set zeros),
+# about 2.5 minutes in all, well inside the 30 minutes between cycles.
+#
 # Exit codes: 0 pushed; 3 the same file changed upstream (rebase aborted, the commit is
-# left unpushed); 1 still rejected after 3 attempts.
+# left unpushed); 1 still rejected after every attempt.
 set -u
 
-for attempt in 1 2 3; do
+read -r -a waits <<< "${PUSH_LEDGER_WAITS:-2 5 10 20 40 60}"
+attempts=$(( ${#waits[@]} + 1 ))
+for (( attempt = 1; attempt <= attempts; attempt++ )); do
   if git push; then
     exit 0
   fi
-  echo "push rejected (attempt $attempt/3) -- rebasing onto the latest main"
+  if (( attempt == attempts )); then
+    break
+  fi
+  wait_seconds=${waits[attempt - 1]}
+  echo "push rejected (attempt $attempt/$attempts) -- waiting ${wait_seconds}s, then rebasing onto the latest main"
+  sleep "$wait_seconds"
   if ! git fetch origin main; then
     continue
   fi
@@ -28,5 +41,5 @@ for attempt in 1 2 3; do
     exit 3
   fi
 done
-echo "::error::failed to push after 3 attempts"
+echo "::error::failed to push after $attempts attempts"
 exit 1

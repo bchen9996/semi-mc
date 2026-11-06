@@ -5,13 +5,16 @@ command. For `cycle` that repeated the Trader call (billed, but only the last at
 reached the ledger), and on the real account it would have thrown away the ledger rows
 of orders already at the broker. The script rebases the job's commit onto the latest
 main instead. These tests drive it against throwaway local repositories (no network):
-a push raced by a different file must land after a rebase, and a push raced by the same
-binary ledger file must stop with exit code 3 and leave nothing half-rebased.
+a push raced by a different file must land after a rebase, a push raced by the same
+binary ledger file must stop with exit code 3 and leave nothing half-rebased, and a push
+the server refuses a few times (GitHub's "Internal Server Error" on 2026-11-05) must
+land once it accepts one.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -54,6 +57,8 @@ def git_env(tmp_path: Path) -> dict[str, str]:
         "GIT_AUTHOR_EMAIL": "test@example.invalid",
         "GIT_COMMITTER_NAME": "test",
         "GIT_COMMITTER_EMAIL": "test@example.invalid",
+        # Seven attempts as in production, without its 2.5 minutes of waiting.
+        "PUSH_LEDGER_WAITS": "0 0 0 0 0 0",
     }
 
 
@@ -154,6 +159,65 @@ def test_stops_with_exit_3_when_the_same_ledger_changed(repos, git_env):
     assert not (job / ".git" / "rebase-merge").exists()
     assert not (job / ".git" / "rebase-apply").exists()
     assert _git(git_env, job, "log", "-1", "--format=%s") == "ledger/intraday.sqlite3: cycle"
+
+
+def _refuse_pushes(origin: Path, times: int) -> None:
+    """Makes `origin` refuse its next `times` pushes, the way GitHub's servers did."""
+    counter = origin / "refusals_left"
+    counter.write_text(str(times), encoding="utf-8")
+    hook = origin / "hooks" / "pre-receive"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f'left=$(cat "{counter.as_posix()}")\n'
+        'if [ "$left" -gt 0 ]; then\n'
+        f'  echo $((left - 1)) > "{counter.as_posix()}"\n'
+        '  echo "Internal Server Error" >&2\n'
+        "  exit 1\n"
+        "fi\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    hook.chmod(0o755)
+
+
+@needs_bash
+def test_retries_a_push_the_server_refuses_until_it_lands(repos, git_env):
+    origin, job, _ = repos
+    _commit(git_env, job, "ledger/intraday.sqlite3", "cycle")
+    # 2026-11-05: a race, then two server errors, and the old script's third attempt was
+    # its last.
+    _refuse_pushes(origin, 3)
+
+    result = _run_script(git_env, job)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count("push rejected (attempt") == 3
+    assert _git(git_env, origin, "log", "-1", "--format=%s", "main") == (
+        "ledger/intraday.sqlite3: cycle"
+    )
+
+
+@needs_bash
+def test_gives_up_with_exit_1_once_every_attempt_is_refused(repos, git_env):
+    origin, job, _ = repos
+    _commit(git_env, job, "ledger/intraday.sqlite3", "cycle")
+    upstream = _git(git_env, origin, "rev-parse", "main")
+    _refuse_pushes(origin, 100)
+
+    result = _run_script(git_env, job)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "failed to push after 7 attempts" in result.stdout
+    assert _git(git_env, origin, "rev-parse", "main") == upstream
+
+
+def test_push_retries_wait_about_two_and_a_half_minutes_in_all():
+    # Long enough to outlast a burst of server errors, short of the next 30-minute cycle.
+    match = re.search(r"PUSH_LEDGER_WAITS:-([0-9 ]+)\}", SCRIPT.read_text(encoding="utf-8"))
+    assert match is not None
+    waits = [int(w) for w in match.group(1).split()]
+    assert len(waits) == 6
+    assert 120 <= sum(waits) <= 180
 
 
 def _workflow(name: str) -> dict:
