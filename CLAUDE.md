@@ -99,7 +99,9 @@ Regenerate test fixtures with `uv run python tests/fixtures/make_fixtures.py`.
   `validate_proposal`, for the placebo too. See MODEL_NOTES section 19.
 - **The sector hedge is measured, not traded.** `intraday/hedge.py` adds a `hedge` block
   to each reflection from `run_eod_review`; nothing sends a SOXX order. Compare sleeves in
-  basis points (`HedgedSummary.mean_bps`), since their sizes differ.
+  basis points (`HedgedSummary.mean_bps`), since their sizes differ. T6's verdict reads
+  those blocks (`intraday/t6.py`, `semimc intraday t6`), and refuses to run before its
+  first verdict date, 2027-01-15.
 - **The dashboard drives the CLI; it does not reimplement it.** `dashboard/web/app.js`
   builds a `semimc <command> ...` argument list from form input, the same way a terminal
   user would, and POSTs it to `dashboard/server.py` (stdlib `http.server`), which hands it
@@ -272,7 +274,13 @@ compared to a closed form, the closed form is written out in the test.
   the ledger**: every later exit was built from a ledger missing a stop that still held
   the shares, and refused. Every sync and every exit now first records any order the
   broker took in the last four days that the ledger lacks
-  (`orders.py::adopt_unrecorded_orders`, a warning incident each time).
+  (`orders.py::adopt_unrecorded_orders`, a warning incident each time). The rows only the
+  runner had (proposals, Trader calls, the placebo's) survive too: a commit that never
+  lands is uploaded as an artifact on its run, `unpushed-<job>-...`, kept 30 days, holding
+  the commit's files and a `COMMIT.txt`. Copying its missing rows into the current ledger
+  is still done by hand. Never hand-record a broker's order under an invented id: leave
+  orders to adoption, which uses the broker's ids. The 11-05 repair named two stop legs
+  `recovered-...`, adoption recorded them again, and one fill counted twice.
 - **A daily bar fetched just after the bell can be unfinished.** On 2026-10-30 eod-review's
   `semimc fetch` cached a SOXX close about 2% off, from mid-afternoon, and the day's
   benchmark and attribution were wrong. Today's close comes from `session_closes`.

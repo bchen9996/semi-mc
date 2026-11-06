@@ -2428,6 +2428,55 @@ def intraday_readiness(
         typer.echo(f"Stage 3 rule: {passed_3}/{len(report.stage_3_checks)} passed")
 
 
+@intraday_app.command("t6")
+def intraday_t6(
+    as_of: IntradayAsOfOption = None,
+    config: ConfigOption = None,
+    set_: SetOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Writes `reports/YYYY-MM-DD/t6.md`: T6's measure and verdict by `THESES.md`'s rule
+    (`intraday/t6.py`), over the exits from `intraday.readiness.stage_2_started` to
+    `--as-of`. Run it on the verdict dates, 2027-01-15 and 2027-04-15, with `--as-of` set
+    to the date. Before the first it refuses, so the statistic isn't looked at early.
+    Reads the two ledgers only.
+    """
+    cfg = _setup(config, set_, verbose)
+    from .intraday.ledger import IntradayLedger
+    from .intraday.t6 import FIRST_VERDICT, evaluate_t6, render_t6_markdown, verdict
+
+    as_of_day = _intraday_as_of(as_of).date()
+    if as_of_day < FIRST_VERDICT:
+        typer.echo(
+            f"T6's first verdict is on {FIRST_VERDICT} (THESES.md); its measure isn't run "
+            "before then.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    since = cfg.intraday.readiness.stage_2_started
+    if since is None:
+        typer.echo("intraday.readiness.stage_2_started is not set: T6 counts from it.", err=True)
+        raise typer.Exit(code=1)
+    placebo_path = cfg.path(cfg.intraday.shadow_ledger_path)
+    if not placebo_path.exists():
+        typer.echo(f"No placebo ledger at {placebo_path}: T6 has nothing to compare.", err=True)
+        raise typer.Exit(code=1)
+
+    ledger = IntradayLedger(cfg.path(cfg.intraday.ledger_path))
+    placebo_ledger = IntradayLedger(placebo_path)
+    try:
+        result = evaluate_t6(ledger, placebo_ledger, since, as_of_day)
+    finally:
+        ledger.close()
+        placebo_ledger.close()
+
+    out_path = cfg.path(cfg.intraday.reports_dir) / str(as_of_day) / "t6.md"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(render_t6_markdown(result), encoding="utf-8")
+    typer.echo(f"Wrote {out_path}")
+    typer.echo(verdict(result))
+
+
 # -- S4's playbook: human accept/reject/retire actions (BRIEF_INTRADAY.md's
 # "Self-improvement rules", Phase 10). Deliberately never called from a cron job -- the
 # brief's own "Ask first: Accepting a playbook proposal" and "accepted or rejected by

@@ -3297,8 +3297,12 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         says so): LRCX's second tranche (fill 191.003333) and its expired stop, and
         QCOM's short and its filled stop, so the ledger's fills match the account.
         Replayed on a copy, the 11-06 open batch buys back all 11 LRCX shares on the
-        overdue time stop. QCOM's stop fill is dated at the latest it can have happened,
-        13:30:47 CT. **Not restored:** QCOM's proposal (thesis, time stop) was lost and
+        overdue time stop. **Second pass, same night:** the repair had recorded the two
+        stop legs under invented ids (`recovered-...-stop`), so the first real run of
+        `adopt_unrecorded_orders` (GitHub's late eod-review, 19:30 CT) recorded them again
+        under Alpaca's ids, QCOM's stop fill counted twice, and reconciliation failed
+        (ledger +5 QCOM, Alpaca 0). The invented rows are gone; Alpaca's stay, with
+        QCOM's real stop fill time, 13:13:58 CT. **Not restored:** QCOM's proposal (thesis, time stop) was lost and
         isn't invented, so its orders carry none, it gets no reflection, and T6 misses
         this one exit (-$44.34 before costs); nor that cycle's Trader call, its monitor
         check, or the placebo's 10:00 entry, which only ever existed in the lost rows.
@@ -3315,11 +3319,32 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         order without an ``s4-`` id (placed by hand) is recorded too, so an exit cancels
         it, and the warning says it wasn't S4's. Not yet seen on the real account: the
         first real run is the next sync, and on a normal day it should record nothing.
-  - [ ] **Before 2027-01-15: build T6's measure.** The readiness report's sector-removed
-        table is the mean before costs with an unclustered error. Add the net figure, the
-        day-clustered errors and the agent-minus-placebo difference, and test them on
-        made-up exits, not the real ones.
-  - [ ] **2027-01-15: T6's 3-month verdict**, by the rule in `THESES.md`.
+  - [x] **2026-11-06: a commit that never lands is kept (owner's go).** What adoption
+        can't recover only ever existed on the runner: a cycle's proposals, its Trader
+        call, its monitor check, the placebo's entries. Before `push_ledger.sh` gives up
+        (exit 1 or 3) it copies the commit's files to `$RUNNER_TEMP/unpushed` with a
+        `COMMIT.txt` and sets `LEDGER_UNPUSHED`; each ledger job's last step (8 intraday,
+        2 paper) uploads that as an artifact, `unpushed-<job>-<index>-<attempt>`, kept 30
+        days. A paper job that re-runs after exit 3 and then lands drops the copy. Uses
+        `actions/upload-artifact` v7.0.2, pinned by commit like the other actions. The
+        repo and its ledgers are public, so the artifact shows nothing new. Restoring is
+        still by hand, from the real rows. Not covered: `monitor` (manual only) and
+        `forecast_journal.yml` (no trades, re-runnable).
+  - [x] **2026-11-06: T6's measure is built (owner's go).** `intraday/t6.py`: each exit
+        from `readiness.stage_2_started` (2026-10-15) to `--as-of` that `hedge.py` priced,
+        as net P&L plus the hedge's P&L over entry notional, in bps; each sleeve's mean
+        with its error clustered by trading day (the usual G/(G-1) correction, checked
+        against statsmodels' cluster covariance); agent minus placebo, with the root of the
+        sum of squares; the verdict by the rule's dates and 2 standard errors, fixed in
+        code. It also counts exits not priced yet and exits never reflected (QCOM's on
+        11-05 is one). `semimc intraday t6 --as-of 2027-01-15` writes
+        `reports/2027-01-15/t6.md`; before that date it refuses, so the number isn't seen
+        early. It is its own command, not a column in the readiness report as first
+        planned here, since readiness is run during the window. 20 tests, all on made-up
+        exits; not run on the real ledgers.
+  - [ ] **2027-01-15: T6's 3-month verdict**, by the rule in `THESES.md`:
+        `semimc intraday t6 --as-of 2027-01-15`, after that day's eod-review has priced
+        its exits.
   - [ ] **2027-04-15: T6's 6-month verdict**, if January didn't settle it.
 - [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded). **Built
       ahead of turn, 2026-09-26**: schema/config/gates (Phase 12a) and the real Alpaca

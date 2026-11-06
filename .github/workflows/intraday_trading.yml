@@ -75,7 +75,9 @@ name: Intraday trading (S4)
 # already at the broker. Every job below except `monitor` shares one concurrency group,
 # so the run that beat a push is almost always the paper workflow, writing other files,
 # and the rebase applies cleanly. If it conflicts, another run changed this ledger
-# despite the group; the job fails (GitHub's failure email) rather than guess.
+# despite the group; the job fails (GitHub's failure email) rather than guess. Either
+# way a commit that never lands is uploaded as an artifact by each job's last step
+# (2026-11-06): on 2026-11-05 a lost cycle took its proposals and Trader call with it.
 #
 # `weekly-review` never accepts, rejects, or retires a playbook proposal -- confirmed
 # directly against the brief before building it: the schedule table names no agent for
@@ -220,6 +222,15 @@ jobs:
           # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
           bash .github/scripts/push_ledger.sh
           exit "$status"
+      - name: Keep the commit if its push failed
+        # push_ledger.sh copied the commit's files and set LEDGER_UNPUSHED before giving
+        # up: a lost push loses rows nothing else holds (2026-11-05). Kept 30 days.
+        if: failure() && env.LEDGER_UNPUSHED != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unpushed-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ env.LEDGER_UNPUSHED }}
+          retention-days: 30
 
   research:
     if: github.event_name == 'workflow_dispatch' && inputs.job == 'research'
@@ -268,6 +279,15 @@ jobs:
           # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
           bash .github/scripts/push_ledger.sh
           exit "$status"
+      - name: Keep the commit if its push failed
+        # push_ledger.sh copied the commit's files and set LEDGER_UNPUSHED before giving
+        # up: a lost push loses rows nothing else holds (2026-11-05). Kept 30 days.
+        if: failure() && env.LEDGER_UNPUSHED != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unpushed-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ env.LEDGER_UNPUSHED }}
+          retention-days: 30
 
   preopen:
     if: github.event_name == 'workflow_dispatch' && inputs.job == 'preopen'
@@ -307,6 +327,15 @@ jobs:
           # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
           bash .github/scripts/push_ledger.sh
           exit "$status"
+      - name: Keep the commit if its push failed
+        # push_ledger.sh copied the commit's files and set LEDGER_UNPUSHED before giving
+        # up: a lost push loses rows nothing else holds (2026-11-05). Kept 30 days.
+        if: failure() && env.LEDGER_UNPUSHED != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unpushed-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ env.LEDGER_UNPUSHED }}
+          retention-days: 30
 
   monitor:
     if: github.event_name == 'workflow_dispatch' && inputs.job == 'monitor'
@@ -433,6 +462,15 @@ jobs:
           # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
           bash .github/scripts/push_ledger.sh
           exit "$status"
+      - name: Keep the commit if its push failed
+        # push_ledger.sh copied the commit's files and set LEDGER_UNPUSHED before giving
+        # up: a lost push loses rows nothing else holds (2026-11-05). Kept 30 days.
+        if: failure() && env.LEDGER_UNPUSHED != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unpushed-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ env.LEDGER_UNPUSHED }}
+          retention-days: 30
 
   cycle:
     if: github.event_name == 'workflow_dispatch' && inputs.job == 'cycle'
@@ -480,6 +518,15 @@ jobs:
           # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
           bash .github/scripts/push_ledger.sh
           exit "$status"
+      - name: Keep the commit if its push failed
+        # push_ledger.sh copied the commit's files and set LEDGER_UNPUSHED before giving
+        # up: a lost push loses rows nothing else holds (2026-11-05). Kept 30 days.
+        if: failure() && env.LEDGER_UNPUSHED != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unpushed-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ env.LEDGER_UNPUSHED }}
+          retention-days: 30
 
   carry:
     if: github.event.schedule == '45 20 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'carry')
@@ -520,6 +567,15 @@ jobs:
           # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
           bash .github/scripts/push_ledger.sh
           exit "$status"
+      - name: Keep the commit if its push failed
+        # push_ledger.sh copied the commit's files and set LEDGER_UNPUSHED before giving
+        # up: a lost push loses rows nothing else holds (2026-11-05). Kept 30 days.
+        if: failure() && env.LEDGER_UNPUSHED != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unpushed-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ env.LEDGER_UNPUSHED }}
+          retention-days: 30
 
   eod-review:
     if: github.event.schedule == '15 21 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'eod-review')
@@ -575,6 +631,15 @@ jobs:
           # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
           bash .github/scripts/push_ledger.sh
           exit "$status"
+      - name: Keep the commit if its push failed
+        # push_ledger.sh copied the commit's files and set LEDGER_UNPUSHED before giving
+        # up: a lost push loses rows nothing else holds (2026-11-05). Kept 30 days.
+        if: failure() && env.LEDGER_UNPUSHED != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unpushed-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ env.LEDGER_UNPUSHED }}
+          retention-days: 30
 
   weekly-review:
     if: github.event.schedule == '45 21 * * 5' || (github.event_name == 'workflow_dispatch' && inputs.job == 'weekly-review')
@@ -616,3 +681,12 @@ jobs:
           # A rejected push is rebased, never re-run (.github/scripts/push_ledger.sh).
           bash .github/scripts/push_ledger.sh
           exit "$status"
+      - name: Keep the commit if its push failed
+        # push_ledger.sh copied the commit's files and set LEDGER_UNPUSHED before giving
+        # up: a lost push loses rows nothing else holds (2026-11-05). Kept 30 days.
+        if: failure() && env.LEDGER_UNPUSHED != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unpushed-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ env.LEDGER_UNPUSHED }}
+          retention-days: 30

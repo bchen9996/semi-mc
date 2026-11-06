@@ -101,13 +101,15 @@ costs, than the same risk controls applied to a placebo agent, and than holding 
 entries drawn at random from the morning watchlist instead of the Trader's judgment. Runs
 on its own shadow ledger every day S4 runs, never submitting real orders.
 
-**Comparison**: not yet written -- an `analytics.paper_evaluation.evaluate_t6`-style
-function, following T2/T3's pattern of citing the exact module/function once it exists,
-comparing S4's real equity curve, the placebo's shadow equity curve, and SOXX buy-and-hold
-on net P&L per trade, expectancy, hit rate, average win vs. average loss, exposure-
-adjusted return, beta to SOXX, turnover, slippage vs. arrival price, time in market,
-confidence calibration, and process scores (per `BRIEF_INTRADAY.md`'s "Evaluation"
-section). The verdict rests on one measure, below; the rest are reported alongside it.
+**Comparison**: the deciding measure below is `intraday/t6.py::evaluate_t6`, run as
+`semimc intraday t6 --as-of <verdict date>`, which writes `reports/<date>/t6.md` with the
+verdict (built 2026-11-06, tested on made-up exits only; it refuses to run before
+2027-01-15). Reported alongside it, not yet in one place: S4's real equity curve, the
+placebo's shadow equity curve, and SOXX buy-and-hold on net P&L per trade, expectancy, hit
+rate, average win vs. average loss, exposure-adjusted return, beta to SOXX, turnover,
+slippage vs. arrival price, time in market, confidence calibration, and process scores
+(per `BRIEF_INTRADAY.md`'s "Evaluation" section; the readiness, end-of-day and weekly
+reports carry most of these). The verdict rests on one measure, below.
 
 **Decided by** (owner decision 2026-11-04, from a power analysis on the first exits; see
 the caveat):
@@ -138,10 +140,12 @@ the caveat):
 2027-01-15 and 2027-04-15, above.
 
 **Status**: not yet evaluated. Real paper orders since Stage 2 (2026-10-15); Stage 3, the
-full budget, since 2026-11-04. `evaluate_t6` still doesn't exist: the readiness report's
-sector-removed table gives each sleeve's mean before costs with an unclustered error.
-The net figure, the day-clustered errors and the difference are to be built before
-2027-01-15 (`tasks/todo.md`). The rest of this paragraph is the 2026-09-21 record.
+full budget, since 2026-11-04. The measure is built (`intraday/t6.py`, 2026-11-06) and
+has not been run on the real ledgers; its first run is the 2027-01-15 verdict. It also
+counts the exits it can't measure: one agent exit is already among them, QCOM's on
+2026-11-05, whose proposal was lost with a failed push (-$44.34 before costs). The
+readiness report's sector-removed table still shows each sleeve's mean before costs with
+an unclustered error. The rest of this paragraph is the 2026-09-21 record.
 As of 2026-09-21, the placebo agent itself is built and
 running on schedule (`intraday/placebo.py`, `semimc intraday placebo open-batch|cycle|
 carry`, S4 Phase 7) on its own shadow ledger (`ledger/intraday_shadow.sqlite3`) -- but

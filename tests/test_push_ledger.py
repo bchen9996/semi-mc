@@ -49,8 +49,10 @@ BASH = _bash()
 def git_env(tmp_path: Path) -> dict[str, str]:
     global_config = tmp_path / "gitconfig"
     global_config.write_text("", encoding="utf-8")
+    # Set only on a GitHub runner; a test that wants the script to keep a commit sets them.
+    inherited = {k: v for k, v in os.environ.items() if k not in ("RUNNER_TEMP", "GITHUB_ENV")}
     return {
-        **os.environ,
+        **inherited,
         "GIT_CONFIG_GLOBAL": str(global_config),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_AUTHOR_NAME": "test",
@@ -211,6 +213,90 @@ def test_gives_up_with_exit_1_once_every_attempt_is_refused(repos, git_env):
     assert _git(git_env, origin, "rev-parse", "main") == upstream
 
 
+def _runner_env(git_env: dict[str, str], tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
+    """The two variables a GitHub runner gives the script, pointed at `tmp_path`."""
+    runner_temp = tmp_path / "runner_temp"
+    runner_temp.mkdir()
+    github_env = tmp_path / "github_env"
+    github_env.write_text("", encoding="utf-8")
+    env = {**git_env, "RUNNER_TEMP": runner_temp.as_posix(), "GITHUB_ENV": github_env.as_posix()}
+    return env, runner_temp / "unpushed", github_env
+
+
+@needs_bash
+def test_a_push_that_never_lands_keeps_its_commit_for_the_workflow_to_upload(
+    repos, git_env, tmp_path
+):
+    # 2026-11-05: the lost cycle's proposals and Trader call existed only on the runner.
+    origin, job, _ = repos
+    _commit(git_env, job, "ledger/intraday.sqlite3", "cycle")
+    _refuse_pushes(origin, 100)
+    env, kept, github_env = _runner_env(git_env, tmp_path)
+
+    result = _run_script(env, job)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert (kept / "ledger/intraday.sqlite3").read_bytes() == _ledger_bytes("cycle")
+    # Only the commit's own files: the paper ledger it didn't touch stays out.
+    assert not (kept / "ledger/paper.sqlite3").exists()
+    assert (kept / "COMMIT.txt").read_text(encoding="utf-8").splitlines() == [
+        _git(git_env, job, "rev-parse", "HEAD"),
+        "ledger/intraday.sqlite3: cycle",
+    ]
+    assert github_env.read_text(encoding="utf-8").splitlines() == [
+        f"LEDGER_UNPUSHED={kept.as_posix()}"
+    ]
+
+
+@needs_bash
+def test_a_rebase_conflict_keeps_the_jobs_own_ledger_not_the_upstream_one(repos, git_env, tmp_path):
+    _, job, other = repos
+    _commit(git_env, job, "ledger/intraday.sqlite3", "cycle")
+    _commit(git_env, other, "ledger/intraday.sqlite3", "monitor")
+    _git(git_env, other, "push", "-q")
+    env, kept, github_env = _runner_env(git_env, tmp_path)
+
+    result = _run_script(env, job)
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert (kept / "ledger/intraday.sqlite3").read_bytes() == _ledger_bytes("cycle")
+    assert github_env.read_text(encoding="utf-8").strip() == f"LEDGER_UNPUSHED={kept.as_posix()}"
+
+
+@needs_bash
+def test_a_later_attempt_that_lands_drops_what_an_earlier_one_kept(repos, git_env, tmp_path):
+    # A paper job re-runs after exit 3; once its next commit lands, nothing was lost.
+    _, job, other = repos
+    _commit(git_env, job, "ledger/paper.sqlite3", "decide")
+    _commit(git_env, other, "ledger/paper.sqlite3", "mark")
+    _git(git_env, other, "push", "-q")
+    env, kept, github_env = _runner_env(git_env, tmp_path)
+    assert _run_script(env, job).returncode == 3
+    assert kept.exists()
+
+    _git(git_env, job, "fetch", "-q", "origin", "main")
+    _git(git_env, job, "reset", "-q", "--hard", "origin/main")
+    _commit(git_env, job, "ledger/paper.sqlite3", "decide again")
+    result = _run_script(env, job)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not kept.exists()
+    # The last assignment wins, so the upload step sees an empty value and is skipped.
+    assert github_env.read_text(encoding="utf-8").splitlines()[-1] == "LEDGER_UNPUSHED="
+
+
+@needs_bash
+def test_off_a_runner_a_failed_push_keeps_nothing(repos, git_env, tmp_path):
+    origin, job, _ = repos
+    _commit(git_env, job, "ledger/intraday.sqlite3", "cycle")
+    _refuse_pushes(origin, 100)
+
+    result = _run_script(git_env, job)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "kept this commit's files" not in result.stdout
+
+
 def test_push_retries_wait_about_two_and_a_half_minutes_in_all():
     # Long enough to outlast a burst of server errors, short of the next 30-minute cycle.
     match = re.search(r"PUSH_LEDGER_WAITS:-([0-9 ]+)\}", SCRIPT.read_text(encoding="utf-8"))
@@ -264,6 +350,24 @@ def test_ledger_jobs_push_through_the_script_and_never_rerun_a_trading_command()
     paper = _workflow("paper_trading.yml")["jobs"]
     for name in ("decide-and-execute", "mark"):
         assert ".github/scripts/push_ledger.sh" in _scripts(paper[name]), name
+
+
+def test_every_ledger_push_is_followed_by_an_upload_of_a_commit_that_never_landed():
+    # push_ledger.sh sets LEDGER_UNPUSHED only when it gave up; every other run skips this.
+    for workflow in ("intraday_trading.yml", "paper_trading.yml"):
+        for name, job in _workflow(workflow)["jobs"].items():
+            steps = job["steps"]
+            pushes = [i for i, step in enumerate(steps) if "push_ledger.sh" in step.get("run", "")]
+            for i in pushes:
+                assert i + 1 < len(steps), (workflow, name)
+                keep = steps[i + 1]
+                assert keep["if"] == "failure() && env.LEDGER_UNPUSHED != ''", (workflow, name)
+                assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", keep["uses"])
+                assert keep["with"]["path"] == "${{ env.LEDGER_UNPUSHED }}", (workflow, name)
+                # Unique per job, matrix entry and re-run: a repeated name is refused.
+                artifact = keep["with"]["name"]
+                for part in ("github.job", "strategy.job-index", "github.run_attempt"):
+                    assert part in artifact, (workflow, name, part)
 
 
 def test_every_job_runs_on_the_pinned_runner_image():
