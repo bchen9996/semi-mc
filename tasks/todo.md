@@ -3302,10 +3302,19 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         isn't invented, so its orders carry none, it gets no reflection, and T6 misses
         this one exit (-$44.34 before costs); nor that cycle's Trader call, its monitor
         check, or the placebo's 10:00 entry, which only ever existed in the lost rows.
-  - [ ] **Make a cycle notice what the broker has that the ledger doesn't (owner to
-        decide).** Record any S4 order Alpaca holds that the ledger lacks, and have an
-        exit cancel every open order Alpaca has in the symbol, not only the ledger's, so
-        a lost push heals at the next cycle instead of failing every exit until the close.
+  - [x] **2026-11-06: a cycle now records what the broker has that the ledger doesn't
+        (owner's go).** `orders.py::adopt_unrecorded_orders` lists the account's orders
+        from the last four days (`Broker.list_orders_since`, Alpaca with legs nested) and
+        records any the ledger lacks, with its stop leg and fills, plus a warning naming
+        them. It runs first in every `sync_open_orders` (cycle, carry, monitor, eod-review)
+        and in every `submit_exit` for that symbol, so the exit cancels a stop the ledger
+        had lost: on 11-05 the 10:30 cycle would have closed all 11 LRCX shares. What
+        can't be read off an order stays unknown: a second tranche gets its proposal the
+        way tranche continuation finds it, a first tranche gets none (the monitor then
+        leaves it to its stop and carry), an exit gets no reason and so no reflection. An
+        order without an ``s4-`` id (placed by hand) is recorded too, so an exit cancels
+        it, and the warning says it wasn't S4's. Not yet seen on the real account: the
+        first real run is the next sync, and on a normal day it should record nothing.
   - [ ] **Before 2027-01-15: build T6's measure.** The readiness report's sector-removed
         table is the mean before costs with an unclustered error. Add the net figure, the
         day-clustered errors and the agent-minus-placebo difference, and test them on

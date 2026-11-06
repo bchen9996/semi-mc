@@ -319,6 +319,20 @@ class FakeBroker:
         open_states = ("new", "accepted", "partially_filled")
         return [o for o in self._orders.values() if o.status in open_states]
 
+    def list_orders_since(self, after: dt.datetime) -> list[Order]:
+        """Every top-level order submitted since `after`, legs nested, as Alpaca's
+        ``nested=True`` returns them. This broker's clock is naive UTC, so an aware `after`
+        is compared as UTC."""
+        if after.tzinfo is not None:
+            after = after.astimezone(dt.UTC).replace(tzinfo=None)
+        leg_ids = {leg.client_order_id for o in self._orders.values() for leg in o.legs or []}
+        return [
+            o
+            for o in self._orders.values()
+            if o.client_order_id not in leg_ids
+            and (o.submitted_at is None or o.submitted_at.replace(tzinfo=None) >= after)
+        ]
+
     # -- internal --------------------------------------------------------------------
 
     def _finish_cancel(self, order: Order) -> None:

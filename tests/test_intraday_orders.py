@@ -17,6 +17,7 @@ from semimc.execution.fake_broker import FakeBroker
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.orders import (
     OrderSync,
+    adopt_unrecorded_orders,
     build_close_order,
     build_entry_order,
     build_replacement_stop_order,
@@ -958,3 +959,155 @@ def test_a_short_entry_rests_its_stop_above_the_entry():
     assert order.order_class == "oto"
     assert order.stop_loss_price == 194.0
     assert order.limit_price < 190.0  # a marketable sell, collared below the price
+
+
+# -- adopt_unrecorded_orders ------------------------------------------------------------------
+
+T1 = intraday_client_order_id(AS_OF, CYCLE, "NVDA")
+T2 = intraday_client_order_id(AS_OF, "cycle_2", "NVDA", tranche=2)
+
+
+def _first_tranche(broker, ledger):
+    """Tranche 1 of 2 of proposal 7, recorded the way run_cycle records it."""
+    submit_order_with_fault_isolation(
+        _order(client_order_id=T1, qty=5.0),
+        broker,
+        ledger,
+        NOW,
+        proposal_id=7,
+        tranche_index=1,
+        tranche_total=2,
+    )
+
+
+def _sent_but_lost(broker, client_order_id, qty, symbol="NVDA"):
+    """An order a job sent whose ledger rows never reached main (2026-11-05)."""
+    broker.submit_order(_order(client_order_id=client_order_id, qty=qty, symbol=symbol))
+
+
+def test_an_exit_closes_every_share_after_a_lost_push(tmp_path):
+    """2026-11-05: the second tranche and its stop reached the broker but not the ledger,
+    and the exit, built for the broker's 11 shares, was refused because the unknown stop
+    held 6 of them. Recorded first, that stop is canceled with the other."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW, enforce_held_qty=True)
+    _first_tranche(broker, ledger)
+    _sent_but_lost(broker, T2, 6.0)
+
+    attempt = _exit(broker, ledger)
+
+    assert attempt.failure is None
+    assert attempt.order.qty == 11.0
+    assert broker.list_positions() == []
+    assert _incidents(ledger, "error") == []
+    t2 = ledger.get_order(T2)
+    assert (t2["leg"], t2["proposal_id"], t2["tranche_index"], t2["tranche_total"]) == (
+        "entry",
+        7,
+        2,
+        2,
+    )
+    assert ledger.get_order(f"{T2}::stop")["status"] == "canceled"
+    [warning] = [m for m in _incidents(ledger, "warning") if "the ledger didn't" in m]
+    assert f"{T2} (NVDA buy 6 entry, filled, 6 filled)" in warning
+    ledger.close()
+
+
+def test_without_the_record_the_exit_is_refused(tmp_path, monkeypatch):
+    """The failure itself, so the test above can't pass for another reason: with nothing
+    recording the lost orders, the broker refuses a close for more shares than the stop
+    it wasn't told about leaves free."""
+    monkeypatch.setattr(
+        "semimc.intraday.orders.adopt_unrecorded_orders", lambda *args, **kwargs: []
+    )
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW, enforce_held_qty=True)
+    _first_tranche(broker, ledger)
+    _sent_but_lost(broker, T2, 6.0)
+
+    attempt = _exit(broker, ledger)
+
+    assert attempt.order is None
+    assert broker.list_positions()[0].qty == 11.0
+    ledger.close()
+
+
+def test_sync_records_a_lost_cycles_orders_once(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _first_tranche(broker, ledger)
+    _sent_but_lost(broker, T2, 6.0)
+    first = intraday_client_order_id(AS_OF, "cycle_2", "AMD")
+    _sent_but_lost(broker, first, 4.0, symbol="AMD")
+
+    _sync(broker, ledger)
+    _sync(broker, ledger)
+
+    amd = ledger.get_order(first)
+    # A first tranche's proposal was lost with it: unknown, not guessed.
+    assert (amd["leg"], amd["proposal_id"], amd["tranche_total"]) == ("entry", None, 1)
+    leg = ledger.get_order(f"{first}::stop")
+    assert (leg["leg"], leg["status"]) == ("stop", "new")
+    assert ledger.get_order(f"{T2}::stop")["proposal_id"] == 7
+    assert [f["qty"] for f in ledger.fills_for_order(T2)] == [6.0]
+    adopted = [m for m in _incidents(ledger, "warning") if "the ledger didn't" in m]
+    assert len(adopted) == 1 and adopted[0].startswith("the broker had 4 order(s)")
+    ledger.close()
+
+
+def test_an_order_placed_by_hand_is_recorded_and_canceled_before_an_exit(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW, enforce_held_qty=True)
+    plain = _order(client_order_id="entry-1", qty=6.0, order_class="simple", stop_loss_price=None)
+    submit_order_with_fault_isolation(plain, broker, ledger, NOW)
+    broker.submit_order(
+        _order(
+            client_order_id="dashboard-1",
+            side="sell",
+            type="stop",
+            qty=6.0,
+            limit_price=None,
+            stop_price=180.0,
+            order_class="simple",
+            stop_loss_price=None,
+        )
+    )
+
+    attempt = _exit(broker, ledger)
+
+    assert attempt.failure is None
+    assert broker.list_positions() == []
+    assert ledger.get_order("dashboard-1")["status"] == "canceled"
+    [warning] = [m for m in _incidents(ledger, "warning") if "the ledger didn't" in m]
+    assert "dashboard-1 (NVDA sell 6 stop, new, not placed by S4)" in warning
+    ledger.close()
+
+
+def test_orders_older_than_the_lookback_are_left_alone(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW - dt.timedelta(days=5))
+    _sent_but_lost(broker, T2, 6.0)
+
+    assert adopt_unrecorded_orders(broker, ledger, NOW) == []
+    assert ledger.get_order(T2) is None
+    ledger.close()
+
+
+class _CannotListOrders(FakeBroker):
+    def list_orders_since(self, after):
+        raise BrokerError("simulated outage")
+
+
+def test_a_failed_order_listing_is_a_warning_and_the_sync_goes_on(tmp_path):
+    ledger = _ledger(tmp_path)
+    broker = _CannotListOrders(now=NOW, partial_fill_fraction=0.0)
+    _held(broker, ledger)
+    broker.fill_order("entry-1", 190.0)
+
+    sync = _sync(broker, ledger)
+
+    assert sync.filled == ["entry-1"]
+    assert _incidents(ledger, "warning") == [
+        "could not list the broker's recent orders: simulated outage"
+    ]
+    ledger.close()

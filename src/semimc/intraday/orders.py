@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import math
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -166,6 +167,124 @@ def record_new_fill(order: Order, ledger: IntradayLedger, now: dt.datetime) -> b
         filled_at=order.filled_at or now,
     )
     return True
+
+
+# How far back `adopt_unrecorded_orders` looks: long enough that a push lost at the last
+# job of a Friday is still found on Monday, short of Alpaca's 500-order cap.
+_ADOPT_LOOKBACK = dt.timedelta(days=4)
+_EXIT_ID = re.compile(r"-exit(?:-r\d+)?$")
+_TRANCHE_ID = re.compile(r"-t(\d+)$")
+
+
+def _as_utc(moment: dt.datetime) -> dt.datetime:
+    return moment.replace(tzinfo=dt.UTC) if moment.tzinfo is None else moment.astimezone(dt.UTC)
+
+
+def _adopted_row(
+    order: Order, parent: Order | None, ledger: IntradayLedger
+) -> tuple[str, int | None, int, int]:
+    """The ledger `leg`, `proposal_id` and tranche fields for an order the ledger never
+    recorded, read off its id (`intraday_client_order_id` and its suffixes) and what the
+    ledger already holds. A proposal is linked only where the code that sends such an
+    order would have found the same one; otherwise it stays unknown rather than guessed."""
+    if parent is not None:  # an OTO entry's stop leg: its entry's proposal
+        row = ledger.get_order(parent.client_order_id)
+        return "stop", row["proposal_id"] if row else None, 1, 1
+    client_order_id = order.client_order_id
+    latest_entry = ledger.latest_filled_entry_for(order.symbol)
+    entry_proposal = latest_entry["proposal_id"] if latest_entry else None
+    if client_order_id.endswith("::stop"):  # a replacement stop for the position held
+        return "stop", entry_proposal, 1, 1
+    if not client_order_id.startswith("s4-"):  # placed by hand on the account
+        return ("stop" if order.type in ("stop", "stop_limit") else "manual"), None, 1, 1
+    if _EXIT_ID.search(client_order_id):
+        return "exit", entry_proposal, 1, 1
+    tranche = _TRANCHE_ID.search(client_order_id)
+    if tranche is None:  # a first tranche: its proposal was lost with it
+        return "entry", None, 1, 1
+    index = int(tranche.group(1))
+    pending = ledger.pending_tranche_for(order.symbol)
+    if pending is None:
+        return "entry", None, index, index
+    return "entry", pending["proposal_id"], index, pending["tranche_total"]
+
+
+def adopt_unrecorded_orders(
+    broker: Broker,
+    ledger: IntradayLedger,
+    now: dt.datetime,
+    *,
+    symbol: str | None = None,
+) -> list[str]:
+    """Records every order the broker took in the last few days that the ledger has no row
+    for, with its stop leg and whatever it has filled, and returns their ids (added
+    2026-11-06). Every order the code sends is recorded as it goes out, so normally this
+    finds nothing.
+
+    Found 2026-11-05: GitHub refused the 10:00 CT cycle's push, so its ledger rows were
+    lost while its orders were already at Alpaca (LRCX's second tranche with its stop, and
+    a QCOM short with its stop). Every later exit was built from a ledger 6 LRCX shares
+    short of the account, and Alpaca refused each one ("requested 11, available 5")
+    because the unknown stop still held those shares, until the close. Recorded here, the
+    unknown stop is one `submit_exit` cancels like any other, so a lost push costs one
+    cycle rather than the day.
+
+    What can't be read off an order is left unknown rather than guessed: a first tranche
+    gets no proposal (it was lost with the rows), so the monitor leaves it to its stop and
+    carry; an exit gets no `exit_reason`, so no reflection. An order not placed by S4
+    (no ``s4-`` id) is recorded too, as leg ``"manual"`` (or ``"stop"``), so that an exit
+    cancels it and the fills reconcile, and the incident names it.
+
+    `symbol` limits the check to one name (`submit_exit`). A failed lookup is a warning and
+    changes nothing; it is asked again at the next sync.
+    """
+    try:
+        orders = broker.list_orders_since(_as_utc(now) - _ADOPT_LOOKBACK)
+    except Exception as exc:  # noqa: BLE001 - never ends the job; asked again next sync
+        ledger.record_incident("warning", f"could not list the broker's recent orders: {exc}")
+        return []
+    oldest = dt.datetime.min.replace(tzinfo=dt.UTC)
+    orders.sort(key=lambda o: _as_utc(o.submitted_at) if o.submitted_at else oldest)
+    adopted: list[str] = []
+    described: list[str] = []
+    for top in orders:
+        if symbol is not None and top.symbol != symbol:
+            continue
+        by_hand = "" if top.client_order_id.startswith("s4-") else ", not placed by S4"
+        for order, parent in [(top, None), *((leg, top) for leg in top.legs or [])]:
+            if ledger.get_order(order.client_order_id) is not None:
+                continue
+            leg, proposal_id, index, total = _adopted_row(order, parent, ledger)
+            ledger.record_order(
+                order.client_order_id,
+                order.symbol,
+                order.side,
+                order.status,
+                qty=order.qty,
+                notional=order.notional,
+                limit_price=order.limit_price,
+                broker_order_id=order.id,
+                submitted_at=order.submitted_at,
+                proposal_id=proposal_id,
+                leg=leg,
+                tranche_index=index,
+                tranche_total=total,
+            )
+            record_new_fill(order, ledger, now)
+            adopted.append(order.client_order_id)
+            size = f"${order.notional:g}" if order.qty is None else f"{order.qty:g}"
+            filled = f", {order.filled_qty:g} filled" if order.filled_qty else ""
+            described.append(
+                f"{order.client_order_id} ({order.symbol} {order.side} {size} {leg}, "
+                f"{order.status}{filled}{by_hand})"
+            )
+    if adopted:
+        ledger.record_incident(
+            "warning",
+            f"the broker had {len(adopted)} order(s) the ledger didn't, now recorded "
+            f"(a lost push?): {'; '.join(described)}",
+        )
+    return adopted
 
 
 def cancel_resting_stops(
@@ -611,6 +730,10 @@ def submit_exit(
     `exit_reason`, for the reflection :func:`sync_open_orders` writes if the fill arrives
     later.
 
+    0. Any order the broker has in the symbol that the ledger doesn't is recorded first
+       (:func:`adopt_unrecorded_orders`), so step 1 cancels it too: on 2026-11-05 a stop
+       the ledger had lost held 6 of LRCX's 11 shares, and every exit until the close was
+       refused for it.
     1. Every order still working in the symbol is canceled, and each cancel waited out
        the way :func:`cancel_resting_stops` does: the stops, an earlier exit that never
        filled (its limit missed; it still holds the shares, so a second exit would be
@@ -631,6 +754,7 @@ def submit_exit(
        rejected exit doesn't leave the position unguarded until the next cycle. A
        missing `stop_price`, or a stop the broker rejects too, is an error incident.
     """
+    adopt_unrecorded_orders(broker, ledger, now, symbol=symbol)
     canceled = [row["client_order_id"] for row in ledger.open_stop_legs_for(symbol)]
     _cancel_and_settle(ledger.open_orders_for(symbol), broker, ledger, now, sleep)
     still_canceling = ledger.open_orders_for(symbol)
@@ -783,6 +907,9 @@ def sync_open_orders(
     Runs first in every job that acts on positions (`run_cycle`, the `monitor` command,
     `run_carry`) and before `run_eod_review` reads the day's fills.
 
+    - First, an order the broker has that the ledger doesn't is recorded
+      (:func:`adopt_unrecorded_orders`, 2026-11-06): what a job whose push was lost had
+      sent.
     - An order the broker has no record of is left as it is. S4's orders always live on
       the broker that took them; the exception is Stage 1's shadow rows once Stage 2
       switches to the real account, and the stop legs among them are cleared by the
@@ -798,6 +925,7 @@ def sync_open_orders(
       notices the fill, so the cooldown can only run long, never short. The reflection
       is dated `as_of`, the day of the sync that noticed the fill.
     """
+    adopt_unrecorded_orders(broker, ledger, now)
     updated: list[str] = []
     filled: list[str] = []
     for row in ledger.open_orders():

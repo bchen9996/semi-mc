@@ -269,8 +269,10 @@ compared to a closed form, the closed form is written out in the test.
   about 2.5 minutes in all: on 2026-11-05 GitHub refused two pushes a second apart
   ("Internal Server Error"), the old three quick attempts ran out, and a cycle's rows
   were lost after its orders had reached Alpaca. **A lost push leaves the broker ahead of
-  the ledger**, and nothing yet notices: every later exit is built from a ledger that's
-  missing orders.
+  the ledger**: every later exit was built from a ledger missing a stop that still held
+  the shares, and refused. Every sync and every exit now first records any order the
+  broker took in the last four days that the ledger lacks
+  (`orders.py::adopt_unrecorded_orders`, a warning incident each time).
 - **A daily bar fetched just after the bell can be unfinished.** On 2026-10-30 eod-review's
   `semimc fetch` cached a SOXX close about 2% off, from mid-afternoon, and the day's
   benchmark and attribution were wrong. Today's close comes from `session_closes`.

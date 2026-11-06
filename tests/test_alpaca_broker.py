@@ -325,6 +325,66 @@ def test_list_open_orders_skips_multi_leg_orders():
     assert [o.client_order_id for o in open_orders] == ["simple-1"]
 
 
+def _oto(side, leg_side=AlpacaSide.BUY, client_order_id="s4-20261105-cycle_1600-LRCX-0-t2"):
+    leg = _order(
+        client_order_id="leg-uuid",
+        side=leg_side,
+        type=AlpacaType.STOP,
+        order_class=OrderClass.OTO,
+        limit_price=None,
+        status=AlpacaStatus.NEW,
+    )
+    return _order(
+        client_order_id=client_order_id,
+        symbol="LRCX",
+        side=side,
+        order_class=OrderClass.OTO,
+        status=AlpacaStatus.FILLED,
+        filled_qty="6",
+        qty="6",
+        filled_avg_price="191.003333",
+        legs=[leg],
+    )
+
+
+def test_list_orders_since_asks_for_every_status_with_legs_nested():
+    client = MagicMock()
+    client.get_orders.return_value = [_oto(AlpacaSide.SELL)]
+    after = dt.datetime(2026, 11, 2, tzinfo=dt.UTC)
+
+    [order] = _broker_with(client).list_orders_since(after)
+
+    request = client.get_orders.call_args.kwargs["filter"]
+    assert (request.status.value, request.after, request.nested, request.limit) == (
+        "all",
+        after,
+        True,
+        500,
+    )
+    # S4's own OTO entries are kept, unlike list_open_orders, with their stop legs.
+    assert (order.side, order.filled_qty, order.filled_avg_price) == ("sell", 6.0, 191.003333)
+    assert [(leg.client_order_id, leg.side, leg.type) for leg in order.legs] == [
+        ("leg-uuid", "buy", "stop")
+    ]
+
+
+def test_list_orders_since_takes_a_parent_side_from_its_stop_leg():
+    client = MagicMock()
+    client.get_orders.return_value = [
+        _oto(None, AlpacaSide.BUY, "short-entry"),
+        _oto(None, AlpacaSide.SELL, "long-entry"),
+        _oto(None, None, "no-side-anywhere"),
+    ]
+
+    orders = _broker_with(client).list_orders_since(dt.datetime(2026, 11, 2, tzinfo=dt.UTC))
+
+    # The last can't be told either way, so it isn't returned as a guess.
+    assert [(o.client_order_id, o.side) for o in orders] == [
+        ("short-entry", "sell"),
+        ("long-entry", "buy"),
+    ]
+
+
 # -- status mapping --------------------------------------------------------------------
 
 

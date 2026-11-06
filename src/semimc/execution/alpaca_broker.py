@@ -361,6 +361,34 @@ class AlpacaPaperBroker:
         ]
         return [o for o in translated if o.status in _OPEN_STATUSES]
 
+    def list_orders_since(self, after: dt.datetime) -> list[Order]:
+        """Every order submitted since `after`, any status, multi-leg ones included with
+        their legs nested, newest 500 at most (Alpaca's cap; S4 sends about 40 a day).
+        Unlike :meth:`list_open_orders` this keeps S4's own OTO entries, which is the point:
+        S4 checks that its ledger holds every order the account took (2026-11-06). A
+        multi-leg parent's side can come back empty (see the module docstring); it is then
+        the opposite of its stop leg's, and a parent with no leg side to go by is left out
+        rather than guessed."""
+        orders = self._client.get_orders(
+            filter=GetOrdersRequest(
+                status=QueryOrderStatus.ALL, after=after, nested=True, limit=500
+            )
+        )
+        translated: list[Order] = []
+        for order in orders:
+            item = self._translate_order(order)
+            if order.side is None:
+                leg_sides = {
+                    _safe_enum_value(leg.side, {"buy", "sell"}, "")
+                    for leg in order.legs or []
+                    if leg.side is not None
+                }
+                if leg_sides not in ({"buy"}, {"sell"}):
+                    continue
+                item.side = "sell" if leg_sides == {"buy"} else "buy"
+            translated.append(item)
+        return translated
+
     # -- internal --------------------------------------------------------------------
 
     def _translate_order(self, order: AlpacaOrder) -> Order:
