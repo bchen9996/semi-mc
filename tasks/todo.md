@@ -3330,6 +3330,11 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         repo and its ledgers are public, so the artifact shows nothing new. Restoring is
         still by hand, from the real rows. Not covered: `monitor` (manual only) and
         `forecast_journal.yml` (no trades, re-runnable).
+  - [x] **2026-11-05: intraday `research` and `open-batch` get a second dispatch time
+        (owner, in cron-job.org):** 07:30 and 07:45, 08:32 and 08:38 CT. Both skip a
+        same-day rerun, so the second only matters when the first never started, as
+        paper's 10:05 didn't on 11-04. Why not the cycles: `docs/external_scheduler.md`.
+        First mornings to check: 11-06's research and open batch each ran once.
   - [x] **2026-11-06: T6's measure is built (owner's go).** `intraday/t6.py`: each exit
         from `readiness.stage_2_started` (2026-10-15) to `--as-of` that `hedge.py` priced,
         as net P&L plus the hedge's P&L over entry notional, in bps; each sleeve's mean

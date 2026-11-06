@@ -105,9 +105,9 @@ uses the same request settings:
 | job | time (CT) | crontab | note |
 |---|---|---|---|
 | `preflight` | 06:45 | `45 6 * * 1-5` | |
-| `research` | 07:30 | `30 7 * * 1-5` | runs once per day |
+| `research` | 07:30 and 07:45 | `30,45 7 * * 1-5` | runs once per day; the 07:45 run skips if 07:30's ran |
 | `preopen` | 08:15 | `15 8 * * 1-5` | |
-| `open-batch` | 08:32 | `32 8 * * 1-5` | 2 min after the open, so pretrade sees the market open; runs once per day |
+| `open-batch` | 08:32 and 08:38 | `32,38 8 * * 1-5` | 2 min after the open, so pretrade sees the market open; runs once per day, so the 08:38 run skips if 08:32's ran |
 | `cycle` | every 30 min, 09:00-14:30 | `*/30 9-14 * * 1-5` | the open-batch covers 08:30; every 20 min until 2026-10-06 |
 | `carry` | 14:45 | `45 14 * * 1-5` | |
 | `carry` (backstop) | 14:50 | `50 14 * * 1-5` | a second job with the same body: retries a failed exit, otherwise does nothing |
@@ -121,6 +121,17 @@ uses the same request settings:
 | `decide-and-execute` | 10:05 and 10:20 | `5,20 10 * * 1-5` | execution window opens at 10:00 ET; the 10:20 run does the day's work if 10:05's never started, otherwise skips |
 | `mark` | every 30 min, 10:30-15:30 | `*/30 10-15 * * 1-5` | the 10:00 slot is skipped: nothing to mark before decide runs |
 | `report` | 17:30 | `30 17 * * 1-5` | |
+
+**Why intraday `research` and `open-batch` run twice** (owner, 2026-11-05): the same timeout
+that cost paper its 10:05 run on 11-04 would cost more here, since neither job has a
+GitHub cron to fall back on. With no `research`, the day's watchlist is empty and the
+Trader has nothing to choose from all day; with no `open-batch`, the 08:30 entries never
+happen. Both skip a same-day rerun (`run_research` once the watchlist exists, the open
+batch once its Trader call is recorded; one that declined at pretrade made no call, so the
+second may still run it). Research takes about 1 minute and the open batch 1.5-3 (11-03 to
+11-05), so the second run never waits behind the first. The `cycle` slots get no second
+time: the next cycle is 30 minutes away, and an extra dispatch arriving while another job
+waits in the concurrency group would cancel it.
 
 **Why it also runs at 10:20** (2026-11-04): cron-job.org's 10:05 request timed out and GitHub
 never started a run, the first miss since 10-08. The fallback cron landed at 15:39 ET,
