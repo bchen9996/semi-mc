@@ -465,6 +465,106 @@ def test_one_reflection_can_cover_several_stop_legs(config, tmp_path):
     ledger.close()
 
 
+# -- side and thesis come from the exited position, not the latest entry (fixed 2026-11-06) --
+
+
+def _seed_qcom_short_stopped_then_a_long(ledger, short_proposal_id):
+    """2026-11-05/06: a 5-share QCOM short, stopped out at 158.326, whose stop was only
+    reflected after a new 23-share QCOM long had filled."""
+    _seed_fill_order(
+        ledger,
+        client_order_id="short-entry",
+        symbol="QCOM",
+        side="sell",
+        proposal_id=short_proposal_id,
+        leg="entry",
+        qty=5,
+        price=149.458,
+        filled_at=NOW,
+    )
+    _seed_fill_order(
+        ledger,
+        client_order_id="short-stop",
+        symbol="QCOM",
+        side="buy",
+        proposal_id=short_proposal_id,
+        leg="stop",
+        qty=5,
+        price=158.326,
+        filled_at=NOW + dt.timedelta(minutes=192),
+    )
+    long_id = _seed_proposal(ledger, "QCOM", "buy", invalidation_price=163.4, thesis="long")
+    _seed_fill_order(
+        ledger,
+        client_order_id="long-entry",
+        symbol="QCOM",
+        side="buy",
+        proposal_id=long_id,
+        leg="entry",
+        qty=23,
+        price=164.95,
+        filled_at=NOW + dt.timedelta(days=1),
+    )
+
+
+def test_an_exit_reflected_after_the_symbol_reopened_keeps_its_own_side_and_thesis(
+    config, tmp_path
+):
+    ledger = _ledger(tmp_path)
+    short_id = _seed_proposal(ledger, "QCOM", "sell", invalidation_price=158.0, thesis="short")
+    _seed_qcom_short_stopped_then_a_long(ledger, short_id)
+
+    record_mechanical_reflection(
+        "QCOM", "short-stop", "invalidation", ledger, config.intraday, AS_OF
+    )
+
+    content = ledger.reflections_for(AS_OF)[0]["content"]
+    assert content["side"] == "sell"
+    assert content["thesis"] == "short"
+    assert content["invalidation_price"] == 158.0
+    assert content["pnl_gross"] == pytest.approx(5 * (149.458 - 158.326))  # -44.34
+    ledger.close()
+
+
+def test_an_exit_whose_entry_lost_its_proposal_is_reflected_without_a_thesis(config, tmp_path):
+    """The real 11-05 case: the short's proposal was lost with a failed push, and its entry
+    was adopted from the broker with none. Its loss still counts; only the thesis is gone."""
+    ledger = _ledger(tmp_path)
+    _seed_qcom_short_stopped_then_a_long(ledger, None)
+
+    record_mechanical_reflection(
+        "QCOM", "short-stop", "invalidation", ledger, config.intraday, AS_OF
+    )
+
+    content = ledger.reflections_for(AS_OF)[0]["content"]
+    assert content["side"] == "sell"
+    assert content["pnl_gross"] == pytest.approx(-44.34)
+    modeled_cost = 0.0008 * (5 * 149.458 + 5 * 158.326)
+    assert content["pnl_net"] == pytest.approx(-44.34 - modeled_cost)
+    assert content["thesis"] is None
+    assert content["confidence"] is None
+    assert content["invalidation_price"] is None
+    assert content["invalidation_respected"] is None
+    assert ledger.unreflected_exits() == []
+    ledger.close()
+
+
+def test_an_exit_whose_only_entry_has_no_proposal_is_reflected(config, tmp_path):
+    """Before 2026-11-06 an entry without a proposal meant no reflection at all, so a lost
+    push also lost its trades from every measure built on reflections."""
+    ledger = _ledger(tmp_path)
+    _seed_entry(ledger, "adopted-entry", None, 10, 100.0, 0)
+    _seed_exit(ledger, "exit-1", 10, 103.0, 30)
+
+    record_mechanical_reflection("NVDA", "exit-1", "time_stop", ledger, config.intraday, AS_OF)
+
+    content = ledger.reflections_for(AS_OF)[0]["content"]
+    assert content["side"] == "buy"
+    assert content["pnl_gross"] == pytest.approx(30.0)
+    assert content["thesis"] is None
+    ledger.close()
+
+
 # -- round_trip_count: positions closed, not exits (added 2026-10-20) ---------------------
 
 

@@ -3303,8 +3303,8 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         under Alpaca's ids, QCOM's stop fill counted twice, and reconciliation failed
         (ledger +5 QCOM, Alpaca 0). The invented rows are gone; Alpaca's stay, with
         QCOM's real stop fill time, 13:13:58 CT. **Not restored:** QCOM's proposal (thesis, time stop) was lost and
-        isn't invented, so its orders carry none, it gets no reflection, and T6 misses
-        this one exit (-$44.34 before costs); nor that cycle's Trader call, its monitor
+        isn't invented, so its orders carry none, and its exit (-$44.34 before costs) had
+        no reflection until 11-06, wrongly at first (below); nor that cycle's Trader call, its monitor
         check, or the placebo's 10:00 entry, which only ever existed in the lost rows.
   - [x] **2026-11-06: a cycle now records what the broker has that the ledger doesn't
         (owner's go).** `orders.py::adopt_unrecorded_orders` lists the account's orders
@@ -3342,11 +3342,27 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         against statsmodels' cluster covariance); agent minus placebo, with the root of the
         sum of squares; the verdict by the rule's dates and 2 standard errors, fixed in
         code. It also counts exits not priced yet and exits never reflected (QCOM's on
-        11-05 is one). `semimc intraday t6 --as-of 2027-01-15` writes
+        11-05 was one until 11-06, below). `semimc intraday t6 --as-of 2027-01-15` writes
         `reports/2027-01-15/t6.md`; before that date it refuses, so the number isn't seen
         early. It is its own command, not a column in the readiness report as first
         planned here, since readiness is run during the window. 20 tests, all on made-up
         exits; not run on the real ledgers.
+  - [x] **2026-11-06: an exit's reflection takes its side from its own position (owner's
+        go).** The 10:30 CT cycle's sync reflected 11-05's QCOM stop for the first time,
+        just after a new QCOM long had filled. `record_mechanical_reflection` took the side
+        and proposal from the symbol's latest entry, the long, so the short's -$44.34 was
+        stored as +$44.34 under the long's thesis, confidence and invalidation. The day's
+        report read $88.68 too good, and the agent's sector-removed mean since Stage 2 read
+        -2.5 bps per exit instead of -27.6 (standard error 18.8, 40 exits; placebo -51.6).
+        **Fixed:** `reflect.py::_exited_position` takes the side from the exited position's
+        own entry fills and the proposal from the latest of them that has one. An entry
+        with none (adopted after a lost push) is still reflected, without a thesis or
+        confidence, so its P&L reaches T6; before, it got no reflection at all. 3 tests.
+        **Corrected by hand:** reflection 40's side, P&L and hedge sign; the long's thesis
+        and the Reviewer's grade of it removed (an incident row says so). A scan of both
+        ledgers found no other reflection off its own position (44 agent, 97 placebo).
+        `reports/2026-11-06/eod.md` and `weekly_review.md` carry a correction note; their
+        attribution split isn't recomputed.
   - [ ] **2027-01-15: T6's 3-month verdict**, by the rule in `THESES.md`:
         `semimc intraday t6 --as-of 2027-01-15`, after that day's eod-review has priced
         its exits.

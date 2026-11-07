@@ -24,3 +24,8 @@ None pending.
 
 ## Active entries due for re-review
 None due.
+
+## Correction (added by hand, 2026-11-06, after this review ran)
+One exit, 11-05's QCOM short, was reflected with the wrong sign (`reports/2026-11-06/eod.md`,
+Correction). Corrected: P&L gross 312.43, net 206.01; calibration [0.50, 0.75] 29.6% win
+rate, n=27.

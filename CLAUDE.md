@@ -280,7 +280,10 @@ compared to a closed form, the closed form is written out in the test.
   the commit's files and a `COMMIT.txt`. Copying its missing rows into the current ledger
   is still done by hand. Never hand-record a broker's order under an invented id: leave
   orders to adoption, which uses the broker's ids. The 11-05 repair named two stop legs
-  `recovered-...`, adoption recorded them again, and one fill counted twice.
+  `recovered-...`, adoption recorded them again, and one fill counted twice. An exit whose
+  entry lost its proposal is still reflected, without a thesis. Its side comes from its
+  own position's fills (`reflect.py::_exited_position`), never from the symbol's latest
+  entry: on 11-06 that was a new long, and the lost short's $44 loss was stored as a gain.
 - **A daily bar fetched just after the bell can be unfinished.** On 2026-10-30 eod-review's
   `semimc fetch` cached a SOXX close about 2% off, from mid-afternoon, and the day's
   benchmark and attribution were wrong. Today's close comes from `session_closes`.

@@ -140,3 +140,18 @@ The rejection rate was 4.2%. All three rejections were "being closed this cycle"
 
 ## Proposed playbook changes
 None proposed today.
+
+## Correction (added by hand, 2026-11-06, after this report ran)
+The "QCOM (invalidation)" exit above is not today's trade. It is 11-05's 5-share QCOM
+short, stopped out at 158.326, whose proposal was lost with that day's failed push. It
+was reflected for the first time today, after today's QCOM long had filled, and took that
+long's side and thesis, so its loss was stored as a gain. The code is fixed and the
+ledger row corrected (`tasks/todo.md`, 2026-11-06). Corrected figures:
+
+- That exit: gross -44.34, net -45.57 (was +44.34, +43.11); its hedge +6.76 (was -6.76)
+- P&L: gross -243.65, net -285.26, pessimistic -326.87
+- With the sector removed, today: hedge 140.17, hedged gross -103.48, hedged net -176.24
+- Agent since Stage 2: -27.6 bps per exit before costs (standard error 18.8, 40 exits)
+- Calibration [0.50, 0.75]: 29.6% win rate, n=27
+- Not recomputed: the attribution split, and the Reviewer's text above, which was written
+  from the wrong figures (its "carried or stale position" note was this exit).

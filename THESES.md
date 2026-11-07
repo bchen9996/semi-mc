@@ -142,8 +142,10 @@ the caveat):
 **Status**: not yet evaluated. Real paper orders since Stage 2 (2026-10-15); Stage 3, the
 full budget, since 2026-11-04. The measure is built (`intraday/t6.py`, 2026-11-06) and
 has not been run on the real ledgers; its first run is the 2027-01-15 verdict. It also
-counts the exits it can't measure: one agent exit is already among them, QCOM's on
-2026-11-05, whose proposal was lost with a failed push (-$44.34 before costs). The
+counts the exits it can't measure. QCOM's short on 2026-11-05, whose proposal was lost
+with a failed push, was one until 11-06. It is measured now (-$44.34 before costs), after
+its first reflection was stored with the wrong sign and corrected the same day
+(`tasks/todo.md`, 2026-11-06). The
 readiness report's sector-removed table still shows each sleeve's mean before costs with
 an unclustered error. The rest of this paragraph is the 2026-09-21 record.
 As of 2026-09-21, the placebo agent itself is built and

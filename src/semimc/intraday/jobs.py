@@ -369,9 +369,10 @@ def _original_proposal_payload(ledger: IntradayLedger, symbol: str) -> dict[str,
     """The payload of the proposal that opened `symbol`'s currently-held position, if
     traceable -- what `run_cycle`'s trim path (the remainder's invalidation level) and
     `run_carry` (a carried position's horizon/confidence) both read. Thin wrapper around
-    `reflect.py::_entry_and_proposal`, the same lookup `record_mechanical_reflection`
-    uses (Phase 9a) -- one shared implementation, not two independently-maintained
-    copies of "find the entry that opened this position.\""""
+    `reflect.py::_entry_and_proposal`, the symbol's latest entry, which is the held
+    position's. An exit's reflection can't use it: by the time an exit is reflected the
+    symbol may have been reopened, so `record_mechanical_reflection` starts from the
+    exited position's own fills (`reflect.py::_exited_position`, 2026-11-06)."""
     found = _entry_and_proposal(ledger, symbol)
     return found[1]["payload"] if found is not None else None
 

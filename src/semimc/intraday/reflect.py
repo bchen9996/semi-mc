@@ -32,6 +32,10 @@ reported at an entry of $217.33 against a true $217.49, and gross P&L of -$23.97
 tranche and add carries, and `orders.py::sync_open_orders` now reflects them together, as
 one trade, rather than one reflection per leg (the same stop-out had been counted as
 three trades). Every order a reflection covers is listed in its `client_order_ids`.
+
+**So are its side and thesis** (fixed 2026-11-06): they used to come from the symbol's
+latest entry too, which is a different position whenever an exit is reflected after the
+symbol has been reopened. See :func:`_exited_position`.
 """
 
 from __future__ import annotations
@@ -132,6 +136,38 @@ def _position_entries(
     return qty, notional, first
 
 
+def _exited_position(
+    ledger: IntradayLedger, symbol: str, close_order_ids: Sequence[str]
+) -> tuple[str, dict[str, Any] | None, list[str]] | None:
+    """The side of the position `close_order_ids` exit, the proposal it was opened under,
+    and the entry orders :func:`trade_figures` falls back to if its fills can't be found.
+
+    Side and proposal come from that position's own entry fills
+    (:func:`position_entry_fills`), not from the symbol's latest entry. On 2026-11-06 the
+    stop that closed 11-05's QCOM short was reflected only after a new QCOM long had
+    filled: the latest entry was the long, so the short's $44 loss was stored as a gain,
+    under the long's thesis. The proposal is the latest of those fills' that has one, or
+    `None` when none has (an order adopted after a lost push has none); the exit is still
+    reflected, without a thesis or confidence. With no entry fills found, it falls back to
+    the symbol's latest entry and its proposal, as before. `None` if that fails too."""
+    entries = position_entry_fills(ledger, symbol, close_order_ids)
+    if entries:
+        signed = sum(fill["qty"] if fill["side"] == "buy" else -fill["qty"] for fill in entries)
+        side = "buy" if signed > 0 else "sell"
+        proposal_id = next(
+            (fill["proposal_id"] for fill in reversed(entries) if fill["proposal_id"] is not None),
+            None,
+        )
+        proposal = ledger.get_proposal(proposal_id) if proposal_id is not None else None
+        return side, proposal, []
+    found = _entry_and_proposal(ledger, symbol)
+    if found is None:
+        return None
+    entry, proposal = found
+    entry_orders = ledger.orders_for_proposal(entry["proposal_id"], leg="entry")
+    return entry["side"], proposal, [order["client_order_id"] for order in entry_orders]
+
+
 def round_trip_count(ledger: IntradayLedger, reflections: Sequence[dict[str, Any]]) -> int:
     """How many positions, flat to flat, `reflections` exited (added 2026-10-20). One
     reflection is one exit, and a position can close in steps: on 2026-10-20 AVGO's add
@@ -212,26 +248,25 @@ def record_mechanical_reflection(
     same "never act on incomplete information" caution `execution/pretrade.py` uses
     elsewhere.
     """
-    found = _entry_and_proposal(ledger, symbol)
+    close_ids = [close_order_id, *also_closed_by]
+    found = _exited_position(ledger, symbol, close_ids)
     if found is None:
         return None
-    entry, proposal = found
+    side, proposal, fallback_entry_ids = found
 
-    entry_orders = ledger.orders_for_proposal(entry["proposal_id"], leg="entry")
-    side = entry["side"]
     figures = trade_figures(
         ledger,
         symbol,
-        [close_order_id, *also_closed_by],
+        close_ids,
         side,
         config.risk.equity_cost_bps_per_side,
-        fallback_entry_ids=[o["client_order_id"] for o in entry_orders],
+        fallback_entry_ids=fallback_entry_ids,
     )
     if figures is None:
         return None
     avg_exit_price = figures["avg_exit_price"]
 
-    payload = proposal["payload"]
+    payload = proposal["payload"] if proposal is not None else {}
 
     invalidation_price = payload.get("invalidation_price")
     invalidation_respected = None
