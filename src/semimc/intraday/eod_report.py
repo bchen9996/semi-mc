@@ -365,11 +365,19 @@ def render_eod_markdown(report: EodReport) -> str:
     lines.append("## Attribution")
     if report.attribution is not None:
         attribution = report.attribution
-        lines.append(f"- Sector (SOXX beta-of-1 approximation): {_money(attribution['sector'])}")
         lines.append(
-            f"- Stock-specific (selection + timing, combined): "
+            "- Sector (SOXX at each name's beta, over each trade's own holding period): "
+            f"{_money(attribution['sector'])}"
+        )
+        lines.append(
+            f"- Stock-specific (selection + timing, after modeled cost): "
             f"{_money(attribution['stock_specific'])}"
         )
+        if attribution.get("unpriced_exits"):
+            lines.append(
+                f"- Not priced against SOXX ({_exits(attribution['unpriced_exits'])}): "
+                f"{_money(attribution['unpriced'])}"
+            )
         lines.append(f"- Options: {_money(attribution['options'])}")
         if report.attribution_narrative:
             lines.append("")

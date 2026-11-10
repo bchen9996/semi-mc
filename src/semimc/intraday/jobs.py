@@ -2315,8 +2315,8 @@ def run_eod_review(
     )
 
     scorecard = process_scorecard(ledger, intraday, as_of)
-    # The session's move, not the whole day's: S4 holds nothing overnight (review.py).
-    attribution = day_attribution(reflections_today, soxx_open_to_close)
+    # From each exit's hedge block, priced above: SOXX over that trade's own hold (review.py).
+    attribution = day_attribution(reflections_today)
     hedged: dict[str, HedgedSummary] = {
         "today": summarize_hedged(reflections_today),
         "agent": summarize_hedged(reflections_since(ledger.all_reflections(), hedging_from)),

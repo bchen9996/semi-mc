@@ -121,3 +121,13 @@ The rejection rate was 0%. The sleeve used 1 of 6 new positions and exhausted AS
 
 ## Proposed playbook changes
 None proposed today.
+
+## Correction (added by hand, 2026-11-09, after this report ran)
+The Attribution section above gave the ASML trade SOXX's whole 5.9% open-to-close move at a
+beta of 1. It was held from 10:04 to 12:00 CT, when SOXX was nearly flat, and the Reviewer's
+text ("carried by the strong SOXX tape", "ASML lagged the sector") was written from that.
+The split now comes from each trade's own SOXX hedge (`tasks/todo.md`, 2026-11-09).
+Corrected:
+
+- Sector (SOXX at ASML's beta, 0.79, over its own holding period): 9.77 (was 804.76)
+- Stock-specific (selection + timing, after modeled cost): -42.39 (was -837.38)

@@ -9,15 +9,12 @@ number here is pure computation over ledger data already on hand, so `jobs.py::
 run_eod_review`'s Reviewer call narrates and grades these numbers rather than
 recomputing them (`prompts/reviewer.md` says so explicitly).
 
-:func:`day_attribution` is a disclosed simplification, not a fitted regression --
-`BRIEF_INTRADAY.md` asks to "regress the day's returns on SOXX," but nothing in the
-ledger retains intraday SOXX price *history* (only `latest_quote` at call time), so a
-genuine per-trade regression against SOXX's return over that trade's own holding window
-isn't buildable from data this project keeps today. See its own docstring for the
-day-level approximation used instead -- a labeled interpretation, not a fabricated
-number, the same honesty convention `eod_report.py`'s "pessimistic P&L" already uses.
-`hedge.py` (2026-10-31) measures each trade against SOXX over its own holding period, with
-a beta; this split stays as the quick day-level read.
+:func:`day_attribution` is not the regression `BRIEF_INTRADAY.md` asks for ("regress the
+day's returns on SOXX"): a day's handful of exits can't fit one. It reads each exit's
+`hedge` block instead (`hedge.py`, 2026-10-31): SOXX over that trade's own holding period,
+sized at a beta fit on daily returns before the entry. Until 2026-11-09 it applied SOXX's
+whole session to every trade at a beta of 1, which gave a two-hour trade the whole day's
+sector move.
 
 :func:`weekly_summary`/:func:`render_weekly_review_markdown` (Phase 10) extend the same
 "mechanical here, judgment elsewhere" split one level further: `weekly_review` has no
@@ -123,36 +120,38 @@ def process_scorecard(
     }
 
 
-def day_attribution(
-    reflections_today: list[dict[str, Any]], soxx_return: float | None
-) -> dict[str, float | None]:
-    """A day-level sector/stock-specific split, not a fitted regression (see module
-    docstring). `sector` sums each closed position's signed entry-cost-basis notional
-    (`content["qty"] * content["avg_entry_price"]`, the qty *this reflection's own event*
-    exited -- correct for a trim too, not just a full close) times `soxx_return` -- a
-    beta-of-1 approximation. `run_eod_review` passes SOXX's open-to-close move (since
-    2026-10-19; before, the whole day's): S4 holds nothing overnight, so a gap is no part
-    of its sector exposure. `stock_specific` is the residual (today's total
-    `pnl_net` minus `sector`), folding selection and timing into one bucket rather than
-    fabricating a further split neither the ledger nor a market-data feed supports yet
-    (no intraday SOXX price history is retained). `options` is always 0.0 -- options
-    remain off (rollout stages 4/5, not reached).
+def day_attribution(reflections_today: list[dict[str, Any]]) -> dict[str, Any]:
+    """Today's net P&L split into the sector's share and the rest, from each exit's `hedge`
+    block (`hedge.py`). A trade's sector share is what SOXX, sized at the name's trailing
+    beta and on the trade's side, made from each entry fill to the exit: its hedge's P&L
+    with the sign flipped. `stock_specific` is the rest of the trade's net P&L, so
+    selection, timing and the trade's modeled cost stay in one bucket. The two add up to
+    the day's net P&L. The hedge's own cost isn't charged, since nothing was traded; the
+    report's "With the sector removed" section charges it, so its hedged net differs.
+
+    An exit with no hedge block yet (no SOXX bars, or no beta) goes in `unpriced`, counted
+    in `unpriced_exits`, rather than all into stock-specific. `sector` and
+    `stock_specific` are `None` when no exit today is priced. `options` is always 0.0 --
+    options remain off (rollout stages 4/5, not reached).
+
+    Changed 2026-11-09. The sector share was each trade's notional times SOXX's whole
+    open-to-close move, at a beta of 1, however long the trade was held. That day ASML,
+    held from 10:04 to 12:00 CT while SOXX was nearly flat, was given +$805 of SOXX's 5.9%
+    session (its hedge says +$9.77), and the Reviewer wrote that it lagged a strong tape.
     """
-    pnl_net_total = sum(r["content"].get("pnl_net") or 0.0 for r in reflections_today)
-    if soxx_return is None or not reflections_today:
-        return {"sector": None, "stock_specific": None, "options": 0.0}
-
-    sector = 0.0
-    for row in reflections_today:
-        content = row["content"]
-        qty = content.get("qty")
-        avg_entry_price = content.get("avg_entry_price")
-        if qty is None or avg_entry_price is None:
-            continue
-        sign = 1.0 if content.get("side") == "buy" else -1.0
-        sector += sign * qty * avg_entry_price * soxx_return
-
-    return {"sector": sector, "stock_specific": pnl_net_total - sector, "options": 0.0}
+    priced = [row["content"] for row in reflections_today if row["content"].get("hedge")]
+    unpriced = [row["content"] for row in reflections_today if not row["content"].get("hedge")]
+    sector = stock_specific = None
+    if priced:
+        sector = -sum(c["hedge"]["pnl"] for c in priced)
+        stock_specific = sum((c.get("pnl_net") or 0.0) + c["hedge"]["pnl"] for c in priced)
+    return {
+        "sector": sector,
+        "stock_specific": stock_specific,
+        "unpriced": sum(c.get("pnl_net") or 0.0 for c in unpriced),
+        "unpriced_exits": len(unpriced),
+        "options": 0.0,
+    }
 
 
 _WEEKLY_WINDOW_TRADING_DAYS = 5

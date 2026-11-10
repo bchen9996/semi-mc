@@ -101,7 +101,8 @@ Regenerate test fixtures with `uv run python tests/fixtures/make_fixtures.py`.
   to each reflection from `run_eod_review`; nothing sends a SOXX order. Compare sleeves in
   basis points (`HedgedSummary.mean_bps`), since their sizes differ. T6's verdict reads
   those blocks (`intraday/t6.py`, `semimc intraday t6`), and refuses to run before its
-  first verdict date, 2027-01-15.
+  first verdict date, 2027-01-15. So does the end-of-day report's sector/stock-specific
+  split (`review.py::day_attribution`, since 2026-11-09): never SOXX's whole session.
 - **The dashboard drives the CLI; it does not reimplement it.** `dashboard/web/app.js`
   builds a `semimc <command> ...` argument list from form input, the same way a terminal
   user would, and POSTs it to `dashboard/server.py` (stdlib `http.server`), which hands it

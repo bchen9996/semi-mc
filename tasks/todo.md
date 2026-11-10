@@ -3363,6 +3363,18 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         ledgers found no other reflection off its own position (44 agent, 97 placebo).
         `reports/2026-11-06/eod.md` and `weekly_review.md` carry a correction note; their
         attribution split isn't recomputed.
+  - [x] **2026-11-09: the report's attribution reads each trade's SOXX hedge (owner's
+        go).** The split gave every exit SOXX's whole open-to-close move at a beta of 1,
+        however long it was held. On 11-09 SOXX rose 5.9% from the open, nearly all before
+        10:00 CT, and ASML, held from 10:04 to 12:00 while SOXX was about flat, was given
+        +$805 of sector gain and -$837 stock-specific. The Reviewer wrote that it lagged a
+        strong tape. **Changed:** `review.py::day_attribution` takes each exit's sector
+        share from its `hedge` block (SOXX at the name's beta, over that trade's own
+        holding period), and the rest of its net P&L is stock-specific. An exit not yet
+        priced gets its own line instead of landing in stock-specific. Report only:
+        trading, the hedge blocks and T6 are unchanged. Tests in `test_intraday_review.py`,
+        `test_intraday_eod_report.py` and two `run_eod_review` tests. Reports before 11-09
+        keep the old split; `reports/2026-11-09/eod.md` carries a correction note.
   - [ ] **2027-01-15: T6's 3-month verdict**, by the rule in `THESES.md`:
         `semimc intraday t6 --as-of 2027-01-15`, after that day's eod-review has priced
         its exits.

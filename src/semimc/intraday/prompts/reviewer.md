@@ -23,8 +23,11 @@ against it.
 
 `process_metrics` is already computed for you -- rejection rate and reasons, budget
 usage against the configured caps, invalidation adherence, a running confidence-
-calibration curve, a day-level sector/stock-specific/options attribution split, and
-`sector_removed`, each exit's result had it carried a SOXX hedge. That hedge is measured,
+calibration curve, an attribution split of the day's net P&L, and `sector_removed`, each
+exit's result had it carried a SOXX hedge. The split's `sector` is what SOXX, at each
+name's beta, did over each trade's own holding period, from that same hedge, not SOXX's
+whole session; `stock_specific` is the rest, after modeled cost; `unpriced` is exits not
+yet priced against SOXX. That hedge is measured,
 never traded, and `mean_bps` is the only figure comparable between the agent and the
 placebo, whose sizes differ. This
 is deliberate: it's plain arithmetic over the ledger, not judgment, so the code computes

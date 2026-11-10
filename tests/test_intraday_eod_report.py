@@ -61,6 +61,40 @@ def test_render_eod_markdown_never_crashes_on_an_empty_day(tmp_path):
     ledger.close()
 
 
+def test_the_attribution_shows_exits_not_priced_against_soxx(tmp_path):
+    ledger = _ledger(tmp_path)
+    attribution = {
+        "sector": 9.77,
+        "stock_specific": -42.39,
+        "unpriced": -12.0,
+        "unpriced_exits": 1,
+        "options": 0.0,
+    }
+    rendered = render_eod_markdown(build_eod_report(ledger, AS_OF, attribution=attribution))
+
+    assert "- Sector (SOXX at each name's beta, over each trade's own holding period): 9.77" in (
+        rendered
+    )
+    assert "- Stock-specific (selection + timing, after modeled cost): -42.39" in rendered
+    assert "- Not priced against SOXX (1 exit): -12.00" in rendered
+    ledger.close()
+
+
+def test_the_attribution_leaves_out_the_unpriced_line_when_every_exit_is_priced(tmp_path):
+    ledger = _ledger(tmp_path)
+    attribution = {
+        "sector": 9.77,
+        "stock_specific": -42.39,
+        "unpriced": 0.0,
+        "unpriced_exits": 0,
+        "options": 0.0,
+    }
+    rendered = render_eod_markdown(build_eod_report(ledger, AS_OF, attribution=attribution))
+
+    assert "Not priced against SOXX" not in rendered
+    ledger.close()
+
+
 # -- monitor cadence (found 2026-09-23) ----------------------------------------------------
 
 

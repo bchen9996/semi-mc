@@ -167,43 +167,70 @@ def test_confidence_calibration_spans_every_trading_day(tmp_path):
 # -- day_attribution --------------------------------------------------------------------
 
 
-def test_day_attribution_splits_sector_from_stock_specific():
-    reflections = [
-        {
-            "content": {
-                "side": "buy",
-                "qty": 10.0,
-                "avg_entry_price": 100.0,
-                "pnl_net": 150.0,
-            }
-        }
-    ]
-    result = day_attribution(reflections, soxx_return=0.01)
+def _exit(side: str, pnl_net: float, hedge_pnl: float | None) -> dict:
+    content = {"side": side, "qty": 9.0, "avg_entry_price": 1512.25, "pnl_net": pnl_net}
+    if hedge_pnl is not None:
+        content["hedge"] = {"beta": 0.79, "notional": 10_749.28, "pnl": hedge_pnl, "cost": 17.2}
+    return {"content": content}
 
-    # sector = 10 * 100 * 0.01 = 10.0; stock_specific = 150 - 10 = 140.0
-    assert result["sector"] == pytest.approx(10.0)
-    assert result["stock_specific"] == pytest.approx(140.0)
+
+def test_day_attribution_takes_the_sector_from_each_trades_own_hedge():
+    """2026-11-09: ASML, 9 shares held from 10:04 to 12:00 CT, net -32.62. SOXX rose 5.9%
+    from the open but was nearly flat over the hold, and the short SOXX hedge lost 9.77.
+    The old split gave it 9 * 1512.25 * 0.059 = +803 of sector; the hedge says +9.77."""
+    result = day_attribution([_exit("buy", -32.62, hedge_pnl=-9.77)])
+
+    # sector = -hedge pnl = +9.77; stock_specific = net - sector = -32.62 - 9.77 = -42.39
+    assert result["sector"] == pytest.approx(9.77)
+    assert result["stock_specific"] == pytest.approx(-42.39)
+    assert result["sector"] + result["stock_specific"] == pytest.approx(-32.62)
+    assert result["unpriced"] == 0.0
+    assert result["unpriced_exits"] == 0
     assert result["options"] == 0.0
 
 
-def test_day_attribution_signs_a_short_position_correctly():
-    reflections = [
-        {"content": {"side": "sell", "qty": 10.0, "avg_entry_price": 100.0, "pnl_net": 0.0}}
-    ]
-    result = day_attribution(reflections, soxx_return=0.01)
-    # A short's sector exposure is negative: SOXX rallying hurts a short.
-    assert result["sector"] == pytest.approx(-10.0)
+def test_day_attribution_takes_a_shorts_sign_from_its_hedge():
+    """A short's hedge is long SOXX: a rally makes the hedge money and costs the short, so
+    the sector share is negative with no side logic here."""
+    result = day_attribution([_exit("sell", 5.0, hedge_pnl=20.0)])
+
+    assert result["sector"] == pytest.approx(-20.0)
+    assert result["stock_specific"] == pytest.approx(25.0)  # 5.0 - (-20.0)
 
 
-def test_day_attribution_is_none_with_no_soxx_benchmark():
-    reflections = [{"content": {"side": "buy", "qty": 10.0, "avg_entry_price": 100.0}}]
-    result = day_attribution(reflections, soxx_return=None)
-    assert result == {"sector": None, "stock_specific": None, "options": 0.0}
+def test_day_attribution_keeps_an_unpriced_exit_out_of_stock_specific():
+    result = day_attribution(
+        [_exit("buy", 30.0, hedge_pnl=-10.0), _exit("buy", -12.0, hedge_pnl=None)]
+    )
+
+    assert result["sector"] == pytest.approx(10.0)
+    assert result["stock_specific"] == pytest.approx(20.0)  # 30.0 - 10.0, the priced exit only
+    assert result["unpriced"] == pytest.approx(-12.0)
+    assert result["unpriced_exits"] == 1
+    # Every dollar of the day's net P&L lands in exactly one bucket.
+    assert result["sector"] + result["stock_specific"] + result["unpriced"] == pytest.approx(18.0)
 
 
-def test_day_attribution_is_none_with_no_reflections_today():
-    result = day_attribution([], soxx_return=0.01)
-    assert result == {"sector": None, "stock_specific": None, "options": 0.0}
+def test_day_attribution_has_no_split_when_nothing_today_is_priced():
+    result = day_attribution([_exit("buy", -12.0, hedge_pnl=None)])
+    assert result == {
+        "sector": None,
+        "stock_specific": None,
+        "unpriced": -12.0,
+        "unpriced_exits": 1,
+        "options": 0.0,
+    }
+
+
+def test_day_attribution_has_no_split_with_no_reflections_today():
+    result = day_attribution([])
+    assert result == {
+        "sector": None,
+        "stock_specific": None,
+        "unpriced": 0.0,
+        "unpriced_exits": 0,
+        "options": 0.0,
+    }
 
 
 # -- weekly_summary (Phase 10) ------------------------------------------------------------

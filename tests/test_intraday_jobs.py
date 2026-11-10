@@ -2626,6 +2626,14 @@ def test_run_eod_review_prices_both_books_and_reports_them_in_basis_points(confi
     assert "- Today, 1 exit: gross" in text
     assert f"- Agent since Stage 2: {expected_bps:+.1f} bps per exit before costs (1 exit)" in text
     assert "- Placebo since Stage 2:" in text
+    # The attribution's sector share is that same hedge, sign flipped: SOXX's 5% fall over
+    # the hour NVDA was held, at beta 1.5, cost the long 750 bps of its notional.
+    sector = -1.5 * notional * 0.05
+    assert f"over each trade's own holding period): {sector:,.2f}" in text
+    stock_specific = row["content"]["pnl_net"] - sector
+    assert f"- Stock-specific (selection + timing, after modeled cost): {stock_specific:,.2f}" in (
+        text
+    )
     paper_ledger.close()
     shadow.close()
     ledger.close()
@@ -2696,6 +2704,8 @@ def test_run_eod_review_writes_its_report_if_the_hedges_fail(config, tmp_path):
     text = Path(result.report_path).read_text(encoding="utf-8")
     assert "- Today: 1 exit not priced yet" in text
     assert "- Agent since Stage 2: nothing priced yet" in text
+    [row] = ledger.reflections_for(AS_OF)
+    assert f"- Not priced against SOXX (1 exit): {row['content']['pnl_net']:,.2f}" in text
     paper_ledger.close()
     ledger.close()
 
