@@ -5,7 +5,7 @@
 - P&L gross: -368.69
 - P&L net (of modeled cost): -527.95
 - Average rejection rate: 1.7%
-- Incidents: 80
+- Incidents: 81
 - Calibration (all-time):
   - [0.25, 0.50]: 45.5% win rate, n=22
   - [0.50, 0.75]: 27.8% win rate, n=36
