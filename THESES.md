@@ -158,7 +158,10 @@ the caveat; restarted with a new Trader model 2026-11-14, see the last two bulle
 full budget, since 2026-11-04; the Sonnet Trader since 2026-11-16. The measure is built
 (`intraday/t6.py`, 2026-11-06) and has been run on the real ledgers once, for the Haiku
 Trader's closed record above; its first run on the Sonnet Trader is the 2027-02-16
-verdict. It also
+verdict. What the agent's fills paid against the quote midpoint as each order went in is
+measured from the 2026-11-16 eod-review on, for every exit since Stage 2
+(`intraday/execution_cost.py`, in each end-of-day report); the verdict still charges the
+modeled cost, as the rule says. It also
 counts the exits it can't measure. QCOM's short on 2026-11-05, whose proposal was lost
 with a failed push, was one until 11-06. It is measured now (-$44.34 before costs), after
 its first reflection was stored with the wrong sign and corrected the same day

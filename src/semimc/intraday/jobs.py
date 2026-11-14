@@ -65,6 +65,7 @@ from .context import (
     build_reviewer_context,
     build_trader_context,
 )
+from .execution_cost import ExecutionSummary, record_execution_costs, summarize_execution
 from .hedge import HedgedSummary, record_trade_hedges, reflections_since, summarize_hedged
 from .ledger import IntradayLedger
 from .llm import ClaudeCliClient, ClaudeCliError, DailyBudgetExhausted, invoke_role
@@ -2207,6 +2208,12 @@ def run_eod_review(
                 )
     except Exception as exc:  # noqa: BLE001 - a measurement must never block the report
         ledger.record_incident("warning", f"trade hedges unavailable: {exc}")
+    # What the fills paid against the midpoint (`execution_cost.py`, 2026-11-14): the agent's
+    # book only, from Stage 2, the same reasoning as the hedges for the window.
+    try:
+        record_execution_costs(ledger, market_data, hedging_from)
+    except Exception as exc:  # noqa: BLE001 - same reasoning
+        ledger.record_incident("warning", f"execution costs unavailable: {exc}")
     proposals_today = ledger.proposals_for(as_of)
     reflections_today = ledger.reflections_for(as_of)
     nothing_to_grade = not proposals_today and not reflections_today
@@ -2328,6 +2335,10 @@ def run_eod_review(
         hedged["placebo"] = summarize_hedged(
             reflections_since(shadow_ledger.all_reflections(), counted_from)
         )
+    execution: dict[str, ExecutionSummary] = {
+        "today": summarize_execution(reflections_today),
+        "agent": summarize_execution(reflections_since(ledger.all_reflections(), hedging_from)),
+    }
     book_risk = summarize_book_risk(ledger.book_risk_for(as_of))
     out_path = config.path(intraday.reports_dir) / str(pd.Timestamp(as_of).date()) / "eod.md"
 
@@ -2344,6 +2355,8 @@ def run_eod_review(
             held_after_close=held_after_close,
             hedged=hedged,
             hedged_since=config.intraday.readiness.t6_started,
+            execution=execution,
+            execution_cost_bps_per_side=intraday.risk.equity_cost_bps_per_side,
             book_risk=book_risk,
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2542,6 +2555,8 @@ def run_eod_review(
         held_after_close=held_after_close,
         hedged=hedged,
         hedged_since=config.intraday.readiness.t6_started,
+        execution=execution,
+        execution_cost_bps_per_side=intraday.risk.equity_cost_bps_per_side,
         book_risk=book_risk,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -3389,6 +3389,19 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         2027-02-16 and 2027-05-16 (`t6.py`) and the end-of-day report's running
         sector-removed lines counting from the same day. The Haiku record is closed in
         `THESES.md`. Every exit since Stage 2 is still priced against SOXX.
+  - [x] **2026-11-14: S4's fills are measured against the quote midpoint (owner's go).**
+        Each exit's net P&L charges a modeled 8 bps a side on top of fills that already
+        paid whatever spread they crossed, and nothing measured what they really paid.
+        `intraday/execution_cost.py` stores an `execution` block on each agent reflection
+        since Stage 2: entry and exit fills' cost in bps against the consolidated (SIP)
+        midpoint just before each order went in, or before a stop filled, since a stop is
+        placed with its entry. Run in eod-review after the hedges, on S4's own data keys
+        (`AlpacaMarketDataClient.midpoint_before`, a 5-second window; the free plan serves
+        SIP quotes once 15 minutes old). The end-of-day report gets an "Execution cost"
+        section beside the modeled figure. Not the placebo's book: its fills are the shadow
+        broker's model. Measurement only: trading, T6 and the modeled cost are unchanged.
+        The first run prices about 60 exits' fills at once; if Alpaca's rate limit cuts it
+        short, the rest are priced on later runs and the report says how many wait.
   - [ ] **2026-11-16 to 11-20: the Sonnet Trader's first week.** Check each day's model
         cost against the $8 cap and recalibrate it to five times a real day; check that no
         Trader call fails or times out (`timeout_seconds: 300`); compare its proposals'

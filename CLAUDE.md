@@ -105,7 +105,9 @@ Regenerate test fixtures with `uv run python tests/fixtures/make_fixtures.py`.
   split (`review.py::day_attribution`, since 2026-11-09): never SOXX's whole session.
   T6 counts from `readiness.t6_started` (2026-11-16, when the Trader moved from Haiku to
   Sonnet); a change to the agent it judges restarts the count, and the verdict dates in
-  `t6.py` move with it.
+  `t6.py` move with it. What S4's fills paid against the quote midpoint is measured the
+  same way, stored as an `execution` block (`intraday/execution_cost.py`, the agent's book
+  only); T6 still charges the modeled cost.
 - **The dashboard drives the CLI; it does not reimplement it.** `dashboard/web/app.js`
   builds a `semimc <command> ...` argument list from form input, the same way a terminal
   user would, and POSTs it to `dashboard/server.py` (stdlib `http.server`), which hands it

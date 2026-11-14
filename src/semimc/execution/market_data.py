@@ -126,6 +126,35 @@ class AlpacaMarketDataClient:
             return None
         return (nearest.bid_price + nearest.ask_price) / 2.0
 
+    def midpoint_before(
+        self,
+        symbol: str,
+        at: dt.datetime,
+        lookback: dt.timedelta = dt.timedelta(seconds=5),
+        feed: DataFeed = DataFeed.SIP,
+    ) -> float | None:
+        """The bid-ask midpoint of the last quote at or before ``at``, within ``lookback``:
+        what the market showed as an order went in (S4's execution cost, added 2026-11-14).
+
+        The consolidated tape by default, not IEX: IEX's own book is thin in these names
+        (``intraday.risk.spread_feed``'s comment). The free plan serves it once 15 minutes
+        old, so call this after the fact. A few seconds, not :meth:`arrival_price`'s ten
+        minutes, because the consolidated tape quotes these names many times a second.
+        ``None`` if no two-sided quote came back in the window.
+        """
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=dt.UTC)
+        request = StockQuotesRequest(
+            symbol_or_symbols=symbol, start=at - lookback, end=at, feed=feed
+        )
+        quotes = self._client.get_stock_quotes(request).data.get(symbol, [])
+        for quote in sorted(quotes, key=lambda q: q.timestamp, reverse=True):
+            if quote.timestamp > at:
+                continue
+            if quote.bid_price and quote.ask_price and quote.bid_price > 0 and quote.ask_price > 0:
+                return (quote.bid_price + quote.ask_price) / 2.0
+        return None
+
     def latest_quote(
         self,
         symbol: str,

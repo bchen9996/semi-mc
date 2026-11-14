@@ -116,6 +116,12 @@ class _FakeMarketData:
     spread_quotes: dict[str, _FakeQuote] | None = None
     spread_quotes_raise: bool = False
     spread_feeds_requested: list[str] = field(default_factory=list)
+    # What `AlpacaMarketDataClient.midpoint_before` returns at every moment: the execution
+    # cost's benchmark. `None` leaves every trade unpriced, as with no quote.
+    midpoint: float | None = None
+
+    def midpoint_before(self, symbol: str, at: dt.datetime):
+        return self.midpoint
 
     def latest_quote(self, symbol: str, at: dt.datetime):
         if self.raises:
@@ -2634,6 +2640,59 @@ def test_run_eod_review_prices_both_books_and_reports_them_in_basis_points(confi
     assert f"- Stock-specific (selection + timing, after modeled cost): {stock_specific:,.2f}" in (
         text
     )
+    paper_ledger.close()
+    shadow.close()
+    ledger.close()
+
+
+def test_run_eod_review_measures_what_the_agents_fills_paid(config, tmp_path):
+    """Against the midpoint as each order went in; the placebo's fills are the shadow
+    broker's model, so its book isn't measured."""
+    cfg = _with_stage_2(_eod_review_config(config, tmp_path))
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=NOW)
+    _seed_open_position(broker, ledger, cfg, horizon="intraday", price=190.0)
+    later = NOW + dt.timedelta(hours=1)
+    broker.now = later
+    exit_quote = {"NVDA": _quote(190.0, at=later)}
+    run_carry(cfg, broker, ledger, _FakeMarketData(quotes=exit_quote), AS_OF, later)
+    shadow = IntradayLedger(tmp_path / "shadow.sqlite3")
+    shadow_broker = FakeBroker(now=NOW)
+    _seed_open_position(shadow_broker, shadow, cfg, horizon="intraday", price=190.0)
+    shadow_broker.now = later
+    run_carry(cfg, shadow_broker, shadow, _FakeMarketData(quotes=exit_quote), AS_OF, later)
+    paper_ledger = PaperLedger(tmp_path / "paper.sqlite3")
+    market_data = _soxx_minutes((NOW, 200.0), (later, 190.0))
+    market_data.midpoint = 189.5
+
+    result = run_eod_review(
+        cfg,
+        market_data,
+        _FakeNewsClient(),
+        _BetaMarket(),
+        paper_ledger,
+        shadow,
+        ledger,
+        _sequenced_llm_client(_result_json(structured_output={"not": "the right shape"})),
+        AS_OF,
+        "eod_review",
+        later,
+        broker=broker,
+    )
+
+    [row] = ledger.reflections_for(AS_OF)
+    fills = {fill["leg"]: fill for fill in ledger.fills_with_orders() if fill["symbol"] == "NVDA"}
+    # A buy is a cost above the midpoint, a sell below it.
+    entry_bps = (fills["entry"]["price"] - 189.5) / 189.5 * 10_000
+    exit_bps = -(fills["exit"]["price"] - 189.5) / 189.5 * 10_000
+    assert row["content"]["execution"]["entry_bps"] == pytest.approx(entry_bps)
+    assert row["content"]["execution"]["exit_bps"] == pytest.approx(exit_bps)
+    [shadow_row] = shadow.reflections_for(AS_OF)
+    assert "execution" not in shadow_row["content"]
+    text = Path(result.report_path).read_text(encoding="utf-8")
+    assert "## Execution cost (each fill against the quote midpoint as its order went in)" in (text)
+    assert f"- Today, 1 exit: entries {entry_bps:+.1f} bps, exits {exit_bps:+.1f} bps" in text
+    assert "- Modeled: 8.0 bps a side" in text
     paper_ledger.close()
     shadow.close()
     ledger.close()

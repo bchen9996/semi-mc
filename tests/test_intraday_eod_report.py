@@ -104,6 +104,49 @@ def test_the_running_lines_name_t6_s_start_once_it_has_one(tmp_path):
     ledger.close()
 
 
+def test_the_execution_cost_sits_beside_the_modeled_cost(tmp_path):
+    from semimc.intraday.execution_cost import ExecutionSummary
+
+    ledger = _ledger(tmp_path)
+    execution = {
+        "today": ExecutionSummary(
+            exits=2, unpriced=1, entry_bps=3.0, exit_bps=1.0, per_side_bps=2.0
+        ),
+        "agent": ExecutionSummary(
+            exits=40, entry_bps=2.5, exit_bps=1.5, per_side_bps=2.0, stderr_bps=0.4
+        ),
+    }
+
+    rendered = render_eod_markdown(
+        build_eod_report(ledger, AS_OF, execution=execution, execution_cost_bps_per_side=8.0)
+    )
+    nothing = render_eod_markdown(
+        build_eod_report(
+            ledger,
+            AS_OF,
+            execution={"today": ExecutionSummary(), "agent": ExecutionSummary()},
+            execution_cost_bps_per_side=8.0,
+        )
+    )
+
+    assert "## Execution cost (each fill against the quote midpoint as its order went in)" in (
+        rendered
+    )
+    assert "- Modeled: 8.0 bps a side, charged on top of the fills" in rendered
+    assert (
+        "- Today, 2 exits (1 more not priced yet): entries +3.0 bps, exits +1.0 bps, "
+        "+2.0 bps a side" in rendered
+    )
+    assert (
+        "- Agent since Stage 2: +2.0 bps a side (standard error 0.4, 40 exits; "
+        "entries +2.5 bps, exits +1.5 bps)" in rendered
+    )
+    assert "- Today: no exits" in nothing
+    assert "- Agent since Stage 2: nothing priced yet" in nothing
+    assert "Execution cost" not in render_eod_markdown(build_eod_report(ledger, AS_OF))
+    ledger.close()
+
+
 def test_the_attribution_leaves_out_the_unpriced_line_when_every_exit_is_priced(tmp_path):
     ledger = _ledger(tmp_path)
     attribution = {

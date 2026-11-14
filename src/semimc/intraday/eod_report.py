@@ -90,6 +90,10 @@ class EodReport:
     # The first day "agent" and "placebo" count: `readiness.t6_counts_from`. `None` reads
     # "since Stage 2", the window before T6 had its own start.
     hedged_since: dt.date | None = None
+    # `execution_cost.py`'s summaries under "today" and "agent" (since Stage 2), and the
+    # modeled cost per side they're compared with. `None` leaves the section out.
+    execution: dict[str, Any] | None = None
+    execution_cost_bps_per_side: float | None = None
     # `book_risk.py::summarize_book_risk`, the day's extremes. `None` if nothing measured.
     book_risk: dict[str, Any] | None = None
 
@@ -224,6 +228,8 @@ def build_eod_report(
     held_after_close: tuple[str, ...] = (),
     hedged: dict[str, Any] | None = None,
     hedged_since: dt.date | None = None,
+    execution: dict[str, Any] | None = None,
+    execution_cost_bps_per_side: float | None = None,
     book_risk: dict[str, Any] | None = None,
 ) -> EodReport:
     proposals = ledger.proposals_for(as_of)
@@ -260,6 +266,8 @@ def build_eod_report(
         held_after_close=held_after_close,
         hedged=hedged,
         hedged_since=hedged_since,
+        execution=execution,
+        execution_cost_bps_per_side=execution_cost_bps_per_side,
         book_risk=book_risk,
     )
 
@@ -306,6 +314,39 @@ def _hedged_lines(hedged: dict[str, Any], since: dt.date | None = None) -> list[
     lines.append(_hedged_since_line("Agent", hedged["agent"], since))
     if "placebo" in hedged:
         lines.append(_hedged_since_line("Placebo", hedged["placebo"], since))
+    return [*lines, ""]
+
+
+def _signed_bps(value: float | None) -> str:
+    return f"{value:+.1f} bps" if value is not None else "not available"
+
+
+def _execution_lines(execution: dict[str, Any], modeled_bps: float | None) -> list[str]:
+    """What the fills paid against the quote midpoint, beside the modeled cost."""
+    lines = ["## Execution cost (each fill against the quote midpoint as its order went in)"]
+    if modeled_bps is not None:
+        lines.append(f"- Modeled: {modeled_bps:.1f} bps a side, charged on top of the fills")
+    today = execution["today"]
+    unpriced = f" ({today.unpriced} more not priced yet)" if today.unpriced else ""
+    if today.exits:
+        lines.append(
+            f"- Today, {_exits(today.exits)}{unpriced}: entries {_signed_bps(today.entry_bps)}, "
+            f"exits {_signed_bps(today.exit_bps)}, {_signed_bps(today.per_side_bps)} a side"
+        )
+    elif today.unpriced:
+        lines.append(f"- Today: {_exits(today.unpriced)} not priced yet")
+    else:
+        lines.append("- Today: no exits")
+    agent = execution["agent"]
+    if agent.exits:
+        stderr = f"standard error {agent.stderr_bps:.1f}, " if agent.stderr_bps is not None else ""
+        lines.append(
+            f"- Agent since Stage 2: {_signed_bps(agent.per_side_bps)} a side "
+            f"({stderr}{_exits(agent.exits)}; entries {_signed_bps(agent.entry_bps)}, "
+            f"exits {_signed_bps(agent.exit_bps)})"
+        )
+    else:
+        lines.append("- Agent since Stage 2: nothing priced yet")
     return [*lines, ""]
 
 
@@ -397,6 +438,8 @@ def render_eod_markdown(report: EodReport) -> str:
     lines.append("")
     if report.hedged is not None:
         lines += _hedged_lines(report.hedged, report.hedged_since)
+    if report.execution is not None:
+        lines += _execution_lines(report.execution, report.execution_cost_bps_per_side)
     if report.book_risk is not None:
         lines += _book_risk_lines(report.book_risk)
 

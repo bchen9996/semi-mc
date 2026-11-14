@@ -67,6 +67,32 @@ def test_arrival_price_is_none_for_a_non_positive_quote():
     assert client.arrival_price("NVDA", AT) is None
 
 
+def test_midpoint_before_is_the_last_two_sided_quote_up_to_the_moment():
+    from alpaca.data.enums import DataFeed
+
+    quotes = [
+        _quote(AT - dt.timedelta(seconds=3), 100.0, 100.2),
+        _quote(AT - dt.timedelta(seconds=1), 100.1, 100.3),  # the last before `at`
+        _quote(AT - dt.timedelta(milliseconds=500), 0.0, 100.3),  # one-sided: skipped
+        _quote(AT + dt.timedelta(seconds=1), 105.0, 105.2),  # after: never the benchmark
+    ]
+    raw = _client_returning(quotes)
+
+    mid = AlpacaMarketDataClient(raw).midpoint_before("NVDA", AT.replace(tzinfo=None))
+
+    assert mid == pytest.approx(100.2)
+    request = raw.get_stock_quotes.call_args.args[0]
+    # The consolidated tape, over the five seconds up to the moment (alpaca-py stores the
+    # request's times as naive UTC).
+    assert request.feed == DataFeed.SIP
+    window = (request.start.replace(tzinfo=None), request.end.replace(tzinfo=None))
+    assert window == ((AT - dt.timedelta(seconds=5)).replace(tzinfo=None), AT.replace(tzinfo=None))
+
+
+def test_midpoint_before_is_none_without_a_quote_in_the_window():
+    assert AlpacaMarketDataClient(_client_returning([])).midpoint_before("NVDA", AT) is None
+
+
 def test_latest_quote_returns_the_whole_nearest_quote():
     """S4's spread gate (Phase 5, `intraday/pretrade.py::check_spread_gate`) needs bid,
     ask, and the quote's own timestamp -- a plain midpoint (`arrival_price`) can't
