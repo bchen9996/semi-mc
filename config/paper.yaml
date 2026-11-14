@@ -219,8 +219,11 @@ intraday:
   budget:
     max_cost_usd_per_call: 1.0
     # Owner decision 2026-11-02: about five times a normal day ($0.12-0.22 from 10-08 to
-    # 11-02). Checked before each call, so a day can end one call over it.
-    max_cost_usd_per_day: 1.0
+    # 11-02). Checked before each call, so a day can end one call over it. 8.0 from the
+    # 11-16 session, the same rule for the Sonnet Trader: Sonnet costs 20 times Haiku per
+    # token and isn't held to Haiku's thinking cap, so about $1.60 a day is expected (the
+    # Trader was ~$0.06 of a ~$0.24 day). To recalibrate once real days are logged.
+    max_cost_usd_per_day: 8.0
   risk:
     # Stage 3's full budget: every limit is the brief's default. The five count/exposure
     # limits doubled from Stage 2's half (new positions, turnover, gross, net beta,
@@ -267,11 +270,15 @@ intraday:
     cost_model_extra_bps: 5.0
   models:
     researcher: sonnet
-    trader: haiku      # cheapest model -- ~13 calls/day, vs. 2/day for researcher/reviewer
+    # Haiku (the cheapest) until 2026-11-13; Sonnet from the 11-16 session, owner's go
+    # 2026-11-14, and T6 counts from that session (readiness.t6_started, THESES.md).
+    trader: sonnet
     reviewer: sonnet
     max_turns: 6
     timeout_seconds: 300
-    trader_max_thinking_tokens: 1500   # 0 = thinking off (config.py)
+    # Unset since the move to Sonnet: Sonnet 5.5 rejects a fixed thinking budget, so the
+    # Trader thinks as Claude Code decides, like the researcher and reviewer. Was 1500.
+    trader_max_thinking_tokens: null
   research:
     news_lookback_hours: 16.0
     preopen_lookback_hours: 2.0
@@ -302,6 +309,9 @@ intraday:
     stage_2_started: 2026-10-15
     stage_3_sessions: 10            # the brief's "2 weeks"
     stage_3_min_closed_trades: 8
+    # T6 restarts with the Sonnet Trader (owner's go 2026-11-14): the Haiku Trader's
+    # 10-15..11-13 exits are their own, closed record (THESES.md).
+    t6_started: 2026-11-16
   kill_switch_path: runs/intraday/KILL_SWITCH
   ledger_path: ledger/intraday.sqlite3
   shadow_ledger_path: ledger/intraday_shadow.sqlite3

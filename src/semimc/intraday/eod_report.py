@@ -32,6 +32,7 @@ clearly-labeled interpretation, not a guess dressed up as the real thing.
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass
 from typing import Any
 
@@ -86,6 +87,9 @@ class EodReport:
     held_after_close: tuple[str, ...] = ()
     # `hedge.py`'s summaries under "today", "agent" and, with a shadow ledger, "placebo".
     hedged: dict[str, Any] | None = None
+    # The first day "agent" and "placebo" count: `readiness.t6_counts_from`. `None` reads
+    # "since Stage 2", the window before T6 had its own start.
+    hedged_since: dt.date | None = None
     # `book_risk.py::summarize_book_risk`, the day's extremes. `None` if nothing measured.
     book_risk: dict[str, Any] | None = None
 
@@ -219,6 +223,7 @@ def build_eod_report(
     reviewer_note: str | None = None,
     held_after_close: tuple[str, ...] = (),
     hedged: dict[str, Any] | None = None,
+    hedged_since: dt.date | None = None,
     book_risk: dict[str, Any] | None = None,
 ) -> EodReport:
     proposals = ledger.proposals_for(as_of)
@@ -254,6 +259,7 @@ def build_eod_report(
         reviewer_note=reviewer_note,
         held_after_close=held_after_close,
         hedged=hedged,
+        hedged_since=hedged_since,
         book_risk=book_risk,
     )
 
@@ -270,19 +276,20 @@ def _exits(count: int) -> str:
     return f"{count} exit{'' if count == 1 else 's'}"
 
 
-def _hedged_since_line(label: str, summary: Any) -> str:
-    """One sleeve since Stage 2 began, in basis points so different sizes compare."""
+def _hedged_since_line(label: str, summary: Any, since: dt.date | None = None) -> str:
+    """One sleeve over its running window, in basis points so different sizes compare."""
+    window = f"since {since}" if since is not None else "since Stage 2"
     if summary.mean_bps is None:
-        return f"- {label} since Stage 2: nothing priced yet"
+        return f"- {label} {window}: nothing priced yet"
     stderr = f"standard error {summary.stderr_bps:.1f}, " if summary.stderr_bps is not None else ""
     unpriced = f", {summary.unpriced} not priced yet" if summary.unpriced else ""
     return (
-        f"- {label} since Stage 2: {summary.mean_bps:+.1f} bps per exit before costs "
+        f"- {label} {window}: {summary.mean_bps:+.1f} bps per exit before costs "
         f"({stderr}{_exits(summary.exits)}{unpriced})"
     )
 
 
-def _hedged_lines(hedged: dict[str, Any]) -> list[str]:
+def _hedged_lines(hedged: dict[str, Any], since: dt.date | None = None) -> list[str]:
     today = hedged["today"]
     lines = ["## With the sector removed (a SOXX hedge measured, not traded)"]
     if today.exits:
@@ -296,9 +303,9 @@ def _hedged_lines(hedged: dict[str, Any]) -> list[str]:
         lines.append(f"- Today: {_exits(today.unpriced)} not priced yet")
     else:
         lines.append("- Today: no exits")
-    lines.append(_hedged_since_line("Agent", hedged["agent"]))
+    lines.append(_hedged_since_line("Agent", hedged["agent"], since))
     if "placebo" in hedged:
-        lines.append(_hedged_since_line("Placebo", hedged["placebo"]))
+        lines.append(_hedged_since_line("Placebo", hedged["placebo"], since))
     return [*lines, ""]
 
 
@@ -389,7 +396,7 @@ def render_eod_markdown(report: EodReport) -> str:
 
     lines.append("")
     if report.hedged is not None:
-        lines += _hedged_lines(report.hedged)
+        lines += _hedged_lines(report.hedged, report.hedged_since)
     if report.book_risk is not None:
         lines += _book_risk_lines(report.book_risk)
 

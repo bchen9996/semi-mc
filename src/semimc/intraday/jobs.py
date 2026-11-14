@@ -2317,13 +2317,16 @@ def run_eod_review(
     scorecard = process_scorecard(ledger, intraday, as_of)
     # From each exit's hedge block, priced above: SOXX over that trade's own hold (review.py).
     attribution = day_attribution(reflections_today)
+    # Running figures from T6's start, so they follow the Trader T6 is judging; every exit
+    # since Stage 2 is still priced (`hedging_from`, above).
+    counted_from = config.intraday.readiness.t6_counts_from
     hedged: dict[str, HedgedSummary] = {
         "today": summarize_hedged(reflections_today),
-        "agent": summarize_hedged(reflections_since(ledger.all_reflections(), hedging_from)),
+        "agent": summarize_hedged(reflections_since(ledger.all_reflections(), counted_from)),
     }
     if shadow_ledger is not None:
         hedged["placebo"] = summarize_hedged(
-            reflections_since(shadow_ledger.all_reflections(), hedging_from)
+            reflections_since(shadow_ledger.all_reflections(), counted_from)
         )
     book_risk = summarize_book_risk(ledger.book_risk_for(as_of))
     out_path = config.path(intraday.reports_dir) / str(pd.Timestamp(as_of).date()) / "eod.md"
@@ -2340,6 +2343,7 @@ def run_eod_review(
             reviewer_note=note,
             held_after_close=held_after_close,
             hedged=hedged,
+            hedged_since=config.intraday.readiness.t6_started,
             book_risk=book_risk,
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2537,6 +2541,7 @@ def run_eod_review(
         playbook_proposal=playbook_proposal,
         held_after_close=held_after_close,
         hedged=hedged,
+        hedged_since=config.intraday.readiness.t6_started,
         book_risk=book_risk,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)

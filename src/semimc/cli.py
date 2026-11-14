@@ -2436,10 +2436,10 @@ def intraday_t6(
     verbose: VerboseOption = False,
 ) -> None:
     """Writes `reports/YYYY-MM-DD/t6.md`: T6's measure and verdict by `THESES.md`'s rule
-    (`intraday/t6.py`), over the exits from `intraday.readiness.stage_2_started` to
-    `--as-of`. Run it on the verdict dates, 2027-01-15 and 2027-04-15, with `--as-of` set
-    to the date. Before the first it refuses, so the statistic isn't looked at early.
-    Reads the two ledgers only.
+    (`intraday/t6.py`), over the exits from `intraday.readiness.t6_started` (else
+    `stage_2_started`) to `--as-of`. Run it on the verdict dates, 2027-02-16 and
+    2027-05-16, with `--as-of` set to the date. Before the first it refuses, so the
+    statistic isn't looked at early. Reads the two ledgers only.
     """
     cfg = _setup(config, set_, verbose)
     from .intraday.ledger import IntradayLedger
@@ -2453,9 +2453,13 @@ def intraday_t6(
             err=True,
         )
         raise typer.Exit(code=1)
-    since = cfg.intraday.readiness.stage_2_started
+    since = cfg.intraday.readiness.t6_counts_from
     if since is None:
-        typer.echo("intraday.readiness.stage_2_started is not set: T6 counts from it.", err=True)
+        typer.echo(
+            "Neither intraday.readiness.t6_started nor stage_2_started is set: T6 counts "
+            "from one of them.",
+            err=True,
+        )
         raise typer.Exit(code=1)
     placebo_path = cfg.path(cfg.intraday.shadow_ledger_path)
     if not placebo_path.exists():

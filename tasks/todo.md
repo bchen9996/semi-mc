@@ -3375,10 +3375,29 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         trading, the hedge blocks and T6 are unchanged. Tests in `test_intraday_review.py`,
         `test_intraday_eod_report.py` and two `run_eod_review` tests. Reports before 11-09
         keep the old split; `reports/2026-11-09/eod.md` carries a correction note.
-  - [ ] **2027-01-15: T6's 3-month verdict**, by the rule in `THESES.md`:
-        `semimc intraday t6 --as-of 2027-01-15`, after that day's eod-review has priced
+  - [x] **2026-11-14: the Trader moves from Haiku to Sonnet, and T6 restarts (owner's
+        go).** From the 2026-11-16 session `config/paper.yaml` runs the Trader on `sonnet`,
+        like the Researcher and Reviewer. Why: on T6's own measure the Haiku Trader lost
+        42.5 bps per exit (standard error 15.4, 55 exits), 17.3 ahead of the placebo
+        (standard error 23.1), and its proposals were careless: on 11-10 one AVGO short
+        stated a 30 bps edge, then 98, for the same 1.3% move written once as 0.013 and once
+        as -1.3. A bigger model fits nothing to past results. **With it:**
+        `trader_max_thinking_tokens` is unset, since Sonnet 5.5 rejects a fixed thinking
+        budget; the daily model cap goes from $1 to $8, the owner's five-times-a-normal-day
+        rule at about $1.60 a day expected (Sonnet costs 20 times Haiku per token); and T6
+        counts from `readiness.t6_started: 2026-11-16`, with its verdicts moved to
+        2027-02-16 and 2027-05-16 (`t6.py`) and the end-of-day report's running
+        sector-removed lines counting from the same day. The Haiku record is closed in
+        `THESES.md`. Every exit since Stage 2 is still priced against SOXX.
+  - [ ] **2026-11-16 to 11-20: the Sonnet Trader's first week.** Check each day's model
+        cost against the $8 cap and recalibrate it to five times a real day; check that no
+        Trader call fails or times out (`timeout_seconds: 300`); compare its proposals'
+        stated edge with their stated move.
+  - [ ] **2027-02-16: T6's 3-month verdict**, by the rule in `THESES.md`:
+        `semimc intraday t6 --as-of 2027-02-16`, after that day's eod-review has priced
         its exits.
-  - [ ] **2027-04-15: T6's 6-month verdict**, if January didn't settle it.
+  - [ ] **2027-05-16: T6's 6-month verdict**, if February didn't settle it. The date is a
+        Sunday: run it with `--as-of 2027-05-16` on the Monday.
 - [ ] Stage 4 -- options in shadow, 2 weeks (priced and logged, not traded). **Built
       ahead of turn, 2026-09-26**: schema/config/gates (Phase 12a) and the real Alpaca
       options market-data fetch plus `jobs.py` wiring (Phase 12b) are both done -- Stage 4

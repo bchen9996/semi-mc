@@ -1,6 +1,8 @@
 """T6's measure and verdict (`THESES.md`, rule set by the owner 2026-11-04; built 2026-11-06).
 
-The measure: every exit since Stage 2 began that `hedge.py` could price, in basis points of
+The measure: every exit from `intraday.readiness.t6_counts_from` on that `hedge.py` could
+price -- since 2026-11-16, when the Trader moved from Haiku to Sonnet and the count restarted
+(owner's go 2026-11-14; before, since Stage 2 began, 2026-10-15) -- in basis points of
 the exit's entry notional -- its P&L net of modeled costs (`reflect.py::trade_figures`
 charges both legs) plus the measured SOXX hedge's P&L. The hedge is measured, not traded,
 so its own modeled cost isn't charged. The statistic is the agent's mean minus the
@@ -29,8 +31,10 @@ import pandas as pd
 from .ledger import IntradayLedger
 
 # THESES.md's rule, fixed before the results it judges: not settings, so not in config.py.
-FIRST_VERDICT = dt.date(2027, 1, 15)
-FINAL_VERDICT = dt.date(2027, 4, 15)
+# 3 and 6 months after the count's start, 2026-11-16 (were 2027-01-15 and 2027-04-15, from
+# 2026-10-15, until the Trader's model changed).
+FIRST_VERDICT = dt.date(2027, 2, 16)
+FINAL_VERDICT = dt.date(2027, 5, 16)
 THRESHOLD_SE = 2.0
 
 

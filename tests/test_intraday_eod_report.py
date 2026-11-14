@@ -80,6 +80,30 @@ def test_the_attribution_shows_exits_not_priced_against_soxx(tmp_path):
     ledger.close()
 
 
+def test_the_running_lines_name_t6_s_start_once_it_has_one(tmp_path):
+    from semimc.intraday.hedge import HedgedSummary
+
+    ledger = _ledger(tmp_path)
+    hedged = {
+        "today": HedgedSummary(),
+        "agent": HedgedSummary(exits=2, mean_bps=-12.5, stderr_bps=4.0),
+        "placebo": HedgedSummary(),
+    }
+
+    since_t6 = render_eod_markdown(
+        build_eod_report(ledger, AS_OF, hedged=hedged, hedged_since=dt.date(2026, 11, 16))
+    )
+    before = render_eod_markdown(build_eod_report(ledger, AS_OF, hedged=hedged))
+
+    assert (
+        "- Agent since 2026-11-16: -12.5 bps per exit before costs "
+        "(standard error 4.0, 2 exits)" in since_t6
+    )
+    assert "- Placebo since 2026-11-16: nothing priced yet" in since_t6
+    assert "- Agent since Stage 2: -12.5 bps per exit before costs" in before
+    ledger.close()
+
+
 def test_the_attribution_leaves_out_the_unpriced_line_when_every_exit_is_priced(tmp_path):
     ledger = _ledger(tmp_path)
     attribution = {

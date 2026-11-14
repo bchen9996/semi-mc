@@ -3,7 +3,8 @@
 `THESES.md`'s rule: each exit's P&L net of modeled costs plus the measured SOXX hedge's
 P&L, in basis points of entry notional; agent mean minus placebo mean; each mean's error
 clustered by trading day, the difference's the root of their sum of squares; verdicts on
-2027-01-15 and 2027-04-15 at 2 standard errors. No real ledger is read here.
+3 and 6 months after the count starts (2027-02-16 and 2027-05-16, from the Sonnet Trader's
+first session) at 2 standard errors. No real ledger is read here.
 """
 
 from __future__ import annotations
@@ -98,8 +99,8 @@ def test_the_window_runs_from_stage_2_to_the_as_of_day(tmp_path):
     ledger = IntradayLedger(tmp_path / "agent.sqlite3")
     _exit(ledger, "2026-10-14", 100.0)  # Stage 1: out
     _exit(ledger, "2026-10-15", 1.0)
-    _exit(ledger, "2027-01-15", 3.0)
-    _exit(ledger, "2027-01-18", 100.0)  # after the verdict date: out
+    _exit(ledger, str(FIRST_VERDICT), 3.0)
+    _exit(ledger, str(FIRST_VERDICT + dt.timedelta(days=3)), 100.0)  # after the verdict: out
 
     measure = measure_sleeve(ledger, SINCE, FIRST_VERDICT)
 
@@ -178,10 +179,16 @@ def test_the_verdict_follows_the_rule(as_of, z, starts):
     )
 
 
-def test_paper_yaml_starts_the_window_where_the_rule_says_stage_2_began():
+def test_paper_yaml_starts_the_count_with_the_sonnet_trader():
+    """Owner's go 2026-11-14: the Trader moved from Haiku to Sonnet for the 11-16 session,
+    and T6 counts from it, with its verdicts 3 and 6 months on. Stage 2's date stays as
+    the Stage 3 rule's, and as the start of the Haiku Trader's closed record."""
     cfg = load_config(PROJECT_ROOT / "config" / "paper.yaml")
 
     assert cfg.intraday.readiness.stage_2_started == SINCE
+    assert cfg.intraday.readiness.t6_counts_from == dt.date(2026, 11, 16)
+    assert dt.date(2027, 2, 16) == FIRST_VERDICT
+    assert dt.date(2027, 5, 16) == FINAL_VERDICT
 
 
 runner = CliRunner()
@@ -198,10 +205,10 @@ def _overrides(tmp_path: Path) -> list[str]:
 
 
 def test_the_command_refuses_before_the_first_verdict_date(tmp_path):
-    result = runner.invoke(app, ["intraday", "t6", "--as-of", "2027-01-14", *_overrides(tmp_path)])
+    result = runner.invoke(app, ["intraday", "t6", "--as-of", "2027-02-15", *_overrides(tmp_path)])
 
     assert result.exit_code == 1
-    assert "first verdict is on 2027-01-15" in result.output
+    assert "first verdict is on 2027-02-16" in result.output
     assert not (tmp_path / "reports").exists()
     assert not (tmp_path / "agent.sqlite3").exists()
 
@@ -215,20 +222,41 @@ def test_the_command_writes_the_verdict_on_its_date(tmp_path):
     agent.close()
     placebo.close()
 
-    result = runner.invoke(app, ["intraday", "t6", "--as-of", "2027-01-15", *_overrides(tmp_path)])
+    result = runner.invoke(app, ["intraday", "t6", "--as-of", "2027-02-16", *_overrides(tmp_path)])
 
     assert result.exit_code == 0, result.output
     assert "3-month verdict: within 2 standard errors" in result.output
-    text = (tmp_path / "reports" / "2027-01-15" / "t6.md").read_text(encoding="utf-8")
-    assert text.startswith("# T6: 2026-10-15 to 2027-01-15")
+    text = (tmp_path / "reports" / "2027-02-16" / "t6.md").read_text(encoding="utf-8")
+    assert text.startswith("# T6: 2026-10-15 to 2027-02-16")
     assert "| agent | 3 | 3 | +20.0 |" in text
     assert "Agent minus placebo: +0.0 bps per exit" in text
+
+
+def test_the_command_counts_from_t6_started_when_it_is_set(tmp_path):
+    """The Haiku Trader's exits, before the count restarted, are left out."""
+    agent = IntradayLedger(tmp_path / "agent.sqlite3")
+    placebo = IntradayLedger(tmp_path / "placebo.sqlite3")
+    for day, net in [("2026-11-13", 9.0), ("2026-11-16", 1.0), ("2026-11-17", 3.0)]:
+        _exit(agent, day, net)
+        _exit(placebo, day, net)
+    agent.close()
+    placebo.close()
+    started = ["--set", "intraday.readiness.t6_started=2026-11-16"]
+
+    result = runner.invoke(
+        app, ["intraday", "t6", "--as-of", "2027-02-16", *_overrides(tmp_path), *started]
+    )
+
+    assert result.exit_code == 0, result.output
+    text = (tmp_path / "reports" / "2027-02-16" / "t6.md").read_text(encoding="utf-8")
+    assert text.startswith("# T6: 2026-11-16 to 2027-02-16")
+    assert "| agent | 2 | 2 | +20.0 |" in text  # 10 and 30 bps; 11-13's 90 left out
 
 
 def test_the_command_needs_the_placebos_ledger(tmp_path):
     IntradayLedger(tmp_path / "agent.sqlite3").close()
 
-    result = runner.invoke(app, ["intraday", "t6", "--as-of", "2027-01-15", *_overrides(tmp_path)])
+    result = runner.invoke(app, ["intraday", "t6", "--as-of", "2027-02-16", *_overrides(tmp_path)])
 
     assert result.exit_code == 1
     assert "No placebo ledger" in result.output

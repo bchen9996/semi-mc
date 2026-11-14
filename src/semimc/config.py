@@ -579,8 +579,9 @@ class IntradayModelsConfig(_Base):
     # 2026-10-06 (owner decision): Claude Code thinks by default and bills it as output,
     # and once the Trader got session data (2026-10-02) it averaged ~6,400 output tokens
     # a call for an answer of a few hundred -- about $0.80 of each day's ~$1. Before
-    # then it ran at ~1,800. Trader only: the "sonnet" alias the other roles use resolves
-    # to Sonnet 5.5 on the Anthropic API, which ignores this.
+    # then it ran at ~1,800. Trader only, and only for a Haiku Trader: Sonnet 5.5 (the
+    # "sonnet" alias) rejects a fixed thinking budget, so `config/paper.yaml` leaves this
+    # unset since the Trader moved to Sonnet (2026-11-14).
     trader_max_thinking_tokens: int | None = Field(1500, ge=0)
 
     @field_validator("trader_max_thinking_tokens")
@@ -694,6 +695,14 @@ class IntradayReadinessConfig(_Base):
     stage_2_started: dt.date | None = None
     stage_3_sessions: int = Field(10, ge=1)
     stage_3_min_closed_trades: int = Field(8, ge=0)
+    # The first session T6 counts (THESES.md): its measure and the end-of-day report's
+    # running sector-removed lines start here. Unset, both start at `stage_2_started`. The
+    # verdict dates are `intraday/t6.py`'s constants, not settings.
+    t6_started: dt.date | None = None
+
+    @property
+    def t6_counts_from(self) -> dt.date | None:
+        return self.t6_started or self.stage_2_started
 
 
 class IntradayConfig(_Base):
