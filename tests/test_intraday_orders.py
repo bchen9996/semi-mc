@@ -11,7 +11,7 @@ import datetime as dt
 import pandas as pd
 import pytest
 
-from semimc.config import IntradayConfig
+from semimc.config import IntradayConfig, IntradayScheduleConfig
 from semimc.execution.broker import Asset, BrokerError, OrderRequest, Position
 from semimc.execution.fake_broker import FakeBroker
 from semimc.intraday.ledger import IntradayLedger
@@ -1080,6 +1080,101 @@ def test_an_order_placed_by_hand_is_recorded_and_canceled_before_an_exit(tmp_pat
     assert ledger.get_order("dashboard-1")["status"] == "canceled"
     [warning] = [m for m in _incidents(ledger, "warning") if "the ledger didn't" in m]
     assert "dashboard-1 (NVDA sell 6 stop, new, not placed by S4)" in warning
+    ledger.close()
+
+
+FLATTEN_DAY = pd.Timestamp("2026-11-16")
+FLATTEN_CONFIG = IntradayConfig(schedule=IntradayScheduleConfig(broker_flatten_at=dt.time(14, 55)))
+
+
+def _flattened(
+    tmp_path, at: dt.datetime, config: IntradayConfig = FLATTEN_CONFIG, *, filled: bool = True
+):
+    """An NVDA long entered at 12:00 CT on 2026-11-16 (18:00 UTC; naive times are UTC),
+    then closed the way Alpaca's `DELETE /v2/positions?cancel_orders=true` closes it at
+    ``at``: the stop canceled, and a market sell under an id S4 never chose, filled at 192
+    unless ``filled`` is false. Synced at 15:15 CT, as `eod-review` does."""
+    ledger = _ledger(tmp_path)
+    broker = FakeBroker(now=dt.datetime(2026, 11, 16, 18, 0))
+    submit_order_with_fault_isolation(
+        _order(client_order_id=T1, qty=5.0), broker, ledger, broker.now, proposal_id=7
+    )
+    broker.now = at
+    broker.cancel_order(broker.get_order_by_client_id(f"{T1}::stop").id)
+    broker.partial_fill_fraction = 0.0
+    broker.submit_order(
+        _order(
+            client_order_id="4c1e9b2a-flatten",
+            side="sell",
+            type="market",
+            qty=5.0,
+            limit_price=None,
+            order_class="simple",
+            stop_loss_price=None,
+        )
+    )
+    if filled:
+        broker.fill_order("4c1e9b2a-flatten", 192.0)
+    sync_open_orders(broker, ledger, config, FLATTEN_DAY, dt.datetime(2026, 11, 16, 21, 15))
+    return broker, ledger
+
+
+def test_the_broker_flattens_close_is_reflected_as_an_exit(tmp_path):
+    """2026-11-14: a position both carry runs left open is closed at 14:55 CT from outside
+    GitHub. Its order is S4's exit for that position, so the trade is reflected and T6
+    counts it, and the error says carry didn't close it."""
+    broker, ledger = _flattened(tmp_path, dt.datetime(2026, 11, 16, 20, 55, 4))
+
+    row = ledger.get_order("4c1e9b2a-flatten")
+    assert (row["leg"], row["exit_reason"], row["proposal_id"]) == ("exit", "broker_flatten", 7)
+    [reflection] = ledger.all_reflections()
+    assert reflection["content"]["close_reason"] == "broker_flatten"
+    assert reflection["content"]["qty"] == 5.0
+    assert reflection["content"]["avg_exit_price"] == 192.0
+    assert ledger.get_order(f"{T1}::stop")["status"] == "canceled"
+    [error] = _incidents(ledger, "error")
+    assert error == (
+        "the broker-side flatten closed what both carry runs left open: "
+        "NVDA sell 5 (filled, 5 filled)"
+    )
+    assert not [m for m in _incidents(ledger, "warning") if "the ledger didn't" in m]
+    ledger.close()
+
+
+def test_the_broker_flattens_close_is_reflected_when_it_fills_after_adoption(tmp_path):
+    """A status update doesn't clear the exit's reason (`record_order` sets it on insert
+    only), so a close adopted while still working is reflected once it fills."""
+    broker, ledger = _flattened(tmp_path, dt.datetime(2026, 11, 16, 20, 55, 4), filled=False)
+    assert ledger.all_reflections() == []
+
+    broker.fill_order("4c1e9b2a-flatten", 192.0)
+    sync_open_orders(broker, ledger, FLATTEN_CONFIG, FLATTEN_DAY, dt.datetime(2026, 11, 16, 21, 20))
+
+    assert ledger.get_order("4c1e9b2a-flatten")["exit_reason"] == "broker_flatten"
+    [reflection] = ledger.all_reflections()
+    assert reflection["content"]["close_reason"] == "broker_flatten"
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("at", "config"),
+    [
+        (dt.datetime(2026, 11, 16, 20, 54, 59), FLATTEN_CONFIG),  # 14:54:59 CT, before it
+        (dt.datetime(2026, 11, 16, 21, 0, 0), FLATTEN_CONFIG),  # 15:00 CT, past the window
+        (dt.datetime(2026, 11, 16, 20, 55, 4), IntradayConfig()),  # no flatten scheduled
+    ],
+)
+def test_an_order_placed_by_hand_is_not_taken_for_the_flatten(tmp_path, at, config):
+    """Outside the flatten's minutes, or with none scheduled, an order S4 didn't send is
+    someone's by hand: recorded, never reflected, and named as before."""
+    broker, ledger = _flattened(tmp_path, at, config)
+
+    row = ledger.get_order("4c1e9b2a-flatten")
+    assert (row["leg"], row["exit_reason"]) == ("manual", None)
+    assert ledger.all_reflections() == []
+    assert _incidents(ledger, "error") == []
+    [warning] = [m for m in _incidents(ledger, "warning") if "the ledger didn't" in m]
+    assert "4c1e9b2a-flatten (NVDA sell 5 manual, filled, 5 filled, not placed by S4)" in warning
     ledger.close()
 
 

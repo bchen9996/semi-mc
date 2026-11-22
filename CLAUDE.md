@@ -313,3 +313,12 @@ compared to a closed form, the closed form is written out in the test.
   reached GitHub Actions, so `sector_shadow` fell back to S0 from its first decision, and
   only `diagnostics_json` said so. Its job now fetches the series. Anything else a workflow
   reads from a gitignored path needs the same.
+- **GitHub Actions can refuse to start any run, carry included.** On 2026-11-11 its outage
+  turned away the 14:30 cycle and the 14:45 carry, with no job and no log (`startup_failure`
+  in the runs API). S4 was flat, but a position left open goes overnight with no stop,
+  since every stop is a `day` order. Nothing on GitHub can back up GitHub, so a cron-job.org
+  request to Alpaca closes every S4 position at 14:55 CT (`schedule.broker_flatten_at`,
+  `docs/external_scheduler.md`). As a result S4 holds nothing overnight, and a multi-day
+  entry is rejected. Alpaca gives the flatten's orders its own ids, so adoption picks them
+  out by time and reflects them as exits (`exit_reason` `broker_flatten`, with an error
+  incident). Any other order S4 didn't send stays `manual`.

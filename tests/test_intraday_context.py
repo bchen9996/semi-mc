@@ -3,10 +3,12 @@ Phase 2)."""
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pandas as pd
 import pytest
 
-from semimc.config import IntradayConfig
+from semimc.config import IntradayConfig, IntradayScheduleConfig
 from semimc.intraday.context import (
     TRADER_SECTIONS,
     ReflectionUpdate,
@@ -186,6 +188,23 @@ def test_build_trader_context_options_available_is_true_under_shadow_pricing(tmp
     )
 
     assert bundle.payload["sections"]["options_available"] is True
+    ledger.close()
+
+
+@pytest.mark.parametrize(("flatten_at", "allowed"), [(None, True), (dt.time(14, 55), False)])
+def test_the_trader_is_told_whether_a_position_may_stay_open_overnight(
+    tmp_path, flatten_at, allowed
+):
+    """While the broker-side flatten closes everything before the bell (2026-11-14), the
+    Trader is told so, rather than having a multi-day entry rejected unexplained."""
+    ledger = _ledger(tmp_path)
+    config = IntradayConfig(schedule=IntradayScheduleConfig(broker_flatten_at=flatten_at))
+
+    bundle = build_trader_context(
+        AS_OF, "cycle_1", config, ledger, watchlist=[], positions={}, prices={}
+    )
+
+    assert bundle.payload["sections"]["overnight_holds_allowed"] is allowed
     ledger.close()
 
 

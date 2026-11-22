@@ -3402,10 +3402,53 @@ round-trip through `get_proposal`/`proposals_for`). `tests/test_intraday_context
         broker's model. Measurement only: trading, T6 and the modeled cost are unchanged.
         The first run prices about 60 exits' fills at once; if Alpaca's rate limit cuts it
         short, the rest are priced on later runs and the report says how many wait.
-  - [ ] **2026-11-16 to 11-20: the Sonnet Trader's first week.** Check each day's model
-        cost against the $8 cap and recalibrate it to five times a real day; check that no
-        Trader call fails or times out (`timeout_seconds: 300`); compare its proposals'
-        stated edge with their stated move.
+  - [x] **2026-11-14: a broker-side flatten backs up carry, and S4 holds nothing overnight
+        (owner's go).** On 2026-11-11 a GitHub Actions outage turned away three runs, the
+        14:30 cycle, the 14:45 carry and a paper mark, all as `startup_failure`. GitHub's
+        status page has a critical Actions incident from 14:48 to 15:21 CT. Nothing was lost:
+        both books were flat by 13:01, and the 14:50 carry ran. But had positions been
+        open, only that run stood between them and a night with no stop. 214 of the week's
+        217 runs succeeded; GitHub's Actions trouble on 11-09 and 11-10 cost none. 11-11
+        isn't a clean day by the readiness check ("last cycle check at 14:01"), though the
+        end-of-day report's cadence section can't show a missing last cycle. The fix
+        doesn't go through GitHub: a cron-job.org `DELETE /v2/positions?cancel_orders=true`
+        to Alpaca at 14:55 CT (`docs/external_scheduler.md`). `config/paper.yaml` sets
+        `intraday.schedule.broker_flatten_at: "14:55"`. With it set, a multi-day or
+        multi-week open or add is rejected, and the Trader's context says so
+        (`overnight_holds_allowed`). The next sync records the flatten's closes as exits
+        with reason `broker_flatten`, reflects them, and logs an error incident. Built
+        2026-11-14 but left uncommitted until 2026-11-22, so the rule applies from the
+        11-23 session, a week into T6's count. The count doesn't restart: no trade had been
+        opened on those horizons, and no Sonnet proposal from 11-16 to 11-20 named one.
+  - [ ] **Owner: set up the broker-side flatten on cron-job.org**, by the steps in
+        `docs/external_scheduler.md`: a read of `/v2/account` first to confirm the keys
+        open `PA33HJGNHLI7` (the s0/s3 keys would sell s3 every afternoon), then the
+        `DELETE` at 14:55 CT, Monday to Friday. Until then the rule holds but nothing backs
+        up carry. After its first day, its history should show 207 with an empty list.
+  - [x] **2026-11-16 to 11-20: the Sonnet Trader's first week** (checked 2026-11-22).
+        All 217 runs succeeded, and every scheduled job ran each day. Model cost was
+        $0.61-0.68 a day ($0.65 on average, the Trader $0.49-0.54 of it), so the daily cap
+        goes from $8 to $3.25 from the 11-23 session by the five-times rule (owner's go
+        2026-11-22). 65 Trader calls, all Sonnet, with no failure or timeout; the largest
+        cost $0.05. Five entries all week, against Haiku's ~2.5 exits a day. All were
+        intraday shorts, closed by their 2-hour time stops: +$791 net, of which the sector
+        was +$751 and stock-specific +$40. SOXX fell about 17% on the week (-10.6% on
+        11-20). On 11-19, when SOXX fell 5.6% open to close, the Trader made no trade at
+        all, since the Researcher's triggers were long setups that never fired; the
+        Reviewer raised the same question. Stated edge against stated move: in 4 of the 5
+        accepted opens the stop was as far away as the expected move, or further, at
+        40-50% confidence. Read as a win probability, that is a negative expectancy, yet
+        the stated edge (50-120 bps) cleared the 32 bps gate. Left alone: a computed edge
+        would restart T6, and it would treat confidence as a win probability, which the
+        calibration says it isn't (0.50-0.75 wins 32%, 0.25-0.50 wins 52%). Execution
+        cost: +0.8 bps a side against the midpoint (standard error 0.6, 59 of 60 exits
+        since Stage 2), against the modeled 8. T6's difference is unaffected, since both
+        sleeves are charged the same, but the entry gate sits at ten times what paper fills
+        cost. These are Alpaca's simulated fills, so the modeled cost stays.
+  - [ ] **2026-12-11: four Sonnet weeks.** At the first week's pace (5 exits), T6 would
+        reach about 65 agent exits by 2027-02-16, not the ~155 `THESES.md` assumed, so the
+        3-month verdict could only see a large gap. Check the pace again, and the stated
+        edge against the stated move. One crash week isn't a pace.
   - [ ] **2027-02-16: T6's 3-month verdict**, by the rule in `THESES.md`:
         `semimc intraday t6 --as-of 2027-02-16`, after that day's eod-review has priced
         its exits.

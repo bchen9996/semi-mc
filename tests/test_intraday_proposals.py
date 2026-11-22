@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from semimc.config import IntradayConfig, IntradayRiskConfig
+from semimc.config import IntradayConfig, IntradayRiskConfig, IntradayScheduleConfig
 from semimc.intraday.ledger import IntradayLedger
 from semimc.intraday.proposals import (
     TradeProposal,
@@ -261,6 +261,47 @@ def test_an_entry_in_a_name_being_closed_this_cycle_is_rejected(tmp_path):
 
     assert any("being closed this cycle" in f for f in validate_proposal(_open(), context))
     assert validate_proposal(TradeProposal(action="close", symbol="NVDA"), context) == []
+
+
+def _flattening() -> IntradayConfig:
+    """S4 as deployed from 2026-11-16: a broker-side flatten at 14:55 CT."""
+    return IntradayConfig(schedule=IntradayScheduleConfig(broker_flatten_at=dt.time(14, 55)))
+
+
+@pytest.mark.parametrize("action", ["open", "add"])
+@pytest.mark.parametrize("horizon", ["multi-day", "multi-week"])
+def test_a_multi_day_entry_is_rejected_while_the_broker_flatten_runs(tmp_path, action, horizon):
+    """Owner decision 2026-11-14: the flatten closes everything before the bell, so a
+    multi-day thesis would be closed the day it was opened."""
+    context = _context(tmp_path, config=_flattening())
+
+    failures = validate_proposal(_open(action=action, horizon=horizon), context)
+
+    assert any(
+        f"horizon {horizon!r}: S4 holds nothing overnight" in f
+        and "closed at the broker at 14:55 America/Chicago" in f
+        for f in failures
+    )
+
+
+@pytest.mark.parametrize("horizon", ["intraday", None])
+def test_an_intraday_entry_passes_while_the_broker_flatten_runs(tmp_path, horizon):
+    context = _context(tmp_path, config=_flattening())
+
+    assert validate_proposal(_open(horizon=horizon), context) == []
+
+
+def test_a_multi_day_entry_passes_without_the_broker_flatten(tmp_path):
+    """The brief's own design: a written multi-day thesis may be carried."""
+    assert validate_proposal(_open(horizon="multi-day"), _context(tmp_path)) == []
+
+
+def test_a_close_is_never_held_to_the_horizon_rule(tmp_path):
+    """Closing a position reduces exposure, so it skips every entry rule."""
+    context = _context(tmp_path, config=_flattening())
+    close = TradeProposal(action="close", symbol="NVDA", horizon="multi-day")
+
+    assert validate_proposal(close, context) == []
 
 
 def test_a_size_worth_less_than_one_whole_share_is_rejected_with_the_minimum(tmp_path):

@@ -1798,6 +1798,7 @@ def run_cycle(
                 cycle=cycle,
                 stop_price=original_invalidation,
                 proposal_id=proposal_id,
+                config=intraday,
             )
             if trim.order is None or trim.position is None:
                 if trim.failure is not None:
@@ -1845,6 +1846,7 @@ def run_cycle(
                 cycle=cycle,
                 stop_price=original_payload.get("invalidation_price"),
                 proposal_id=proposal_id,
+                config=intraday,
             )
             if close.order is not None:
                 result.orders_submitted.append(close.order.client_order_id)
@@ -2060,6 +2062,7 @@ def _carry_close(
         as_of=as_of,
         cycle="carry",
         stop_price=(payload or {}).get("invalidation_price"),
+        config=intraday,
     )
     if attempt.order is not None:
         record_mechanical_reflection(

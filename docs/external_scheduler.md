@@ -122,6 +122,47 @@ uses the same request settings:
 | `mark` | every 30 min, 10:30-15:30 | `*/30 10-15 * * 1-5` | the 10:00 slot is skipped: nothing to mark before decide runs |
 | `report` | 17:30 | `30 17 * * 1-5` | |
 
+**The broker-side flatten: one job that calls Alpaca, not GitHub** (owner decision
+2026-11-14). On 2026-11-11 a GitHub Actions outage stopped the 14:30 cycle and the 14:45
+carry from starting at all. S4 happened to be flat, but if it hadn't been, only the 14:50
+carry would have been left to close it, and nothing at all had that run failed too. Every
+stop S4 places is a `day` order, so a position left open would have gone overnight with no
+stop. This job doesn't go through GitHub: at 14:55 CT it asks Alpaca to cancel S4's open
+orders and close every position at market. On a normal day carry has already closed
+everything and it does nothing. Because it closes everything, S4 holds nothing overnight:
+`intraday.schedule.broker_flatten_at` in `config/paper.yaml` names this job's time, and
+while it is set the Trader is told so and a multi-day or multi-week entry is rejected.
+The next sync records each close as an exit with reason `broker_flatten` and reflects it,
+and logs an error incident, since both carry runs failed
+(`orders.py::adopt_unrecorded_orders`).
+
+Its request settings differ from the GitHub jobs':
+
+- **URL:** `https://paper-api.alpaca.markets/v2/positions?cancel_orders=true`
+- **Advanced -> Request method:** `DELETE`
+- **Advanced -> Headers:**
+  - `APCA-API-KEY-ID: <S4's key id>`
+  - `APCA-API-SECRET-KEY: <S4's secret key>`
+- **Advanced -> Timezone:** America/Chicago. **Schedule:** `55 14 * * 1-5`.
+- **Notifications:** "notify on failure". Alpaca answers 207 with one entry per position
+  closed, or an empty list when there's nothing to close.
+
+The keys are the ones in the `ALPACA_S4_API_KEY` and `ALPACA_S4_SECRET_KEY` GitHub
+secrets, for account `PA33HJGNHLI7`. GitHub doesn't show a secret again, so they come
+from S4's paper account on Alpaca. If the secret key was never saved, generate new keys
+there and update both GitHub secrets as well. **Never the s0/s3 keys (`.env`):** this job
+would then sell s3's whole portfolio every afternoon. So set the job up as a read first:
+method `GET`, URL `https://paper-api.alpaca.markets/v2/account`, same headers. Run it once
+(cron-job.org's test run, or turn on saving responses and read the job's history), and
+check that `account_number` is `PA33HJGNHLI7`. Only then change the method to `DELETE`
+and the URL to the one above.
+
+On an early-close day (13:00 ET, 12:00 CT) the flatten comes after the bell. By then the
+11:30 cycle's handover has closed everything, so it finds nothing. If something is still
+held, Alpaca most likely queues the closes for the next open, and the next sync records
+them the same way. Market holidays need nothing. A 14:50 carry still running at 14:55
+finds the positions gone and does nothing.
+
 **Why intraday `research` and `open-batch` run twice** (owner, 2026-11-05): the same timeout
 that cost paper its 10:05 run on 11-04 would cost more here, since neither job has a
 GitHub cron to fall back on. With no `research`, the day's watchlist is empty and the
@@ -176,9 +217,9 @@ when the real cycle finds the market closed.
 
 **Two jobs fail on purpose over a position that should have closed** (since 2026-10-31).
 Carry closes at market on the real account, and fails if an exit doesn't go out. The
-14:50 run then retries it, and if that fails too there are about 10 minutes left to act
-by hand. `eod-review` fails if a position with no multi-day thesis is still held after
-the close. Both commit their ledger and report first. A failure email from `eod-review`
+14:50 run then retries it, and if that fails too the 14:55 broker-side flatten closes
+what is left. `eod-review` fails if a position with no multi-day thesis is still held after
+the close, which now means the flatten failed as well. Both commit their ledger and report first. A failure email from `eod-review`
 means an intraday position is going overnight without a stop, so check it before the next
 open. GitHub's late `eod-review` copy fails again if the position is still there.
 
@@ -190,7 +231,7 @@ open. GitHub's late `eod-review` copy fails again if the position is still there
   "first activity (UTC)" column should read about 11:45 (06:45 CT), not 17:29. The monitor
   column should show checks about 30 minutes apart (each cycle records one).
 - **On cron-job.org:** each job's execution history should show HTTP 204. Anything else is
-  a failed trigger.
+  a failed trigger. The broker-side flatten is the exception: it shows 207.
 
 ## The late cron copies
 

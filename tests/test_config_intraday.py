@@ -8,6 +8,8 @@ guards. See config.py's `IntradayConfig` docstring.
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 from pydantic import ValidationError
 
@@ -130,11 +132,29 @@ def test_paper_yaml_loads_intraday_at_rollout_stage_3():
     assert str(cfg.intraday.readiness.t6_started) == "2026-11-16"
     assert cfg.intraday.readiness.t6_counts_from == cfg.intraday.readiness.t6_started
     assert load_config().intraday.readiness.t6_counts_from is None
-    # The daily model-spend cap: five times a normal day (owner rule 2026-11-02), $8 for the
-    # Sonnet Trader; the default stays the brief's.
-    assert cfg.intraday.budget.max_cost_usd_per_day == pytest.approx(8.0)
+    # The daily model-spend cap: five times a normal day (owner rule 2026-11-02), $3.25 on
+    # the Sonnet Trader's first week ($0.65 a day; owner's go 2026-11-22); the default
+    # stays the brief's.
+    assert cfg.intraday.budget.max_cost_usd_per_day == pytest.approx(3.25)
     assert cfg.intraday.schedule.cycle_interval_minutes == 30
     assert cfg.intraday.readiness.max_cycle_gap_minutes == pytest.approx(45.0)
+
+
+def test_paper_yaml_closes_every_s4_position_at_the_broker_at_14_55():
+    """Owner decision 2026-11-14, after GitHub Actions couldn't start the 11-11 carry: a
+    cron-job.org request to Alpaca is the backstop, so S4 holds nothing overnight. The
+    default has none, as the brief has it."""
+    cfg = load_config(PROJECT_ROOT / "config" / "paper.yaml")
+    assert cfg.intraday.schedule.broker_flatten_at == dt.time(14, 55)
+    assert load_config().intraday.schedule.broker_flatten_at is None
+
+
+def test_an_unquoted_flatten_time_is_refused_not_misread():
+    """YAML reads 14:55 as the base-60 integer 895, which pydantic would take as 00:14:55."""
+    with pytest.raises(ValidationError, match="quoted"):
+        load_config(overrides=["intraday.schedule.broker_flatten_at=14:55"])
+    cfg = load_config(overrides=['intraday.schedule.broker_flatten_at="14:55"'])
+    assert cfg.intraday.schedule.broker_flatten_at == dt.time(14, 55)
 
 
 @pytest.mark.parametrize("value", ["0", "1024", "null"])

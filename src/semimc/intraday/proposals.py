@@ -256,6 +256,17 @@ def validate_proposal(proposal: TradeProposal, context: ValidationContext) -> li
                 f"{'a buy' if buying else 'a short'}: it is where the stop goes"
             )
 
+    # The broker-side flatten closes every position before the bell, whatever its thesis
+    # (owner decision 2026-11-14), so a multi-day entry would be closed the same day. No
+    # horizon counts as intraday, as at carry.
+    flatten_at = context.config.schedule.broker_flatten_at
+    if flatten_at is not None and proposal.horizon not in (None, "intraday"):
+        failures.append(
+            f"horizon {proposal.horizon!r}: S4 holds nothing overnight, since every position "
+            f"is closed at the broker at {flatten_at:%H:%M} {context.config.schedule.timezone}; "
+            "use 'intraday'"
+        )
+
     if proposal.action in OPEN_OR_ADD_ACTIONS and proposal.symbol in context.exiting_symbols:
         failures.append(
             f"{proposal.symbol} is being closed this cycle; no new entry until that has filled"

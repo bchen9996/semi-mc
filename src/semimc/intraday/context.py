@@ -104,6 +104,7 @@ TRADER_SECTIONS: dict[str, str] = {
         "correlation with the book"
     ),
     "options_available": "whether option proposals are being priced this cycle",
+    "overnight_holds_allowed": "whether a position may stay open past today's close",
 }
 """What each section of :func:`build_trader_context`'s payload holds, in words: the
 Researcher receives it (`jobs.py::trader_view`) so its triggers name only what the Trader
@@ -187,6 +188,9 @@ def build_trader_context(
         # state): the Trader may propose options and they get priced/gated/logged, even
         # though `enabled` staying False means none of them ever reach a real order.
         "options_available": config.options.shadow_pricing or config.options.enabled,
+        # False while the broker-side flatten closes every position before the bell
+        # (2026-11-14), when `validate_proposal` rejects a multi-day or multi-week entry.
+        "overnight_holds_allowed": config.schedule.broker_flatten_at is None,
     }
     return build_context(
         "trader",

@@ -21,6 +21,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -175,38 +176,61 @@ _ADOPT_LOOKBACK = dt.timedelta(days=4)
 _EXIT_ID = re.compile(r"-exit(?:-r\d+)?$")
 _TRANCHE_ID = re.compile(r"-t(\d+)$")
 
+# The `exit_reason` of a close sent by the broker-side flatten (`schedule.broker_flatten_at`).
+BROKER_FLATTEN = "broker_flatten"
+# How long after `broker_flatten_at` an order S4 didn't send still counts as the flatten's:
+# cron-job.org fires within seconds of the minute, and Alpaca stamps the order on arrival.
+_FLATTEN_WINDOW = dt.timedelta(minutes=5)
+
 
 def _as_utc(moment: dt.datetime) -> dt.datetime:
     return moment.replace(tzinfo=dt.UTC) if moment.tzinfo is None else moment.astimezone(dt.UTC)
 
 
+def _from_broker_flatten(order: Order, config: IntradayConfig | None) -> bool:
+    """Whether ``order``, one S4 didn't send, was sent by the broker-side flatten: in the
+    minutes after `schedule.broker_flatten_at` on the day it was sent. Alpaca gives the
+    flatten's orders its own ids, so the time is all there is to go on."""
+    if config is None or config.schedule.broker_flatten_at is None or order.submitted_at is None:
+        return False
+    local = _as_utc(order.submitted_at).astimezone(ZoneInfo(config.schedule.timezone))
+    start = dt.datetime.combine(local.date(), config.schedule.broker_flatten_at, local.tzinfo)
+    return start <= local < start + _FLATTEN_WINDOW
+
+
 def _adopted_row(
-    order: Order, parent: Order | None, ledger: IntradayLedger
-) -> tuple[str, int | None, int, int]:
-    """The ledger `leg`, `proposal_id` and tranche fields for an order the ledger never
-    recorded, read off its id (`intraday_client_order_id` and its suffixes) and what the
-    ledger already holds. A proposal is linked only where the code that sends such an
-    order would have found the same one; otherwise it stays unknown rather than guessed."""
+    order: Order, parent: Order | None, ledger: IntradayLedger, config: IntradayConfig | None
+) -> tuple[str, int | None, int, int, str | None]:
+    """The ledger `leg`, `proposal_id`, tranche fields and `exit_reason` for an order the
+    ledger never recorded, read off its id (`intraday_client_order_id` and its suffixes)
+    and what the ledger already holds. A proposal is linked only where the code that sends
+    such an order would have found the same one; otherwise it stays unknown rather than
+    guessed. Only the broker-side flatten's close gets an `exit_reason`, so it is the only
+    adopted exit that is reflected: S4's own exit ids don't say why they were sent."""
     if parent is not None:  # an OTO entry's stop leg: its entry's proposal
         row = ledger.get_order(parent.client_order_id)
-        return "stop", row["proposal_id"] if row else None, 1, 1
+        return "stop", row["proposal_id"] if row else None, 1, 1, None
     client_order_id = order.client_order_id
     latest_entry = ledger.latest_filled_entry_for(order.symbol)
     entry_proposal = latest_entry["proposal_id"] if latest_entry else None
     if client_order_id.endswith("::stop"):  # a replacement stop for the position held
-        return "stop", entry_proposal, 1, 1
-    if not client_order_id.startswith("s4-"):  # placed by hand on the account
-        return ("stop" if order.type in ("stop", "stop_limit") else "manual"), None, 1, 1
+        return "stop", entry_proposal, 1, 1, None
+    if not client_order_id.startswith("s4-"):  # the broker-side flatten, or placed by hand
+        if order.type in ("stop", "stop_limit"):
+            return "stop", None, 1, 1, None
+        if _from_broker_flatten(order, config):
+            return "exit", entry_proposal, 1, 1, BROKER_FLATTEN
+        return "manual", None, 1, 1, None
     if _EXIT_ID.search(client_order_id):
-        return "exit", entry_proposal, 1, 1
+        return "exit", entry_proposal, 1, 1, None
     tranche = _TRANCHE_ID.search(client_order_id)
     if tranche is None:  # a first tranche: its proposal was lost with it
-        return "entry", None, 1, 1
+        return "entry", None, 1, 1, None
     index = int(tranche.group(1))
     pending = ledger.pending_tranche_for(order.symbol)
     if pending is None:
-        return "entry", None, index, index
-    return "entry", pending["proposal_id"], index, pending["tranche_total"]
+        return "entry", None, index, index, None
+    return "entry", pending["proposal_id"], index, pending["tranche_total"], None
 
 
 def adopt_unrecorded_orders(
@@ -215,11 +239,13 @@ def adopt_unrecorded_orders(
     now: dt.datetime,
     *,
     symbol: str | None = None,
+    config: IntradayConfig | None = None,
 ) -> list[str]:
     """Records every order the broker took in the last few days that the ledger has no row
     for, with its stop leg and whatever it has filled, and returns their ids (added
     2026-11-06). Every order the code sends is recorded as it goes out, so normally this
-    finds nothing.
+    finds nothing, except on a day the broker-side flatten (`config.schedule.
+    broker_flatten_at`) had something to close.
 
     Found 2026-11-05: GitHub refused the 10:00 CT cycle's push, so its ledger rows were
     lost while its orders were already at Alpaca (LRCX's second tranche with its stop, and
@@ -235,8 +261,14 @@ def adopt_unrecorded_orders(
     (no ``s4-`` id) is recorded too, as leg ``"manual"`` (or ``"stop"``), so that an exit
     cancels it and the fills reconcile, and the incident names it.
 
+    The exception is the flatten's close (added 2026-11-14): an exit with `exit_reason`
+    ``"broker_flatten"``, linked to the position's latest entry like any S4 exit, so the
+    sync that adopts it writes its reflection and T6 counts the trade. It is an error
+    incident of its own, not the lost-push warning: both carry runs left the position open.
+
     `symbol` limits the check to one name (`submit_exit`). A failed lookup is a warning and
-    changes nothing; it is asked again at the next sync.
+    changes nothing; it is asked again at the next sync. Without `config` nothing is read
+    as the flatten's.
     """
     try:
         orders = broker.list_orders_since(_as_utc(now) - _ADOPT_LOOKBACK)
@@ -247,6 +279,7 @@ def adopt_unrecorded_orders(
     orders.sort(key=lambda o: _as_utc(o.submitted_at) if o.submitted_at else oldest)
     adopted: list[str] = []
     described: list[str] = []
+    flattened: list[str] = []
     for top in orders:
         if symbol is not None and top.symbol != symbol:
             continue
@@ -254,7 +287,9 @@ def adopt_unrecorded_orders(
         for order, parent in [(top, None), *((leg, top) for leg in top.legs or [])]:
             if ledger.get_order(order.client_order_id) is not None:
                 continue
-            leg, proposal_id, index, total = _adopted_row(order, parent, ledger)
+            leg, proposal_id, index, total, exit_reason = _adopted_row(
+                order, parent, ledger, config
+            )
             ledger.record_order(
                 order.client_order_id,
                 order.symbol,
@@ -269,20 +304,30 @@ def adopt_unrecorded_orders(
                 leg=leg,
                 tranche_index=index,
                 tranche_total=total,
+                exit_reason=exit_reason,
             )
             record_new_fill(order, ledger, now)
             adopted.append(order.client_order_id)
             size = f"${order.notional:g}" if order.qty is None else f"{order.qty:g}"
             filled = f", {order.filled_qty:g} filled" if order.filled_qty else ""
+            if exit_reason == BROKER_FLATTEN:
+                flattened.append(f"{order.symbol} {order.side} {size} ({order.status}{filled})")
+                continue
             described.append(
                 f"{order.client_order_id} ({order.symbol} {order.side} {size} {leg}, "
                 f"{order.status}{filled}{by_hand})"
             )
-    if adopted:
+    if described:
         ledger.record_incident(
             "warning",
-            f"the broker had {len(adopted)} order(s) the ledger didn't, now recorded "
+            f"the broker had {len(described)} order(s) the ledger didn't, now recorded "
             f"(a lost push?): {'; '.join(described)}",
+        )
+    if flattened:
+        ledger.record_incident(
+            "error",
+            "the broker-side flatten closed what both carry runs left open: "
+            + "; ".join(flattened),
         )
     return adopted
 
@@ -721,6 +766,7 @@ def submit_exit(
     stop_price: float | None,
     proposal_id: int | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    config: IntradayConfig | None = None,
 ) -> ExitAttempt:
     """Closes or trims `symbol` without leaving it unprotected: cancel its stops, wait for
     the cancels to complete, re-read the position, send the exit, and put a stop back if
@@ -754,7 +800,7 @@ def submit_exit(
        rejected exit doesn't leave the position unguarded until the next cycle. A
        missing `stop_price`, or a stop the broker rejects too, is an error incident.
     """
-    adopt_unrecorded_orders(broker, ledger, now, symbol=symbol)
+    adopt_unrecorded_orders(broker, ledger, now, symbol=symbol, config=config)
     canceled = [row["client_order_id"] for row in ledger.open_stop_legs_for(symbol)]
     _cancel_and_settle(ledger.open_orders_for(symbol), broker, ledger, now, sleep)
     still_canceling = ledger.open_orders_for(symbol)
@@ -925,7 +971,7 @@ def sync_open_orders(
       notices the fill, so the cooldown can only run long, never short. The reflection
       is dated `as_of`, the day of the sync that noticed the fill.
     """
-    adopt_unrecorded_orders(broker, ledger, now)
+    adopt_unrecorded_orders(broker, ledger, now, config=config)
     updated: list[str] = []
     filled: list[str] = []
     for row in ledger.open_orders():

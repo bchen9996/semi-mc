@@ -489,6 +489,25 @@ class IntradayScheduleConfig(_Base):
     # (2026-11-02): open-batch fills land about 3 minutes in and a resting limit up to 3
     # minutes later, which left stops just outside 2.
     time_stop_grace_minutes: int = Field(4, ge=0)
+    # When the cron-job.org request that closes every position on S4's account runs, in
+    # `timezone` (docs/external_scheduler.md). It goes to Alpaca, not GitHub, so it still
+    # runs when GitHub Actions can't start anything: on 2026-11-11 the 14:30 cycle and the
+    # 14:45 carry never started (owner decision 2026-11-14). While it is set, S4 holds
+    # nothing overnight: an open or add with a multi-day or multi-week horizon is rejected
+    # (`proposals.py`), and an order S4 didn't send, placed in the minutes after this time,
+    # is recorded as its exit and reflected (`orders.py::adopt_unrecorded_orders`). It
+    # closes options too, so enabling options means deciding this again. `None`: no such
+    # job, and multi-day holds are allowed, as the brief has them.
+    broker_flatten_at: dt.time | None = None
+
+    @field_validator("broker_flatten_at", mode="before")
+    @classmethod
+    def _flatten_time_as_text(cls, value: Any) -> Any:
+        # YAML reads an unquoted 14:55 as the base-60 integer 895, which pydantic would
+        # take as 00:14:55 UTC.
+        if value is not None and not isinstance(value, str | dt.time):
+            raise ValueError('write the time quoted, as in "14:55"')
+        return value
 
 
 class IntradayHedgeConfig(_Base):

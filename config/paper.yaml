@@ -219,11 +219,11 @@ intraday:
   budget:
     max_cost_usd_per_call: 1.0
     # Owner decision 2026-11-02: about five times a normal day ($0.12-0.22 from 10-08 to
-    # 11-02). Checked before each call, so a day can end one call over it. 8.0 from the
-    # 11-16 session, the same rule for the Sonnet Trader: Sonnet costs 20 times Haiku per
-    # token and isn't held to Haiku's thinking cap, so about $1.60 a day is expected (the
-    # Trader was ~$0.06 of a ~$0.24 day). To recalibrate once real days are logged.
-    max_cost_usd_per_day: 8.0
+    # 11-02). Checked before each call, so a day can end one call over it. 8.0 for the
+    # Sonnet Trader's first week, on an estimate of about $1.60 a day; the real days, 11-16
+    # to 11-20, were $0.61-0.68 ($0.65 on average, the Trader $0.49-0.54 of it). 3.25 from
+    # the 11-23 session: the same rule on those days (owner's go 2026-11-22).
+    max_cost_usd_per_day: 3.25
   risk:
     # Stage 3's full budget: every limit is the brief's default. The five count/exposure
     # limits doubled from Stage 2's half (new positions, turnover, gross, net beta,
@@ -252,6 +252,10 @@ intraday:
     timezone: America/Chicago
     cycle_interval_minutes: 30
     time_stop_grace_minutes: 4
+    # cron-job.org closes every position on S4's account at the broker at this time, the
+    # backstop for carry when GitHub Actions is down, so S4 holds nothing overnight (owner
+    # decision 2026-11-14; docs/external_scheduler.md). Quoted: YAML reads 14:55 as 895.
+    broker_flatten_at: "14:55"
   options:
     enabled: false   # both gates unresolved -- see docs/alpaca_notes.md
     shadow_pricing: false   # Stage 4's own switch -- proposed, priced, logged, never traded

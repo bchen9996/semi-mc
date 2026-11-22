@@ -181,6 +181,7 @@ def check_invalidation_and_time_stops(
             cycle=cycle,
             stop_price=invalidation_price,
             proposal_id=entry["proposal_id"],
+            config=config,
         )
         if stopped_out:
             ledger.record_incident("warning", f"stopout:{symbol}")

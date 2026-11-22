@@ -143,7 +143,13 @@ the caveat; restarted with a new Trader model 2026-11-14, see the last two bulle
   and one verdict over both would answer neither question, so the count restarted with
   it: the same measure, threshold and 3- and 6-month spacing, new dates. Like the rule
   itself, this was decided with results in view: the Haiku record below is why the model
-  changed. What it can't move is the rule, fixed before any Sonnet exit.
+  changed. What it can't move is the rule, fixed before any Sonnet exit. From the
+  2026-11-23 session the agent may open intraday trades only (owner's go 2026-11-14,
+  pushed 2026-11-22). A broker-side flatten at 14:55 CT now backs up carry when GitHub
+  Actions is down (2026-11-11), and it closes everything (`docs/external_scheduler.md`).
+  The count doesn't restart for it. No trade had ever been opened on a longer horizon, and
+  no Sonnet proposal from 11-16 to 11-20 named one either, so the agent's choices so far
+  are the same under the rule. A trade the flatten closes is counted like any other exit.
 - **The Haiku Trader's record**, closed (2026-10-15 to 2026-11-13, T6's measure, computed
   2026-11-14; it decides nothing): agent -42.5 bps per exit (standard error 15.4, 55 exits
   over 22 sessions), placebo -59.8 (17.2, 90 exits). Agent minus placebo +17.3 bps,
