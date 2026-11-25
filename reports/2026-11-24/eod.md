@@ -87,7 +87,7 @@ No Reviewer narration today: the Reviewer call failed (reviewer call exited 1: C
 - New positions: 3/6
 - Turnover: 17,309.98 / 151,106.36 cap
 - Invalidation adherence: 100.0%
-- Incidents today: 14
+- Incidents today: 16
 - Calibration (all-time):
   - [0.25, 0.50]: 52.0% win rate, n=25
   - [0.50, 0.75]: 31.1% win rate, n=45
