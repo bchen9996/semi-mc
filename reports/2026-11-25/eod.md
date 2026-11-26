@@ -46,7 +46,7 @@ No Reviewer narration today: nothing to grade today (no proposals and no closed 
 - New positions: 0/6
 - Turnover: 0.00 / 151,206.53 cap
 - Invalidation adherence: not available (no closes today)
-- Incidents today: 18
+- Incidents today: 19
 - Calibration (all-time):
   - [0.25, 0.50]: 52.0% win rate, n=25
   - [0.50, 0.75]: 31.1% win rate, n=45
