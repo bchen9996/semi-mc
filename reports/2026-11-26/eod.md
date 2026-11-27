@@ -39,7 +39,7 @@ No Reviewer narration today: nothing to grade today (no proposals and no closed 
 - Rejection rate: 0.0%
 - New positions: 0/6
 - Invalidation adherence: not available (no closes today)
-- Incidents today: 20
+- Incidents today: 21
 - Calibration (all-time):
   - [0.25, 0.50]: 52.0% win rate, n=25
   - [0.50, 0.75]: 31.1% win rate, n=45
