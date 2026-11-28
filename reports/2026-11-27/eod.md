@@ -33,7 +33,7 @@ No closed positions today.
 
 ## Benchmarks for the day
 - SOXX buy-and-hold, prior close to close: +4.72%
-- SOXX open to close (the session an intraday book can trade): +1.40%
+- SOXX open to close (the session an intraday book can trade): +1.51%
 - S0 control sleeve: +0.00%
 - Placebo (T6 control): 0.00
 - "Do nothing" (the day's entries held untouched to the close): not available
@@ -46,7 +46,7 @@ No Reviewer narration today: nothing to grade today (no proposals and no closed 
 - New positions: 0/6
 - Turnover: 0.00 / 151,206.53 cap
 - Invalidation adherence: not available (no closes today)
-- Incidents today: 21
+- Incidents today: 22
 - Calibration (all-time):
   - [0.25, 0.50]: 52.0% win rate, n=25
   - [0.50, 0.75]: 31.1% win rate, n=45
